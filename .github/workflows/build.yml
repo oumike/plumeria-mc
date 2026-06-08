@@ -1,0 +1,93 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*.*.*']
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: PlatformIO build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: |
+          set -euo pipefail
+          ENVS=(tdeck tlora-pager-tft cardputer-cap heltec-v4 heltec-v4-vertical)
+          BUILT=()
+
+          for env in "${ENVS[@]}"; do
+            if grep -q "^\[env:${env}\]" platformio.ini; then
+              pio run -e "$env"
+              BUILT+=("$env")
+            fi
+          done
+
+          if [ "${#BUILT[@]}" -eq 0 ]; then
+            echo "No supported release envs found in platformio.ini"
+            exit 1
+          fi
+
+          printf "%s\n" "${BUILT[@]}" > built-envs.txt
+
+      - name: Collect artifacts
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF_NAME}
+          PROJECT=plumeria-mc
+          mkdir -p dist
+
+          while IFS= read -r env; do
+            case "$env" in
+              tdeck)
+                suffix=tdeck
+                ;;
+              tlora-pager-tft)
+                suffix=tlora-pager-tft
+                ;;
+              cardputer-cap)
+                suffix=cardputer-cap
+                ;;
+              heltec-v4)
+                suffix=heltec
+                ;;
+              heltec-v4-vertical)
+                suffix=heltec-vertical
+                ;;
+              *)
+                suffix="$env"
+                ;;
+            esac
+
+            cp ".pio/build/$env/firmware.bin" "dist/${PROJECT}-${suffix}-${TAG}.bin"
+            cp ".pio/build/$env/firmware.elf" "dist/${PROJECT}-${suffix}-${TAG}.elf"
+            cp ".pio/build/$env/firmware.map" "dist/${PROJECT}-${suffix}-${TAG}.map" 2>/dev/null || true
+          done < built-envs.txt
+
+      - name: Create draft release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            dist/*.bin
+            dist/*.elf
+            dist/*.map
