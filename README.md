@@ -9,7 +9,7 @@ This firmware is currently **standalone-only** (no companion transport mode).
 ## Targets
 
 - `tlora-pager-tft` (active/default)
-- `tdeck` (placeholder)
+- `tdeck` (board + radio + display + basic trackball input wired)
 - `cardputer-cap` (placeholder)
 - `heltec-v4` (placeholder)
 - `heltec-v4-vertical` (placeholder)
@@ -47,8 +47,8 @@ LVGL is included as a project dependency and initialized in firmware startup.
 The firmware now uses a modular standalone structure:
 
 - `src/mesh/mesh_adapter.*`: standalone MeshCore boundary (identity load, radio init, mesh loop, send APIs).
-- `src/hal/tlora_pager_board.*`: tlora-pager hardware + radio pin/radio defaults.
-- `src/hal/tlora_pager_lvgl.*`: LVGL display + input driver bridge for tlora-pager.
+- `src/hal/device_board.*`: board abstraction + per-device radio pin/radio defaults.
+- `src/hal/device_lvgl.*`: LVGL display + input driver bridge with per-device mappings.
 - `src/ui/standalone_ui.*`: unique LVGL shell for on-device operation.
 - `src/config/features.h`: feature toggles (companion disabled by design).
 

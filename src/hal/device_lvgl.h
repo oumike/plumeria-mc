@@ -3,7 +3,7 @@
 namespace plumeria {
 namespace hal {
 
-class TloraPagerLvgl {
+class DeviceLvgl {
  public:
   bool begin();
   void loop();

@@ -29,6 +29,24 @@ namespace {
 #endif
 
 #if defined(DEVICE_TDECK)
+#ifndef BOARD_POWERON
+#define BOARD_POWERON 10
+#endif
+#else
+#ifndef BOARD_POWERON
+#define BOARD_POWERON -1
+#endif
+#endif
+
+#ifndef BOARD_VEXT_ENABLE
+#define BOARD_VEXT_ENABLE -1
+#endif
+
+#ifndef BOARD_VEXT_ON_LEVEL
+#define BOARD_VEXT_ON_LEVEL HIGH
+#endif
+
+#if defined(DEVICE_TDECK)
 #ifndef P_LORA_SCLK
 #define P_LORA_SCLK 40
 #endif
@@ -80,6 +98,18 @@ namespace plumeria {
 namespace hal {
 
 bool DeviceBoard::begin() {
+  #if (BOARD_POWERON >= 0)
+  pinMode(BOARD_POWERON, OUTPUT);
+  digitalWrite(BOARD_POWERON, HIGH);
+  delay(20);
+  #endif
+
+  #if (BOARD_VEXT_ENABLE >= 0)
+  pinMode(BOARD_VEXT_ENABLE, OUTPUT);
+  digitalWrite(BOARD_VEXT_ENABLE, BOARD_VEXT_ON_LEVEL);
+  delay(20);
+  #endif
+
   #if defined(DEVICE_TDECK)
   Serial.println("[HAL] T-Deck board boot scaffold initialized");
   #else

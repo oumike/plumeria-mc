@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "hal/tlora_pager_board.h"
+#include "hal/device_board.h"
 
 namespace plumeria {
 namespace mesh {
@@ -29,11 +29,13 @@ struct MeshRuntime;
 
 class MeshAdapter {
  public:
-  bool begin(const hal::TloraPagerRadioConfig& radio_config);
+  bool begin(const hal::RadioConfig& radio_config);
   void loop();
 
   bool sendDirectMessage(const char* destination, const char* text);
   bool sendChannelMessage(const char* channel_name, const char* text);
+  bool setNodeName(const char* node_name);
+  void getNodeName(char* out_name, size_t out_size) const;
   int exportChannels(char names[][32], int max_names);
   bool addChannel(const char* channel_name, const char* psk_base64 = nullptr);
   bool removeChannel(const char* channel_name);

@@ -5,7 +5,7 @@
 namespace plumeria {
 namespace hal {
 
-struct TloraPagerRadioConfig {
+struct RadioConfig {
   float frequency_mhz;
   float bandwidth_khz;
   uint8_t spreading_factor;
@@ -22,11 +22,11 @@ struct TloraPagerRadioConfig {
   int8_t radio_busy;
 };
 
-class TloraPagerBoard {
+class DeviceBoard {
  public:
   bool begin();
   void loop();
-  TloraPagerRadioConfig defaultRadioConfig() const;
+  RadioConfig defaultRadioConfig() const;
 };
 
 }  // namespace hal
