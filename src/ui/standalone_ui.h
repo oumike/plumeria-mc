@@ -15,6 +15,7 @@ class StandaloneUi {
   void attachMeshAdapter(mesh::MeshAdapter* adapter);
   void setChannels(const char names[][32], size_t count);
   void setMeshReady(bool ready);
+  void setWifiState(bool config_server_on, bool sta_connected, bool ap_mode);
   void applyEvent(const mesh::MeshEvent& event);
 
  private:
@@ -33,7 +34,8 @@ class StandaloneUi {
   };
 
   static constexpr uint8_t kChannelCount = 40;
-  static constexpr uint8_t kShortcutCount = 5;
+  static constexpr uint8_t kShortcutCount = 4;
+  static constexpr uint8_t kCfgRowCount = 6;
   static constexpr size_t kMaxChatRows = 96;
   static constexpr size_t kMaxStoredChatRows = 128;
 
@@ -56,6 +58,14 @@ class StandaloneUi {
   void openComposeDialog();
   void closeComposeDialog(bool restore_chat_focus);
   bool handleComposeKey(uint32_t key);
+  void openCfgDialog();
+  void closeCfgDialog(bool focus_chat = false);
+  void refreshCfgDialog();
+  void moveCfgSelection(int delta);
+  void activateCfgSelection();
+  bool setGpsAdvertEnabled(bool enabled);
+  bool exportConfigToSd();
+  bool importConfigFromSd();
   bool sendComposeMessage();
   void scrollChatUp();
   void scrollChatDown();
@@ -94,6 +104,7 @@ class StandaloneUi {
   lv_obj_t* channel_dropdown_labels_[kChannelCount]{};
   lv_obj_t* gps_label_ = nullptr;
   lv_obj_t* wifi_label_ = nullptr;
+  lv_obj_t* wifi_ap_badge_label_ = nullptr;
   lv_obj_t* time_label_ = nullptr;
   lv_obj_t* battery_pct_label_ = nullptr;
   lv_obj_t* battery_bar_ = nullptr;
@@ -104,6 +115,12 @@ class StandaloneUi {
   lv_obj_t* compose_dialog_ = nullptr;
   lv_obj_t* compose_title_label_ = nullptr;
   lv_obj_t* compose_input_ = nullptr;
+  lv_obj_t* cfg_dialog_ = nullptr;
+  lv_obj_t* cfg_title_label_ = nullptr;
+  lv_obj_t* cfg_action_label_ = nullptr;
+  lv_obj_t* cfg_status_label_ = nullptr;
+  lv_obj_t* cfg_rows_[kCfgRowCount]{};
+  lv_obj_t* cfg_row_labels_[kCfgRowCount]{};
 
   lv_obj_t* shortcut_strip_ = nullptr;
   lv_obj_t* shortcut_btns_[kShortcutCount]{};
@@ -135,9 +152,14 @@ class StandaloneUi {
   bool started_ = false;
   bool channel_dropdown_open_ = false;
   bool compose_open_ = false;
+  bool cfg_open_ = false;
+  bool cfg_import_confirm_armed_ = false;
   uint8_t pending_chat_focus_attempts_ = 0;
   uint8_t dropdown_highlight_channel_ = 0;
+  uint8_t cfg_selected_row_ = 0;
   uint32_t last_selector_action_ms_ = 0;
+  char cfg_action_text_[48]{};
+  char cfg_status_text_[96]{};
 
   FocusZone focus_zone_ = FocusZone::Selector;
   uint8_t selected_channel_ = 0;
@@ -167,6 +189,8 @@ class StandaloneUi {
   bool mesh_ready_ = false;
   bool gps_ok_ = false;
   bool wifi_ok_ = false;
+  bool wifi_config_server_on_ = false;
+  bool wifi_ap_mode_ = false;
   uint8_t battery_pct_ = 100;
 
   uint32_t last_clock_update_ms_ = 0;

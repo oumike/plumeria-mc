@@ -1,10 +1,8 @@
 #include "mesh/mesh_adapter.h"
 
 #include <Arduino.h>
-#include <FS.h>
 #include <Preferences.h>
 #include <SPI.h>
-#include <SPIFFS.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,7 +10,6 @@
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/BaseChatMesh.h>
 #include <helpers/ESP32Board.h>
-#include <helpers/IdentityStore.h>
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/radiolib/CustomSX1262.h>
@@ -23,7 +20,6 @@ namespace {
 constexpr char kDefaultNodeName[] = "Plumeria";
 constexpr char kPublicChannelName[] = "Public";
 constexpr char kPublicChannelPsk[] = "izOH6cXN6mrJ5e26oRXNcg==";
-constexpr char kLegacyDefaultChannelToRemove[] = "#rhino";
 
 constexpr uint32_t kSendTimeoutBaseMs = 500;
 constexpr float kFloodSendTimeoutFactor = 16.0f;
@@ -33,9 +29,10 @@ constexpr uint32_t kDirectSendPerHopExtraMs = 250;
 constexpr uint32_t kAutoAdvertMs = 120000;
 constexpr uint32_t kPersistFlushMs = 5000;
 
-constexpr char kContactsPath[] = "/mesh_contacts.bin";
-constexpr char kChannelsPath[] = "/mesh_channels.bin";
 constexpr char kMeshPrefsNs[] = "mesh_store";
+constexpr char kIdentityBlobKey[] = "identity_blob";
+constexpr char kContactsCountKey[] = "contacts_cnt";
+constexpr char kContactsBlobKey[] = "contacts_blob";
 constexpr char kChannelsCountKey[] = "channels_cnt";
 constexpr char kChannelsBlobKey[] = "channels_blob";
 
@@ -58,7 +55,8 @@ struct PersistedChannel {
 };
 
 PersistedChannel g_channels_nvs_buf[MAX_GROUP_CHANNELS]{};
-PersistedChannel g_channels_fs_buf[MAX_GROUP_CHANNELS]{};
+PersistedContact g_contacts_nvs_buf[MAX_CONTACTS + MAX_ANON_CONTACTS]{};
+ChannelDetails g_channel_rollback_snapshot[MAX_GROUP_CHANNELS]{};
 
 size_t encodeBase64(const uint8_t* src, size_t src_len, char* out, size_t out_size) {
   static const char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -104,6 +102,61 @@ size_t encodeBase64(const uint8_t* src, size_t src_len, char* out, size_t out_si
   return o;
 }
 
+bool bytesToHex(const uint8_t* src, size_t src_len, char* out, size_t out_size) {
+  if (!src || !out || out_size == 0) {
+    return false;
+  }
+
+  const size_t needed = src_len * 2 + 1;
+  if (out_size < needed) {
+    out[0] = '\0';
+    return false;
+  }
+
+  static const char kHex[] = "0123456789abcdef";
+  for (size_t i = 0; i < src_len; i++) {
+    out[i * 2] = kHex[(src[i] >> 4) & 0x0F];
+    out[i * 2 + 1] = kHex[src[i] & 0x0F];
+  }
+  out[src_len * 2] = '\0';
+  return true;
+}
+
+int hexNibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return 10 + (c - 'a');
+  }
+  if (c >= 'A' && c <= 'F') {
+    return 10 + (c - 'A');
+  }
+  return -1;
+}
+
+bool hexToBytes(const char* hex, uint8_t* out, size_t out_len) {
+  if (!hex || !out || out_len == 0) {
+    return false;
+  }
+
+  const size_t expected = out_len * 2;
+  if (strlen(hex) != expected) {
+    return false;
+  }
+
+  for (size_t i = 0; i < out_len; i++) {
+    const int hi = hexNibble(hex[i * 2]);
+    const int lo = hexNibble(hex[i * 2 + 1]);
+    if (hi < 0 || lo < 0) {
+      return false;
+    }
+    out[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+
+  return true;
+}
+
 int loadChannelsSnapshotFromNvs(PersistedChannel* out_channels, int max_channels) {
   if (!out_channels || max_channels <= 0) {
     return 0;
@@ -115,10 +168,16 @@ int loadChannelsSnapshotFromNvs(PersistedChannel* out_channels, int max_channels
     return 0;
   }
 
+  uint16_t saved_count = prefs.getUShort(kChannelsCountKey, 0);
+
   // Prefer compact blob format when present.
   const size_t blob_len = prefs.getBytesLength(kChannelsBlobKey);
   if (blob_len >= sizeof(PersistedChannel)) {
     const int blob_count = static_cast<int>(blob_len / sizeof(PersistedChannel));
+    if (saved_count > 0 && blob_count != static_cast<int>(saved_count)) {
+      Serial.printf("[PERSIST][CH] blob/count mismatch blob=%d count=%u, fallback keyset\n", blob_count,
+                    static_cast<unsigned>(saved_count));
+    } else {
     const int capped_blob_count = blob_count > max_channels ? max_channels : blob_count;
     const size_t to_read = static_cast<size_t>(capped_blob_count) * sizeof(PersistedChannel);
 
@@ -139,9 +198,9 @@ int loadChannelsSnapshotFromNvs(PersistedChannel* out_channels, int max_channels
       Serial.printf("[PERSIST][CH] NVS blob loaded=%d raw=%d\n", loaded, capped_blob_count);
       return loaded;
     }
+    }
   }
 
-  uint16_t saved_count = prefs.getUShort(kChannelsCountKey, 0);
   if (saved_count == 0) {
     prefs.end();
     Serial.println("[PERSIST][CH] NVS empty (count=0)");
@@ -186,32 +245,101 @@ int loadChannelsSnapshotFromNvs(PersistedChannel* out_channels, int max_channels
   return loaded;
 }
 
-int loadChannelsSnapshotFromFs(PersistedChannel* out_channels, int max_channels) {
-  if (!out_channels || max_channels <= 0) {
+int loadContactsSnapshotFromNvs(PersistedContact* out_contacts, int max_contacts) {
+  if (!out_contacts || max_contacts <= 0) {
     return 0;
   }
 
-  File file = SPIFFS.open(kChannelsPath, "r");
-  if (!file) {
-    Serial.println("[PERSIST][CH] FS open failed for read");
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, true)) {
+    Serial.println("[PERSIST][CT] NVS open failed for read");
     return 0;
   }
 
-  int loaded = 0;
-  PersistedChannel record{};
-  while (loaded < max_channels && file.available() >= static_cast<int>(sizeof(record))) {
-    if (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) != sizeof(record)) {
-      break;
-    }
-    if (record.name[0] == '\0') {
-      continue;
-    }
-    out_channels[loaded++] = record;
+  const size_t blob_len = prefs.getBytesLength(kContactsBlobKey);
+  if (blob_len < sizeof(PersistedContact)) {
+    prefs.end();
+    return 0;
   }
 
-  file.close();
-  Serial.printf("[PERSIST][CH] FS loaded=%d\n", loaded);
+  int count = static_cast<int>(blob_len / sizeof(PersistedContact));
+  const uint16_t declared = prefs.getUShort(kContactsCountKey, static_cast<uint16_t>(count));
+  if (declared > 0 && declared < static_cast<uint16_t>(count)) {
+    count = declared;
+  }
+  if (count > max_contacts) {
+    count = max_contacts;
+  }
+
+  const size_t to_read = static_cast<size_t>(count) * sizeof(PersistedContact);
+  memset(out_contacts, 0, static_cast<size_t>(max_contacts) * sizeof(PersistedContact));
+  const size_t got = prefs.getBytes(kContactsBlobKey, out_contacts, to_read);
+  prefs.end();
+
+  const int loaded = static_cast<int>(got / sizeof(PersistedContact));
+  Serial.printf("[PERSIST][CT] NVS loaded=%d declared=%u\n", loaded, static_cast<unsigned>(declared));
   return loaded;
+}
+
+bool loadIdentityFromNvs(::mesh::LocalIdentity* identity) {
+  if (!identity) {
+    return false;
+  }
+
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, true)) {
+    Serial.println("[PERSIST][ID] NVS open failed for read");
+    return false;
+  }
+
+  const size_t blob_len = prefs.getBytesLength(kIdentityBlobKey);
+  if (blob_len != PRV_KEY_SIZE && blob_len != (PRV_KEY_SIZE + PUB_KEY_SIZE)) {
+    prefs.end();
+    return false;
+  }
+
+  uint8_t blob[PRV_KEY_SIZE + PUB_KEY_SIZE] = {};
+  const size_t got = prefs.getBytes(kIdentityBlobKey, blob, blob_len);
+  prefs.end();
+  if (got != blob_len) {
+    return false;
+  }
+
+  identity->readFrom(blob, got);
+  if (identity->pub_key[0] == 0x00 || identity->pub_key[0] == 0xFF) {
+    return false;
+  }
+
+  Serial.println("[PERSIST][ID] loaded from NVS");
+  return true;
+}
+
+bool saveIdentityToNvs(::mesh::LocalIdentity* identity) {
+  if (!identity) {
+    return false;
+  }
+
+  uint8_t blob[PRV_KEY_SIZE + PUB_KEY_SIZE] = {};
+  const size_t blob_len = identity->writeTo(blob, sizeof(blob));
+  if (blob_len != PRV_KEY_SIZE && blob_len != (PRV_KEY_SIZE + PUB_KEY_SIZE)) {
+    return false;
+  }
+
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, false)) {
+    Serial.println("[PERSIST][ID] NVS open failed for write");
+    return false;
+  }
+
+  const size_t wrote = prefs.putBytes(kIdentityBlobKey, blob, blob_len);
+  prefs.end();
+  if (wrote != blob_len) {
+    Serial.println("[PERSIST][ID] NVS write failed");
+    return false;
+  }
+
+  Serial.println("[PERSIST][ID] saved to NVS");
+  return true;
 }
 
 int applyChannelSnapshot(BaseChatMesh* mesh, const PersistedChannel* channels, int channel_count) {
@@ -278,7 +406,11 @@ class StandaloneChatMesh : public BaseChatMesh {
                      ::mesh::PacketManager& packet_manager,
                      ::mesh::MeshTables& mesh_tables,
                      MeshAdapter* adapter)
-      : BaseChatMesh(radio, millis_clock, rng, rtc_clock, packet_manager, mesh_tables), adapter_(adapter) {
+      : BaseChatMesh(radio, millis_clock, rng, rtc_clock, packet_manager, mesh_tables),
+        adapter_(adapter),
+        advert_location_enabled_(false),
+        advert_lat_(0.0),
+        advert_lon_(0.0) {
     strncpy(node_name_, kDefaultNodeName, sizeof(node_name_) - 1);
     node_name_[sizeof(node_name_) - 1] = '\0';
   }
@@ -402,9 +534,48 @@ class StandaloneChatMesh : public BaseChatMesh {
   }
 
   void broadcastSelfAdvert() {
-    ::mesh::Packet* packet = createSelfAdvert(node_name_);
+    ::mesh::Packet* packet = nullptr;
+    if (advert_location_enabled_ && advert_lat_ >= -90.0 && advert_lat_ <= 90.0 &&
+        advert_lon_ >= -180.0 && advert_lon_ <= 180.0) {
+      packet = createSelfAdvert(node_name_, advert_lat_, advert_lon_);
+    }
+    if (!packet) {
+      packet = createSelfAdvert(node_name_);
+    }
     if (packet) {
       sendZeroHop(packet);
+    }
+  }
+
+  void broadcastSelfAdvertFlood() {
+    ::mesh::Packet* packet = nullptr;
+    if (advert_location_enabled_ && advert_lat_ >= -90.0 && advert_lat_ <= 90.0 &&
+        advert_lon_ >= -180.0 && advert_lon_ <= 180.0) {
+      packet = createSelfAdvert(node_name_, advert_lat_, advert_lon_);
+    }
+    if (!packet) {
+      packet = createSelfAdvert(node_name_);
+    }
+    if (packet) {
+      sendFlood(packet);
+    }
+  }
+
+  void setAdvertLocation(bool enabled, double latitude, double longitude) {
+    advert_location_enabled_ = enabled;
+    advert_lat_ = latitude;
+    advert_lon_ = longitude;
+  }
+
+  void getAdvertLocation(bool* enabled, double* latitude, double* longitude) const {
+    if (enabled) {
+      *enabled = advert_location_enabled_;
+    }
+    if (latitude) {
+      *latitude = advert_lat_;
+    }
+    if (longitude) {
+      *longitude = advert_lon_;
     }
   }
 
@@ -629,7 +800,7 @@ class StandaloneChatMesh : public BaseChatMesh {
       return false;
     }
 
-    // Mirror Sigurd/MeshCore behavior: normalize to #name and derive secret via SHA-256(name).
+    // Normalize to #name and derive secret via SHA-256(name).
     char normalized[32] = {};
     size_t src = 0;
     while (name[src] == ' ' || name[src] == '\t') {
@@ -668,6 +839,9 @@ class StandaloneChatMesh : public BaseChatMesh {
 
   MeshAdapter* adapter_;
   char node_name_[32];
+  bool advert_location_enabled_;
+  double advert_lat_;
+  double advert_lon_;
 };
 
 struct MeshRuntime {
@@ -695,16 +869,6 @@ struct MeshRuntime {
 bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
   if (ready_) {
     return true;
-  }
-
-  if (!SPIFFS.begin(false)) {
-    Serial.println("[PERSIST][FS] SPIFFS mount failed (no format)");
-    if (!SPIFFS.begin(true)) {
-      queueInfo("SPIFFS mount failed");
-      return false;
-    }
-    Serial.println("[PERSIST][FS] SPIFFS formatted after mount failure");
-    queueInfo("SPIFFS reformatted after mount failure");
   }
 
   runtime_ = new MeshRuntime();
@@ -758,9 +922,7 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
 
   runtime_->mesh->setNodeName(kDefaultNodeName);
 
-  IdentityStore store(SPIFFS, "/identity");
-  store.begin();
-  if (!store.load("_main", runtime_->mesh->self_id)) {
+  if (!loadIdentityFromNvs(&runtime_->mesh->self_id)) {
     runtime_->mesh->self_id = ::mesh::LocalIdentity(&runtime_->fast_rng);
     int attempts = 0;
     while (attempts < 10 &&
@@ -768,8 +930,11 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
       runtime_->mesh->self_id = ::mesh::LocalIdentity(&runtime_->fast_rng);
       attempts++;
     }
-    store.save("_main", runtime_->mesh->self_id);
-    queueInfo("Generated new mesh identity");
+    if (saveIdentityToNvs(&runtime_->mesh->self_id)) {
+      queueInfo("Generated new mesh identity");
+    } else {
+      queueInfo("Generated new mesh identity (NVS save failed)");
+    }
   } else {
     queueInfo("Loaded mesh identity");
   }
@@ -789,11 +954,6 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
       markChannelsDirty();
       queueInfo("Added missing default channel: Public");
     }
-  }
-
-  if (runtime_->mesh->removeChannelByName(kLegacyDefaultChannelToRemove)) {
-    markChannelsDirty();
-    queueInfo("Removed legacy default channel: #rhino");
   }
 
   if (channels_dirty_) {
@@ -894,8 +1054,6 @@ void MeshAdapter::getNodeName(char* out_name, size_t out_size) const {
 
   out_name[0] = '\0';
   if (!ready_ || !runtime_ || !runtime_->mesh) {
-    strncpy(out_name, kDefaultNodeName, out_size - 1);
-    out_name[out_size - 1] = '\0';
     return;
   }
 
@@ -905,6 +1063,72 @@ void MeshAdapter::getNodeName(char* out_name, size_t out_size) const {
   }
   strncpy(out_name, name, out_size - 1);
   out_name[out_size - 1] = '\0';
+}
+
+bool MeshAdapter::getPublicKeyHex(char* out_hex, size_t out_size) const {
+  if (!out_hex || out_size == 0) {
+    return false;
+  }
+
+  out_hex[0] = '\0';
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    return false;
+  }
+
+  return bytesToHex(runtime_->mesh->self_id.pub_key, PUB_KEY_SIZE, out_hex, out_size);
+}
+
+bool MeshAdapter::setAdvertLocation(bool enabled, double latitude, double longitude) {
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    return false;
+  }
+
+  if (enabled) {
+    if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+      return false;
+    }
+  }
+
+  runtime_->mesh->setAdvertLocation(enabled, latitude, longitude);
+  return true;
+}
+
+void MeshAdapter::getAdvertLocation(bool* enabled, double* latitude, double* longitude) const {
+  if (enabled) {
+    *enabled = false;
+  }
+  if (latitude) {
+    *latitude = 0.0;
+  }
+  if (longitude) {
+    *longitude = 0.0;
+  }
+
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    return;
+  }
+
+  runtime_->mesh->getAdvertLocation(enabled, latitude, longitude);
+}
+
+bool MeshAdapter::broadcastSelfAdvertNow() {
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    return false;
+  }
+
+  runtime_->mesh->broadcastSelfAdvert();
+  last_advert_ms_ = millis();
+  return true;
+}
+
+bool MeshAdapter::broadcastSelfAdvertFloodNow() {
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    return false;
+  }
+
+  runtime_->mesh->broadcastSelfAdvertFlood();
+  last_advert_ms_ = millis();
+  return true;
 }
 
 int MeshAdapter::exportChannels(char names[][32], int max_names) {
@@ -930,6 +1154,138 @@ int MeshAdapter::exportChannels(char names[][32], int max_names) {
   return exported;
 }
 
+int MeshAdapter::exportChannelConfigs(MeshChannelConfig configs[], int max_configs) const {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !configs || max_configs <= 0) {
+    return 0;
+  }
+
+  int exported = 0;
+  ChannelDetails channel{};
+  for (int i = 0; i < MAX_GROUP_CHANNELS && exported < max_configs; i++) {
+    if (!runtime_->mesh->getChannel(i, channel)) {
+      continue;
+    }
+    if (channel.name[0] == '\0') {
+      continue;
+    }
+
+    MeshChannelConfig cfg{};
+    strncpy(cfg.name, channel.name, sizeof(cfg.name) - 1);
+    cfg.name[sizeof(cfg.name) - 1] = '\0';
+
+    size_t secret_len = sizeof(channel.channel.secret);
+    bool upper_zero = true;
+    for (size_t j = 16; j < sizeof(channel.channel.secret); j++) {
+      if (channel.channel.secret[j] != 0) {
+        upper_zero = false;
+        break;
+      }
+    }
+    if (upper_zero) {
+      secret_len = 16;
+    }
+
+    if (encodeBase64(channel.channel.secret, secret_len, cfg.psk_base64, sizeof(cfg.psk_base64)) == 0) {
+      continue;
+    }
+
+    configs[exported++] = cfg;
+  }
+
+  return exported;
+}
+
+int MeshAdapter::exportContacts(MeshContactSummary contacts[], int max_contacts) const {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !contacts || max_contacts <= 0) {
+    return 0;
+  }
+
+  int exported = 0;
+  ContactInfo contact{};
+  for (int i = 0; i < runtime_->mesh->getNumContacts() && exported < max_contacts; i++) {
+    if (!runtime_->mesh->getContactByIdx(static_cast<uint32_t>(i), contact)) {
+      continue;
+    }
+
+    MeshContactSummary summary{};
+    if (contact.name[0] != '\0') {
+      strncpy(summary.name, contact.name, sizeof(summary.name) - 1);
+      summary.name[sizeof(summary.name) - 1] = '\0';
+    } else {
+      strncpy(summary.name, "(unnamed)", sizeof(summary.name) - 1);
+      summary.name[sizeof(summary.name) - 1] = '\0';
+    }
+
+    if (!bytesToHex(contact.id.pub_key, PUB_KEY_SIZE, summary.public_key_hex, sizeof(summary.public_key_hex))) {
+      continue;
+    }
+
+    summary.favorite = (contact.flags & 0x01U) != 0;
+    summary.type = contact.type;
+    summary.lastmod = contact.lastmod;
+    contacts[exported++] = summary;
+  }
+
+  return exported;
+}
+
+bool MeshAdapter::setContactFavoriteByPublicKeyHex(const char* public_key_hex, bool favorite) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !public_key_hex) {
+    return false;
+  }
+
+  uint8_t pub_key[PUB_KEY_SIZE] = {};
+  if (!hexToBytes(public_key_hex, pub_key, sizeof(pub_key))) {
+    return false;
+  }
+
+  ContactInfo* contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (!contact) {
+    return false;
+  }
+
+  if (favorite) {
+    contact->flags |= 0x01U;
+  } else {
+    contact->flags &= static_cast<uint8_t>(~0x01U);
+  }
+  contact->lastmod = runtime_->rtc_clock.getCurrentTimeUnique();
+
+  markContactsDirty();
+  if (!saveContactsToFs()) {
+    return false;
+  }
+  contacts_dirty_ = false;
+  return true;
+}
+
+bool MeshAdapter::removeContactByPublicKeyHex(const char* public_key_hex) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !public_key_hex) {
+    return false;
+  }
+
+  uint8_t pub_key[PUB_KEY_SIZE] = {};
+  if (!hexToBytes(public_key_hex, pub_key, sizeof(pub_key))) {
+    return false;
+  }
+
+  ContactInfo* contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (!contact) {
+    return false;
+  }
+
+  if (!runtime_->mesh->removeContact(*contact)) {
+    return false;
+  }
+
+  markContactsDirty();
+  if (!saveContactsToFs()) {
+    return false;
+  }
+  contacts_dirty_ = false;
+  return true;
+}
+
 bool MeshAdapter::addChannel(const char* channel_name, const char* psk_base64) {
   if (!ready_ || !runtime_ || !runtime_->mesh || !channel_name || channel_name[0] == '\0') {
     return false;
@@ -937,9 +1293,8 @@ bool MeshAdapter::addChannel(const char* channel_name, const char* psk_base64) {
 
   Serial.printf("[PERSIST][CH] add request name=%s\n", channel_name);
 
-  ChannelDetails before[MAX_GROUP_CHANNELS]{};
   for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-    runtime_->mesh->getChannel(i, before[i]);
+    runtime_->mesh->getChannel(i, g_channel_rollback_snapshot[i]);
   }
 
   if (!runtime_->mesh->upsertChannel(channel_name, psk_base64)) {
@@ -950,7 +1305,7 @@ bool MeshAdapter::addChannel(const char* channel_name, const char* psk_base64) {
   if (!saveChannelsToFs()) {
     Serial.printf("[PERSIST][CH] add persist failed name=%s\n", channel_name);
     for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-      runtime_->mesh->setChannel(i, before[i]);
+      runtime_->mesh->setChannel(i, g_channel_rollback_snapshot[i]);
     }
     channels_dirty_ = false;
     return false;
@@ -967,9 +1322,8 @@ bool MeshAdapter::removeChannel(const char* channel_name) {
 
   Serial.printf("[PERSIST][CH] remove request name=%s\n", channel_name);
 
-  ChannelDetails before[MAX_GROUP_CHANNELS]{};
   for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-    runtime_->mesh->getChannel(i, before[i]);
+    runtime_->mesh->getChannel(i, g_channel_rollback_snapshot[i]);
   }
 
   if (!runtime_->mesh->removeChannelByName(channel_name)) {
@@ -980,7 +1334,7 @@ bool MeshAdapter::removeChannel(const char* channel_name) {
   if (!saveChannelsToFs()) {
     Serial.printf("[PERSIST][CH] remove persist failed name=%s\n", channel_name);
     for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-      runtime_->mesh->setChannel(i, before[i]);
+      runtime_->mesh->setChannel(i, g_channel_rollback_snapshot[i]);
     }
     channels_dirty_ = false;
     return false;
@@ -1074,18 +1428,14 @@ void MeshAdapter::markChannelsDirty() {
 }
 
 bool MeshAdapter::loadContactsFromFs() {
-  File file = SPIFFS.open(kContactsPath, "r");
-  if (!file) {
+  const int available = loadContactsSnapshotFromNvs(g_contacts_nvs_buf, MAX_CONTACTS + MAX_ANON_CONTACTS);
+  if (available <= 0) {
     return false;
   }
 
   int loaded = 0;
-  PersistedContact record{};
-  while (file.available() >= static_cast<int>(sizeof(record))) {
-    if (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) != sizeof(record)) {
-      break;
-    }
-
+  for (int i = 0; i < available; i++) {
+    const PersistedContact& record = g_contacts_nvs_buf[i];
     ContactInfo contact{};
     contact.id = ::mesh::Identity(record.pub_key);
     strncpy(contact.name, record.name, sizeof(contact.name) - 1);
@@ -1106,8 +1456,6 @@ bool MeshAdapter::loadContactsFromFs() {
     }
   }
 
-  file.close();
-
   if (loaded > 0) {
     char info[96];
     snprintf(info, sizeof(info), "Loaded %d contacts", loaded);
@@ -1117,20 +1465,20 @@ bool MeshAdapter::loadContactsFromFs() {
 }
 
 bool MeshAdapter::saveContactsToFs() {
-  File file = SPIFFS.open(kContactsPath, "w", true);
-  if (!file) {
-    queueInfo("Failed to save contacts");
-    return false;
-  }
+  int persisted = 0;
+  memset(g_contacts_nvs_buf, 0, sizeof(g_contacts_nvs_buf));
 
-  int saved = 0;
   ContactInfo contact{};
   for (int i = 0; i < runtime_->mesh->getNumContacts(); i++) {
+    if (persisted >= (MAX_CONTACTS + MAX_ANON_CONTACTS)) {
+      break;
+    }
+
     if (!runtime_->mesh->getContactByIdx(static_cast<uint32_t>(i), contact)) {
       continue;
     }
 
-    PersistedContact record{};
+    PersistedContact& record = g_contacts_nvs_buf[persisted];
     memcpy(record.pub_key, contact.id.pub_key, sizeof(record.pub_key));
     strncpy(record.name, contact.name, sizeof(record.name) - 1);
     record.type = contact.type;
@@ -1141,85 +1489,68 @@ bool MeshAdapter::saveContactsToFs() {
     record.lastmod = contact.lastmod;
     record.gps_lat = contact.gps_lat;
     record.gps_lon = contact.gps_lon;
+    persisted++;
+  }
 
-    if (file.write(reinterpret_cast<const uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
-      saved++;
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, false)) {
+    queueInfo("Failed to open NVS for contacts");
+    Serial.println("[PERSIST][CT] NVS open failed for write");
+    return false;
+  }
+
+  bool ok = true;
+  const size_t blob_len = static_cast<size_t>(persisted) * sizeof(PersistedContact);
+  if (persisted > 0) {
+    const size_t wrote = prefs.putBytes(kContactsBlobKey, g_contacts_nvs_buf, blob_len);
+    if (wrote != blob_len) {
+      ok = false;
+    }
+  } else if (prefs.isKey(kContactsBlobKey)) {
+    if (!prefs.remove(kContactsBlobKey)) {
+      ok = false;
     }
   }
 
-  file.flush();
-  file.close();
+  prefs.putUShort(kContactsCountKey, static_cast<uint16_t>(persisted));
+  prefs.end();
 
   char info[96];
-  snprintf(info, sizeof(info), "Saved %d contacts", saved);
+  snprintf(info, sizeof(info), "Saved %d contacts", persisted);
   queueInfo(info);
-  return true;
+  if (!ok) {
+    Serial.println("[PERSIST][CT] NVS write failed");
+  } else {
+    Serial.printf("[PERSIST][CT] NVS saved=%d\n", persisted);
+  }
+  return ok;
 }
 
 bool MeshAdapter::loadChannelsFromFs() {
   const int nvs_count = loadChannelsSnapshotFromNvs(g_channels_nvs_buf, MAX_GROUP_CHANNELS);
-  const int fs_count = loadChannelsSnapshotFromFs(g_channels_fs_buf, MAX_GROUP_CHANNELS);
-  Serial.printf("[PERSIST][CH] snapshots fs=%d nvs=%d\n", fs_count, nvs_count);
+  Serial.printf("[PERSIST][CH] snapshot nvs=%d\n", nvs_count);
 
-  const PersistedChannel* selected = nullptr;
-  int selected_count = 0;
-  const char* selected_source = "";
-
-  // FS is authoritative when present; NVS is fallback only.
-  if (fs_count > 0) {
-    selected = g_channels_fs_buf;
-    selected_count = fs_count;
-    selected_source = "FS";
-  } else if (nvs_count > 0) {
-    selected = g_channels_nvs_buf;
-    selected_count = nvs_count;
-    selected_source = "NVS";
-  }
-
-  if (!selected || selected_count <= 0) {
+  if (nvs_count <= 0) {
     Serial.println("[PERSIST][CH] no persisted channels found");
     return false;
   }
 
-  const int loaded = applyChannelSnapshot(runtime_ ? runtime_->mesh : nullptr, selected, selected_count);
+  const int loaded = applyChannelSnapshot(runtime_ ? runtime_->mesh : nullptr, g_channels_nvs_buf, nvs_count);
   if (loaded <= 0) {
-    Serial.printf("[PERSIST][CH] apply snapshot failed source=%s count=%d\n", selected_source, selected_count);
+    Serial.printf("[PERSIST][CH] apply snapshot failed count=%d\n", nvs_count);
     return false;
   }
 
   char info[96];
-  snprintf(info, sizeof(info), "Loaded %d channels (%s)", loaded, selected_source);
+  snprintf(info, sizeof(info), "Loaded %d channels (NVS)", loaded);
   queueInfo(info);
-  Serial.printf("[PERSIST][CH] loaded=%d source=%s\n", loaded, selected_source);
-
-  if (nvs_count != fs_count) {
-    char mismatch[96];
-    snprintf(mismatch, sizeof(mismatch), "Channel stores differ NVS=%d FS=%d", nvs_count, fs_count);
-    queueInfo(mismatch);
-    Serial.printf("[PERSIST][CH] stores differ fs=%d nvs=%d\n", fs_count, nvs_count);
-    if (saveChannelsToFs()) {
-      queueInfo("Channel stores reconciled");
-      Serial.println("[PERSIST][CH] stores reconciled");
-    } else {
-      queueInfo("Warning: channel reconcile save failed");
-      Serial.println("[PERSIST][CH] reconcile save failed");
-    }
-  }
+  Serial.printf("[PERSIST][CH] loaded=%d source=NVS\n", loaded);
 
   return true;
 }
 
 bool MeshAdapter::saveChannelsToFs() {
-  File file = SPIFFS.open(kChannelsPath, "w", true);
-  if (!file) {
-    queueInfo("Failed to save channels");
-    Serial.println("[PERSIST][CH] FS open failed for write");
-    return false;
-  }
-
   int expected = 0;
-  int saved = 0;
-  bool write_failed = false;
   memset(g_channels_nvs_buf, 0, sizeof(g_channels_nvs_buf));
   int nvs_count = 0;
   ChannelDetails channel{};
@@ -1240,27 +1571,12 @@ bool MeshAdapter::saveChannelsToFs() {
     if (nvs_count < MAX_GROUP_CHANNELS) {
       g_channels_nvs_buf[nvs_count++] = record;
     }
-
-    if (file.write(reinterpret_cast<const uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
-      saved++;
-    } else {
-      write_failed = true;
-      break;
-    }
   }
-
-  file.close();
 
   char info[96];
-  snprintf(info, sizeof(info), "Saved %d/%d channels", saved, expected);
+  snprintf(info, sizeof(info), "Saved %d/%d channels", nvs_count, expected);
   queueInfo(info);
-  Serial.printf("[PERSIST][CH] save fs saved=%d expected=%d\n", saved, expected);
-
-  if (write_failed || saved != expected) {
-    queueInfo("Channel save incomplete");
-    Serial.println("[PERSIST][CH] FS save incomplete");
-    return false;
-  }
+  Serial.printf("[PERSIST][CH] save nvs=%d expected=%d\n", nvs_count, expected);
 
   Preferences prefs;
   if (prefs.begin(kMeshPrefsNs, false)) {
@@ -1281,7 +1597,11 @@ bool MeshAdapter::saveChannelsToFs() {
       }
     }
 
-    prefs.putUShort(kChannelsCountKey, static_cast<uint16_t>(nvs_count));
+    const size_t wrote_count = prefs.putUShort(kChannelsCountKey, static_cast<uint16_t>(nvs_count));
+    if (wrote_count != sizeof(uint16_t)) {
+      nvs_ok = false;
+      Serial.println("[PERSIST][CH] NVS count write failed");
+    }
 
     for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
       char key_name[12] = {};
@@ -1316,15 +1636,16 @@ bool MeshAdapter::saveChannelsToFs() {
     if (!nvs_ok) {
       queueInfo("Warning: NVS channel backup had write errors");
       Serial.println("[PERSIST][CH] NVS backup write errors");
+      return false;
     } else {
       Serial.printf("[PERSIST][CH] NVS backup saved=%d\n", nvs_count);
+      return true;
     }
   } else {
     queueInfo("Warning: failed to open NVS channel backup");
     Serial.println("[PERSIST][CH] NVS open failed for write");
+    return false;
   }
-
-  return true;
 }
 
 }  // namespace mesh

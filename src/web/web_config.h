@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Arduino.h>
+
 #include "hal/device_board.h"
 #include "mesh/mesh_adapter.h"
 
@@ -8,6 +10,9 @@ namespace web {
 
 struct WebSettings {
   char node_name[32];
+  double node_latitude;
+  double node_longitude;
+  bool send_location_in_advert;
   char wifi_ssid[64];
   char wifi_pass[64];
   char timezone[64];
@@ -30,6 +35,10 @@ void end();
 bool running();
 const char* mode();
 const char* ip();
+
+bool exportConfigText(String* out_text);
+bool importConfigText(const char* text, bool queue_reboot, char* err, size_t err_size);
+bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size);
 
 }  // namespace web
 }  // namespace plumeria

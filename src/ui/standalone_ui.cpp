@@ -1,12 +1,19 @@
 #include "ui/standalone_ui.h"
 
 #include <Arduino.h>
-#include <FS.h>
-#include <SPIFFS.h>
+#include <Preferences.h>
+#include <SD.h>
+#include <SPI.h>
 #include <lvgl.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+#include "web/web_config.h"
+
+#ifndef PLUMERIA_KEY_DEBUG
+#define PLUMERIA_KEY_DEBUG 0
+#endif
 
 #ifndef LV_SYMBOL_GPS
 #define LV_SYMBOL_GPS LV_SYMBOL_DRIVE
@@ -30,6 +37,9 @@ const lv_color_t kColorRx = lv_color_hex(0x89E3FF);
 const lv_color_t kColorTx = lv_color_hex(0xA8FFB5);
 const lv_color_t kColorAck = lv_color_hex(0x7ED6A7);
 const lv_color_t kColorErr = lv_color_hex(0xFF7D7D);
+const lv_color_t kColorWifiOn = lv_color_hex(0x59D88E);
+const lv_color_t kColorWifiOff = lv_color_hex(0xF56767);
+const lv_color_t kColorWifiApBadge = lv_color_hex(0xD8E7F2);
 
 constexpr lv_coord_t kOuterPad = 2;
 constexpr lv_coord_t kGap = 2;
@@ -58,21 +68,123 @@ constexpr uint32_t kLocalEchoSuppressMs = 3000;
 constexpr uint32_t kChatPersistFlushMs = 2000;
 constexpr uint32_t kChannelSyncMs = 1000;
 constexpr time_t kTimeValidEpoch = 1700000000;
-constexpr char kChatHistoryPath[] = "/ui_chat_history.bin";
+constexpr char kUiPrefsNs[] = "ui_state";
+constexpr char kChatHistoryBlobKey[] = "chat_blob";
+constexpr char kChatHistoryCountKey[] = "chat_count";
+constexpr char kCfgSdDir[] = "/plumeria";
+constexpr char kCfgSdPath[] = "/plumeria/plumeria-config.yaml";
+constexpr uint32_t kCfgSdClockHz = 800000UL;
 
-const char* kShortcutNames[5] = {
-    "DM",
+const char* kShortcutNames[4] = {
     "CFG",
-    "NODES",
+  "CONTACTS",
     "LIVE",
     "LEGEND",
 };
+
+const char* kCfgRowLabels[6] = {
+  "Node Name",
+  "Radio Preset",
+  "Web Config",
+  "GPS",
+  "Export Config",
+  "Import Config",
+};
+
+const char* radioPresetDisplayName(const char* region) {
+  if (!region || region[0] == '\0') {
+    return "-";
+  }
+  if (strcmp(region, "US") == 0) {
+    return "US/Canada";
+  }
+  return region;
+}
 
 struct PersistedChatLine {
   char channel_name[32];
   char text[96];
   uint8_t kind;
 };
+
+void setErrText(char* out_err, size_t out_err_size, const char* text) {
+  if (!out_err || out_err_size == 0) {
+    return;
+  }
+  if (!text) {
+    out_err[0] = '\0';
+    return;
+  }
+  strncpy(out_err, text, out_err_size - 1);
+  out_err[out_err_size - 1] = '\0';
+}
+
+bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  setErrText(out_err, out_err_size, "SD unsupported on Heltec");
+  return false;
+#else
+  int sd_cs = -1;
+  int sd_sck = -1;
+  int sd_miso = -1;
+  int sd_mosi = -1;
+  int lora_cs = -1;
+  int tft_cs = -1;
+
+#if defined(DEVICE_TDECK)
+  sd_cs = 39;
+  sd_sck = 40;
+  sd_miso = 38;
+  sd_mosi = 41;
+  lora_cs = 9;
+  tft_cs = 12;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+  sd_cs = 21;
+  sd_sck = 35;
+  sd_miso = 33;
+  sd_mosi = 34;
+  lora_cs = 36;
+  tft_cs = 38;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+  sd_cs = 12;
+  sd_sck = 40;
+  sd_miso = 39;
+  sd_mosi = 14;
+  lora_cs = 5;
+  tft_cs = 37;
+#else
+  setErrText(out_err, out_err_size, "SD profile not configured for this board");
+  return false;
+#endif
+
+  if (sd_cs >= 0) {
+    pinMode(sd_cs, OUTPUT);
+    digitalWrite(sd_cs, HIGH);
+  }
+  if (lora_cs >= 0) {
+    pinMode(lora_cs, OUTPUT);
+    digitalWrite(lora_cs, HIGH);
+  }
+  if (tft_cs >= 0) {
+    pinMode(tft_cs, OUTPUT);
+    digitalWrite(tft_cs, HIGH);
+  }
+
+  SPI.begin(sd_sck, sd_miso, sd_mosi);
+  if (!SD.begin(sd_cs, SPI, kCfgSdClockHz)) {
+    setErrText(out_err, out_err_size, "SD mount failed");
+    return false;
+  }
+
+  if (SD.cardType() == CARD_NONE) {
+    setErrText(out_err, out_err_size, "No SD card");
+    return false;
+  }
+
+  setErrText(out_err, out_err_size, "");
+  return true;
+#endif
+}
 
 lv_coord_t clampCoord(lv_coord_t value, lv_coord_t low, lv_coord_t high) {
   if (value < low) {
@@ -358,12 +470,18 @@ void StandaloneUi::buildLayout() {
   wifi_label_ = lv_label_create(header_bar_);
   lv_obj_add_style(wifi_label_, &style_text_dim_, 0);
   lv_obj_set_style_text_font(wifi_label_, header_font, 0);
-  lv_obj_align_to(wifi_label_, battery_pct_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
+  lv_obj_align_to(wifi_label_, gps_label_, LV_ALIGN_OUT_RIGHT_MID, kHeaderIconsGap, 0);
+
+  wifi_ap_badge_label_ = lv_label_create(header_bar_);
+  lv_obj_add_style(wifi_ap_badge_label_, &style_text_main_, 0);
+  lv_obj_set_style_text_font(wifi_ap_badge_label_, chatPanelFont(), 0);
+  lv_label_set_text(wifi_ap_badge_label_, "AP");
+  lv_obj_add_flag(wifi_ap_badge_label_, LV_OBJ_FLAG_HIDDEN);
 
   time_label_ = lv_label_create(header_bar_);
   lv_obj_add_style(time_label_, &style_text_main_, 0);
   lv_obj_set_style_text_font(time_label_, header_font, 0);
-  lv_obj_align_to(time_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
+  lv_obj_align_to(time_label_, battery_pct_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
 
   battery_bar_ = lv_bar_create(header_bar_);
   lv_obj_set_size(battery_bar_, 26, 6);
@@ -379,7 +497,10 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_pos(chat_panel_, 0, chat_y);
   lv_obj_set_size(chat_panel_, LV_PCT(100), chat_h);
   lv_obj_add_style(chat_panel_, &style_chat_, 0);
-  lv_obj_add_style(chat_panel_, &style_chat_focused_, LV_STATE_FOCUSED);
+  // Keep chat visual neutral while focused.
+  lv_obj_set_style_border_color(chat_panel_, kColorBorder, LV_STATE_FOCUSED);
+  lv_obj_set_style_border_width(chat_panel_, 1, LV_STATE_FOCUSED);
+  lv_obj_set_style_outline_width(chat_panel_, 0, LV_STATE_FOCUSED);
   lv_obj_set_layout(chat_panel_, LV_LAYOUT_FLEX);
   lv_obj_set_flex_flow(chat_panel_, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(chat_panel_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -415,6 +536,60 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_KEY, this);
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_CLICKED, this);
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+  cfg_dialog_ = lv_obj_create(root_);
+  lv_obj_add_style(cfg_dialog_, &style_panel_, 0);
+  lv_obj_set_size(cfg_dialog_, clampCoord(main_w - 6, 220, 280), clampCoord(main_h - 10, 170, 230));
+  lv_obj_center(cfg_dialog_);
+  lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(cfg_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(cfg_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+
+  cfg_title_label_ = lv_label_create(cfg_dialog_);
+  lv_obj_add_style(cfg_title_label_, &style_text_main_, 0);
+  lv_label_set_text(cfg_title_label_, "Configuration");
+  lv_obj_align(cfg_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
+
+  cfg_action_label_ = lv_label_create(cfg_dialog_);
+  lv_obj_add_style(cfg_action_label_, &style_text_dim_, 0);
+  lv_label_set_text(cfg_action_label_, "");
+  lv_obj_align(cfg_action_label_, LV_ALIGN_TOP_RIGHT, -4, 2);
+
+  cfg_status_label_ = lv_label_create(cfg_dialog_);
+  lv_obj_add_style(cfg_status_label_, &style_text_dim_, 0);
+  lv_label_set_text(cfg_status_label_, "Enter - Activate Option, Backspace - Close Configuration");
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(cfg_status_label_, &lv_font_montserrat_10, 0);
+#endif
+  lv_obj_set_width(cfg_status_label_, LV_PCT(100));
+  lv_obj_align(cfg_status_label_, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+
+  for (uint8_t i = 0; i < kCfgRowCount; i++) {
+    cfg_rows_[i] = lv_btn_create(cfg_dialog_);
+    lv_obj_set_size(cfg_rows_[i], LV_PCT(100), 20);
+    lv_obj_set_pos(cfg_rows_[i], 2, 20 + (i * 20));
+    lv_obj_add_style(cfg_rows_[i], &style_button_, 0);
+    lv_obj_add_style(cfg_rows_[i], &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_add_event_cb(cfg_rows_[i], onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(cfg_rows_[i], onFocusableEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(cfg_rows_[i], onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+    cfg_row_labels_[i] = lv_label_create(cfg_rows_[i]);
+    lv_obj_add_style(cfg_row_labels_[i], &style_text_main_, 0);
+    lv_label_set_text(cfg_row_labels_[i], kCfgRowLabels[i]);
+    lv_obj_align(cfg_row_labels_[i], LV_ALIGN_LEFT_MID, 1, 0);
+  }
+
+  // Visual split between status rows (name/preset) and actionable rows.
+  lv_obj_t* cfg_divider = lv_obj_create(cfg_dialog_);
+  lv_obj_set_size(cfg_divider, LV_PCT(100), 3);
+  lv_obj_set_pos(cfg_divider, 2, (20 + (2 * 20)) - 1);
+  lv_obj_set_style_bg_opa(cfg_divider, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(cfg_divider, lv_color_hex(0x2B4A63), 0);
+  lv_obj_set_style_border_width(cfg_divider, 0, 0);
+  lv_obj_set_style_radius(cfg_divider, 0, 0);
+  lv_obj_clear_flag(cfg_divider, LV_OBJ_FLAG_CLICKABLE);
 
   shortcut_strip_ = lv_obj_create(main_panel_);
   lv_obj_set_pos(shortcut_strip_, 0, main_h - shortcut_h - kMainBottomInset);
@@ -464,6 +639,11 @@ void StandaloneUi::bindInputGroup() {
   if (compose_input_) {
     lv_group_add_obj(key_group_, compose_input_);
   }
+  for (uint8_t i = 0; i < kCfgRowCount; i++) {
+    if (cfg_rows_[i]) {
+      lv_group_add_obj(key_group_, cfg_rows_[i]);
+    }
+  }
   for (uint8_t i = 0; i < kShortcutCount; i++) {
     lv_group_add_obj(key_group_, shortcut_btns_[i]);
   }
@@ -482,6 +662,10 @@ bool StandaloneUi::begin() {
   if (started_) {
     return true;
   }
+
+#if PLUMERIA_KEY_DEBUG
+  Serial.println("[KEYUI] debug=1 ui begin");
+#endif
 
   if (configured_channel_count_ == 0) {
     const char defaults[1][32] = {
@@ -781,6 +965,309 @@ bool StandaloneUi::handleComposeKey(uint32_t key) {
   return true;
 }
 
+void StandaloneUi::refreshCfgDialog() {
+  if (!cfg_dialog_ || !cfg_status_label_ || !cfg_action_label_) {
+    return;
+  }
+
+  char node_name[32] = {};
+  if (mesh_adapter_) {
+    mesh_adapter_->getNodeName(node_name, sizeof(node_name));
+  }
+
+  plumeria::web::WebSettings web_settings{};
+  plumeria::web::loadSettings(&web_settings);
+
+  char row_text[96] = {};
+  snprintf(row_text, sizeof(row_text), "Name: %s", node_name[0] ? node_name : "-");
+  lv_label_set_text(cfg_row_labels_[0], row_text);
+
+  snprintf(row_text, sizeof(row_text), "Radio Preset: %s", radioPresetDisplayName(web_settings.region));
+  lv_label_set_text(cfg_row_labels_[1], row_text);
+
+  const bool web_on = plumeria::web::running();
+  const char* web_ip = plumeria::web::ip();
+  if (!web_on) {
+    snprintf(row_text, sizeof(row_text), "Web Config: OFF");
+  } else if (web_ip && web_ip[0] != '\0') {
+    snprintf(row_text, sizeof(row_text), "Web Config: ON (%s)", web_ip);
+  } else {
+    snprintf(row_text, sizeof(row_text), "Web Config: ON");
+  }
+  lv_label_set_text(cfg_row_labels_[2], row_text);
+
+  lv_label_set_text(cfg_row_labels_[3], web_settings.send_location_in_advert ? "GPS Advert: ON"
+                                                                              : "GPS Advert: OFF");
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  lv_label_set_text(cfg_row_labels_[4], "Export Config: N/A (no SD)");
+  lv_label_set_text(cfg_row_labels_[5], "Import Config: N/A (no SD)");
+#else
+  lv_label_set_text(cfg_row_labels_[4], "Export Config -> SD /plumeria");
+  lv_label_set_text(cfg_row_labels_[5], cfg_import_confirm_armed_ ? "Import Config [PRESS ENTER AGAIN]"
+                                                                   : "Import Config <- SD /plumeria");
+#endif
+
+  for (uint8_t i = 0; i < kCfgRowCount; i++) {
+    lv_obj_remove_style(cfg_rows_[i], &style_button_active_, 0);
+    if (i == cfg_selected_row_) {
+      lv_obj_add_style(cfg_rows_[i], &style_button_active_, 0);
+    }
+  }
+
+  lv_label_set_text(cfg_status_label_, "Enter - Activate Option, Backspace - Close Configuration");
+  lv_label_set_text(cfg_action_label_, cfg_action_text_);
+}
+
+void StandaloneUi::openCfgDialog() {
+  if (cfg_open_ || !cfg_dialog_) {
+    return;
+  }
+  cfg_open_ = true;
+  cfg_selected_row_ = 0;
+  cfg_import_confirm_armed_ = false;
+  cfg_action_text_[0] = '\0';
+  cfg_status_text_[0] = '\0';
+  lv_obj_clear_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
+  if (shortcut_strip_) {
+    lv_obj_add_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_move_foreground(cfg_dialog_);
+  refreshCfgDialog();
+  if (key_group_ && cfg_rows_[cfg_selected_row_]) {
+    lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
+  }
+}
+
+void StandaloneUi::closeCfgDialog(bool focus_chat) {
+  if (!cfg_open_ || !cfg_dialog_) {
+    return;
+  }
+  cfg_open_ = false;
+  cfg_import_confirm_armed_ = false;
+  lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
+  if (shortcut_strip_) {
+    lv_obj_clear_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (focus_chat) {
+    setFocusZone(FocusZone::Chat);
+  } else {
+    focus_zone_ = FocusZone::Shortcuts;
+    selected_shortcut_ = 0;
+    refreshShortcutVisuals();
+    focusCurrentZoneObject();
+  }
+}
+
+void StandaloneUi::moveCfgSelection(int delta) {
+  int next = static_cast<int>(cfg_selected_row_) + delta;
+  if (next < 0) {
+    next = kCfgRowCount - 1;
+  } else if (next >= static_cast<int>(kCfgRowCount)) {
+    next = 0;
+  }
+  cfg_selected_row_ = static_cast<uint8_t>(next);
+  if (cfg_selected_row_ != 5) {
+    cfg_import_confirm_armed_ = false;
+  }
+  refreshCfgDialog();
+  if (key_group_ && cfg_rows_[cfg_selected_row_]) {
+    lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
+  }
+}
+
+bool StandaloneUi::exportConfigToSd() {
+  String text;
+  if (!plumeria::web::exportConfigText(&text) || text.length() == 0) {
+    return false;
+  }
+
+  char sd_err[64] = {};
+  if (!sdBeginForCurrentBoard(sd_err, sizeof(sd_err))) {
+    Serial.printf("[CFG] export SD init failed: %s\n", sd_err);
+    return false;
+  }
+
+  if (!SD.exists(kCfgSdDir)) {
+    if (!SD.mkdir(kCfgSdDir)) {
+      return false;
+    }
+  }
+
+  if (SD.exists(kCfgSdPath)) {
+    SD.remove(kCfgSdPath);
+  }
+
+  File file = SD.open(kCfgSdPath, FILE_WRITE);
+  if (!file) {
+    return false;
+  }
+
+  const size_t wrote = file.print(text);
+  file.close();
+  return wrote == static_cast<size_t>(text.length());
+}
+
+bool StandaloneUi::setGpsAdvertEnabled(bool enabled) {
+  plumeria::web::WebSettings web_settings{};
+  plumeria::web::loadSettings(&web_settings);
+  if (web_settings.send_location_in_advert == enabled) {
+    return true;
+  }
+
+  // Apply immediately to runtime mesh even when web config is currently disabled.
+  if (mesh_adapter_ && !mesh_adapter_->setAdvertLocation(enabled, web_settings.node_latitude, web_settings.node_longitude)) {
+    return false;
+  }
+  if (mesh_adapter_) {
+    mesh_adapter_->broadcastSelfAdvertNow();
+  }
+
+  char err[96] = {};
+  return plumeria::web::setSendLocationInAdvert(enabled, err, sizeof(err));
+}
+
+bool StandaloneUi::importConfigFromSd() {
+  char sd_err[64] = {};
+  if (!sdBeginForCurrentBoard(sd_err, sizeof(sd_err))) {
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Import failed: %s", sd_err[0] ? sd_err : "SD init failed");
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    return false;
+  }
+
+  File file = SD.open(kCfgSdPath, FILE_READ);
+  if (!file) {
+    strncpy(cfg_status_text_, "Import failed: /plumeria/plumeria-config.yaml missing", sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    return false;
+  }
+
+  String text;
+  text.reserve(4096);
+  while (file.available()) {
+    text += static_cast<char>(file.read());
+  }
+  file.close();
+
+  char err[96] = {};
+  if (!plumeria::web::importConfigText(text.c_str(), true, err, sizeof(err))) {
+    strncpy(cfg_status_text_, err[0] ? err : "Import failed", sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    return false;
+  }
+
+  return true;
+}
+
+void StandaloneUi::activateCfgSelection() {
+  if (cfg_selected_row_ != 5) {
+    cfg_import_confirm_armed_ = false;
+  }
+
+  switch (cfg_selected_row_) {
+    case 0:
+    case 1:
+      strncpy(cfg_status_text_, "Read-only row. Use web config to edit settings.", sizeof(cfg_status_text_) - 1);
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      strncpy(cfg_action_text_, "No change", sizeof(cfg_action_text_) - 1);
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      break;
+    case 2: {
+      if (plumeria::web::running()) {
+        plumeria::web::end();
+        strncpy(cfg_status_text_, "Web Config disabled", sizeof(cfg_status_text_) - 1);
+        strncpy(cfg_action_text_, "Web disabled", sizeof(cfg_action_text_) - 1);
+      } else {
+        plumeria::web::WebSettings web_settings{};
+        plumeria::web::loadSettings(&web_settings);
+        if (plumeria::web::begin(mesh_adapter_, web_settings)) {
+          const char* web_ip = plumeria::web::ip();
+          if (web_ip && web_ip[0] != '\0') {
+            snprintf(cfg_status_text_, sizeof(cfg_status_text_),
+                     "Web Config enabled (%s)",
+                     web_ip);
+          } else {
+            strncpy(cfg_status_text_, "Web Config enabled", sizeof(cfg_status_text_) - 1);
+            cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+          }
+          strncpy(cfg_action_text_, "Web enabled", sizeof(cfg_action_text_) - 1);
+        } else {
+          strncpy(cfg_status_text_, "Web Config start failed", sizeof(cfg_status_text_) - 1);
+          strncpy(cfg_action_text_, "Web start failed", sizeof(cfg_action_text_) - 1);
+        }
+      }
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      break;
+    }
+    case 3: {
+      plumeria::web::WebSettings web_settings{};
+      plumeria::web::loadSettings(&web_settings);
+      const bool next_enabled = !web_settings.send_location_in_advert;
+      if (setGpsAdvertEnabled(next_enabled)) {
+        strncpy(cfg_status_text_, next_enabled ? "GPS advert enabled" : "GPS advert disabled",
+                sizeof(cfg_status_text_) - 1);
+        strncpy(cfg_action_text_, next_enabled ? "GPS turned on" : "GPS turned off", sizeof(cfg_action_text_) - 1);
+      } else {
+        strncpy(cfg_status_text_, "GPS toggle failed", sizeof(cfg_status_text_) - 1);
+        strncpy(cfg_action_text_, "GPS toggle failed", sizeof(cfg_action_text_) - 1);
+      }
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      break;
+    }
+    case 4:
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+      strncpy(cfg_status_text_, "Export unavailable on this hardware", sizeof(cfg_status_text_) - 1);
+      strncpy(cfg_action_text_, "Export unavailable", sizeof(cfg_action_text_) - 1);
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+#else
+      if (exportConfigToSd()) {
+        strncpy(cfg_status_text_, "Exported to /plumeria/plumeria-config.yaml", sizeof(cfg_status_text_) - 1);
+        strncpy(cfg_action_text_, "Config exported", sizeof(cfg_action_text_) - 1);
+      } else {
+        strncpy(cfg_status_text_, "Export failed", sizeof(cfg_status_text_) - 1);
+        strncpy(cfg_action_text_, "Export failed", sizeof(cfg_action_text_) - 1);
+      }
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+#endif
+      break;
+  case 5:
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+      strncpy(cfg_status_text_, "Import unavailable on this hardware", sizeof(cfg_status_text_) - 1);
+      strncpy(cfg_action_text_, "Import unavailable", sizeof(cfg_action_text_) - 1);
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+#else
+      if (!cfg_import_confirm_armed_) {
+        cfg_import_confirm_armed_ = true;
+        strncpy(cfg_status_text_, "Press Enter again to confirm import", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Import armed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      } else if (importConfigFromSd()) {
+        cfg_import_confirm_armed_ = false;
+        strncpy(cfg_status_text_, "Import applied. Rebooting...", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Config imported", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+        refreshCfgDialog();
+        delay(120);
+        ESP.restart();
+      } else {
+        strncpy(cfg_action_text_, "Import failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+#endif
+      break;
+    default:
+      break;
+  }
+
+  refreshCfgDialog();
+}
+
 void StandaloneUi::scrollChatUp() {
   if (!chat_panel_) {
     return;
@@ -805,16 +1292,33 @@ void StandaloneUi::refreshShortcutVisuals() {
 }
 
 void StandaloneUi::refreshHeaderVisuals() {
+  if (!channel_selector_btn_ || !gps_label_ || !wifi_label_ || !time_label_ || !battery_pct_label_ ||
+      !battery_bar_ || !wifi_ap_badge_label_) {
+    return;
+  }
+
   lv_label_set_text(gps_label_, LV_SYMBOL_GPS);
   lv_label_set_text(wifi_label_, LV_SYMBOL_WIFI);
-  lv_obj_align_to(time_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
+  lv_obj_align_to(gps_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
+  lv_obj_align_to(wifi_label_, gps_label_, LV_ALIGN_OUT_RIGHT_MID, kHeaderIconsGap, 0);
+  lv_obj_align_to(time_label_, battery_pct_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
   lv_obj_align(battery_pct_label_, LV_ALIGN_RIGHT_MID, kHeaderBatteryTextX, 0);
   lv_obj_align(battery_bar_, LV_ALIGN_RIGHT_MID, kHeaderBatteryBarX, 0);
-  lv_obj_align_to(wifi_label_, battery_pct_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
-  lv_obj_align_to(gps_label_, wifi_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsGap, 0);
+  lv_obj_align_to(wifi_ap_badge_label_, wifi_label_, LV_ALIGN_TOP_RIGHT, 4, -4);
 
   lv_obj_set_style_text_color(gps_label_, gps_ok_ ? kColorTextMain : kColorTextDim, 0);
-  lv_obj_set_style_text_color(wifi_label_, wifi_ok_ ? kColorTextMain : kColorTextDim, 0);
+  if (!wifi_config_server_on_) {
+    lv_obj_set_style_text_color(wifi_label_, kColorWifiOff, 0);
+    lv_obj_add_flag(wifi_ap_badge_label_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_set_style_text_color(wifi_label_, kColorWifiOn, 0);
+    if (wifi_ap_mode_ || !wifi_ok_) {
+      lv_obj_set_style_text_color(wifi_ap_badge_label_, kColorWifiApBadge, 0);
+      lv_obj_clear_flag(wifi_ap_badge_label_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(wifi_ap_badge_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 
   char batt_text[8];
   snprintf(batt_text, sizeof(batt_text), "%u%%", static_cast<unsigned>(battery_pct_));
@@ -888,6 +1392,11 @@ void StandaloneUi::syncChannelsFromMeshIfNeeded(uint32_t now_ms) {
 
 void StandaloneUi::focusCurrentZoneObject() {
   if (!key_group_) {
+    return;
+  }
+
+  if (cfg_open_ && cfg_rows_[cfg_selected_row_]) {
+    lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
     return;
   }
 
@@ -977,11 +1486,20 @@ void StandaloneUi::selectChannel(int index, bool activate) {
 }
 
 void StandaloneUi::triggerShortcut(uint8_t index) {
-  (void)index;
   if (index >= kShortcutCount) {
     return;
   }
   closeChannelDropdown(true);
+
+  if (index == 0) {
+    openCfgDialog();
+    return;
+  }
+
+  if (index == 1) {
+    appendChatLine("[INFO] CONTACTS selected", ChatLineKind::Normal);
+    return;
+  }
 }
 
 void StandaloneUi::appendChatLine(const char* text, ChatLineKind kind) {
@@ -1075,31 +1593,44 @@ void StandaloneUi::pushChannelHistoryLine(const char* channel_name, const char* 
 }
 
 bool StandaloneUi::loadChatHistoryFromFs() {
-  File file = SPIFFS.open(kChatHistoryPath, "r");
-  if (!file) {
+  Preferences prefs;
+  if (!prefs.begin(kUiPrefsNs, true)) {
     return false;
   }
 
-  uint16_t count = 0;
-  if (file.read(reinterpret_cast<uint8_t*>(&count), sizeof(count)) != sizeof(count)) {
-    file.close();
+  const size_t blob_len = prefs.getBytesLength(kChatHistoryBlobKey);
+  if (blob_len < sizeof(PersistedChatLine)) {
+    prefs.end();
     return false;
   }
 
-  if (count > kMaxStoredChatRows) {
-    count = kMaxStoredChatRows;
+  int count = static_cast<int>(blob_len / sizeof(PersistedChatLine));
+  const uint16_t declared = prefs.getUShort(kChatHistoryCountKey, static_cast<uint16_t>(count));
+  if (declared > 0 && declared < static_cast<uint16_t>(count)) {
+    count = declared;
+  }
+
+  if (count > static_cast<int>(kMaxStoredChatRows)) {
+    count = static_cast<int>(kMaxStoredChatRows);
+  }
+
+  static PersistedChatLine persisted_buf[kMaxStoredChatRows]{};
+  const size_t to_read = static_cast<size_t>(count) * sizeof(PersistedChatLine);
+  memset(persisted_buf, 0, sizeof(persisted_buf));
+  const size_t got = prefs.getBytes(kChatHistoryBlobKey, persisted_buf, to_read);
+  prefs.end();
+
+  const int loaded_count = static_cast<int>(got / sizeof(PersistedChatLine));
+  if (loaded_count <= 0) {
+    return false;
   }
 
   stored_chat_head_ = 0;
   stored_chat_count_ = 0;
   memset(stored_chat_, 0, sizeof(stored_chat_));
 
-  for (uint16_t i = 0; i < count; i++) {
-    PersistedChatLine persisted{};
-    if (file.read(reinterpret_cast<uint8_t*>(&persisted), sizeof(persisted)) != sizeof(persisted)) {
-      break;
-    }
-
+  for (int i = 0; i < loaded_count && stored_chat_count_ < kMaxStoredChatRows; i++) {
+    const PersistedChatLine& persisted = persisted_buf[i];
     size_t write_index = (stored_chat_head_ + stored_chat_count_) % kMaxStoredChatRows;
     strncpy(stored_chat_[write_index].channel_name, persisted.channel_name,
             sizeof(stored_chat_[write_index].channel_name) - 1);
@@ -1113,39 +1644,49 @@ bool StandaloneUi::loadChatHistoryFromFs() {
     stored_chat_count_++;
   }
 
-  file.close();
   chat_history_dirty_ = false;
-  return true;
+  return stored_chat_count_ > 0;
 }
 
 bool StandaloneUi::saveChatHistoryToFs() {
-  File file = SPIFFS.open(kChatHistoryPath, "w", true);
-  if (!file) {
+  Preferences prefs;
+  if (!prefs.begin(kUiPrefsNs, false)) {
     return false;
   }
 
-  uint16_t count = static_cast<uint16_t>(stored_chat_count_);
-  if (file.write(reinterpret_cast<const uint8_t*>(&count), sizeof(count)) != sizeof(count)) {
-    file.close();
-    return false;
-  }
+  static PersistedChatLine persisted_buf[kMaxStoredChatRows]{};
+  const size_t count = stored_chat_count_ > kMaxStoredChatRows ? kMaxStoredChatRows : stored_chat_count_;
+  memset(persisted_buf, 0, sizeof(persisted_buf));
 
-  for (size_t i = 0; i < stored_chat_count_; i++) {
+  for (size_t i = 0; i < count; i++) {
     size_t idx = (stored_chat_head_ + i) % kMaxStoredChatRows;
-    PersistedChatLine persisted{};
+    PersistedChatLine& persisted = persisted_buf[i];
     strncpy(persisted.channel_name, stored_chat_[idx].channel_name, sizeof(persisted.channel_name) - 1);
     persisted.channel_name[sizeof(persisted.channel_name) - 1] = '\0';
     strncpy(persisted.text, stored_chat_[idx].text, sizeof(persisted.text) - 1);
     persisted.text[sizeof(persisted.text) - 1] = '\0';
     persisted.kind = static_cast<uint8_t>(stored_chat_[idx].kind);
+  }
 
-    if (file.write(reinterpret_cast<const uint8_t*>(&persisted), sizeof(persisted)) != sizeof(persisted)) {
-      file.close();
-      return false;
+  bool ok = true;
+  if (count > 0) {
+    const size_t blob_len = count * sizeof(PersistedChatLine);
+    const size_t wrote = prefs.putBytes(kChatHistoryBlobKey, persisted_buf, blob_len);
+    if (wrote != blob_len) {
+      ok = false;
+    }
+  } else if (prefs.isKey(kChatHistoryBlobKey)) {
+    if (!prefs.remove(kChatHistoryBlobKey)) {
+      ok = false;
     }
   }
 
-  file.close();
+  prefs.putUShort(kChatHistoryCountKey, static_cast<uint16_t>(count));
+  prefs.end();
+  if (!ok) {
+    return false;
+  }
+
   chat_history_dirty_ = false;
   return true;
 }
@@ -1178,8 +1719,28 @@ void StandaloneUi::rebuildChatForActiveChannel() {
 }
 
 void StandaloneUi::handleKey(uint32_t key) {
+  uint32_t norm_key = key;
+  const bool is_lvgl_special =
+      (norm_key == LV_KEY_UP || norm_key == LV_KEY_DOWN || norm_key == LV_KEY_LEFT || norm_key == LV_KEY_RIGHT ||
+       norm_key == LV_KEY_ENTER || norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE ||
+       norm_key == LV_KEY_DEL || norm_key == LV_KEY_HOME || norm_key == LV_KEY_END || norm_key == LV_KEY_NEXT ||
+       norm_key == LV_KEY_PREV);
+  if (!is_lvgl_special && norm_key >= 1 && norm_key <= 26) {
+    // Support Ctrl+A..Ctrl+Z style values for shortcut keys without breaking LVGL key constants.
+    norm_key = static_cast<uint32_t>('a' + (norm_key - 1));
+  }
+  if (norm_key >= 'A' && norm_key <= 'Z') {
+    norm_key = norm_key - 'A' + 'a';
+  }
+
+#if PLUMERIA_KEY_DEBUG
+  Serial.printf("[KEYUI] handleKey raw=%lu norm=%lu cfg=%d compose=%d dropdown=%d focus=%u\n",
+                static_cast<unsigned long>(key), static_cast<unsigned long>(norm_key), cfg_open_ ? 1 : 0,
+                compose_open_ ? 1 : 0, channel_dropdown_open_ ? 1 : 0, static_cast<unsigned>(focus_zone_));
+#endif
+
   const uint32_t now = millis();
-  const bool is_escape = (key == LV_KEY_ESC || key == 27 || key == 8);
+  const bool is_escape = (norm_key == LV_KEY_ESC || norm_key == 27 || norm_key == 8);
   lv_obj_t* focused = key_group_ ? lv_group_get_focused(key_group_) : nullptr;
   const bool chat_focused = (focused == chat_panel_);
 
@@ -1188,16 +1749,55 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
+  // Global shortcut: open CFG from any non-compose screen.
+  if (norm_key == 'c') {
+    selected_shortcut_ = 0;
+    setFocusZone(FocusZone::Shortcuts);
+    triggerShortcut(0);
+    return;
+  }
+
+  // Global shortcut: open compose from any non-compose screen.
+  if (norm_key == 'm') {
+    setFocusZone(FocusZone::Chat);
+    openComposeDialog();
+    return;
+  }
+
+  if (cfg_open_) {
+    if (norm_key == LV_KEY_UP || norm_key == 'k') {
+      moveCfgSelection(-1);
+      return;
+    }
+    if (norm_key == LV_KEY_DOWN || norm_key == 'j') {
+      moveCfgSelection(1);
+      return;
+    }
+    if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      activateCfgSelection();
+      return;
+    }
+    if (norm_key == LV_KEY_ESC) {
+      closeCfgDialog(false);
+      return;
+    }
+    if (norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127) {
+      closeCfgDialog(true);
+      return;
+    }
+    return;
+  }
+
   if (channel_dropdown_open_) {
-    if (key == LV_KEY_UP) {
+    if (norm_key == LV_KEY_UP || norm_key == 'k') {
       moveDropdownHighlight(-1);
       return;
     }
-    if (key == LV_KEY_DOWN) {
+    if (norm_key == LV_KEY_DOWN || norm_key == 'j') {
       moveDropdownHighlight(1);
       return;
     }
-    if (key == LV_KEY_ENTER) {
+    if (norm_key == LV_KEY_ENTER) {
       if (now - last_selector_action_ms_ < kNavDebounceMs) {
         return;
       }
@@ -1214,7 +1814,7 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
-  switch (key) {
+  switch (norm_key) {
     case LV_KEY_LEFT:
       focusPrevZone();
       return;
@@ -1261,16 +1861,21 @@ void StandaloneUi::handleKey(uint32_t key) {
       }
       return;
     case 'j':
-    case 'J':
       if (focus_zone_ == FocusZone::Chat || chat_focused) {
         scrollChatUp();
       }
       return;
     case 'k':
-    case 'K':
       if (focus_zone_ == FocusZone::Chat || chat_focused) {
         scrollChatDown();
       }
+      return;
+    case 'c':
+      return;
+    case 'n':
+      selected_shortcut_ = 1;
+      setFocusZone(FocusZone::Shortcuts);
+      triggerShortcut(1);
       return;
     default:
       if (is_escape && focus_zone_ != FocusZone::Selector) {
@@ -1281,6 +1886,22 @@ void StandaloneUi::handleKey(uint32_t key) {
 }
 
 void StandaloneUi::handleClick(lv_obj_t* target) {
+  if (cfg_open_) {
+    for (uint8_t i = 0; i < kCfgRowCount; i++) {
+      if (target == cfg_rows_[i] || target == cfg_row_labels_[i]) {
+        cfg_selected_row_ = i;
+        if (cfg_selected_row_ != 5) {
+          cfg_import_confirm_armed_ = false;
+        }
+        refreshCfgDialog();
+        return;
+      }
+    }
+    if (hasAncestor(target, cfg_dialog_)) {
+      return;
+    }
+  }
+
   if (compose_open_) {
     if (hasAncestor(target, compose_dialog_) && compose_input_ && key_group_) {
       lv_group_focus_obj(compose_input_);
@@ -1350,9 +1971,22 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
   lv_obj_t* target = lv_event_get_target(event);
   switch (lv_event_get_code(event)) {
     case LV_EVENT_KEY: {
+      const uint32_t event_key = lv_event_get_key(event);
+#if PLUMERIA_KEY_DEBUG
+      Serial.printf("[KEYUI] LV_EVENT_KEY event_key=%lu target=%p\n", static_cast<unsigned long>(event_key),
+                    static_cast<void*>(target));
+#endif
+      if (event_key != 0) {
+        ui->handleKey(event_key);
+        break;
+      }
       lv_indev_t* indev = lv_indev_get_act();
       if (indev) {
-        ui->handleKey(lv_indev_get_key(indev));
+        const uint32_t indev_key = lv_indev_get_key(indev);
+#if PLUMERIA_KEY_DEBUG
+        Serial.printf("[KEYUI] LV_EVENT_KEY indev_key=%lu\n", static_cast<unsigned long>(indev_key));
+#endif
+        ui->handleKey(indev_key);
       }
       break;
     }
@@ -1374,6 +2008,15 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
           ui->focus_zone_ = FocusZone::Selector;
           ui->dropdown_highlight_channel_ = i;
           ui->refreshDropdownVisuals();
+          break;
+        }
+      }
+      for (uint8_t i = 0; i < kCfgRowCount; i++) {
+        if (target == ui->cfg_rows_[i] || target == ui->cfg_row_labels_[i]) {
+          ui->cfg_selected_row_ = i;
+          if (ui->cfg_selected_row_ != 5) {
+            ui->cfg_import_confirm_armed_ = false;
+          }
           break;
         }
       }
@@ -1422,7 +2065,6 @@ void StandaloneUi::loop() {
 
 void StandaloneUi::setMeshReady(bool ready) {
   mesh_ready_ = ready;
-  wifi_ok_ = ready;
 
   if (!started_) {
     return;
@@ -1431,6 +2073,18 @@ void StandaloneUi::setMeshReady(bool ready) {
   if (ready) {
     saveChatHistoryToFs();
     last_chat_persist_ms_ = millis();
+  }
+
+  refreshHeaderVisuals();
+}
+
+void StandaloneUi::setWifiState(bool config_server_on, bool sta_connected, bool ap_mode) {
+  wifi_config_server_on_ = config_server_on;
+  wifi_ok_ = sta_connected;
+  wifi_ap_mode_ = ap_mode;
+
+  if (!started_) {
+    return;
   }
 
   refreshHeaderVisuals();

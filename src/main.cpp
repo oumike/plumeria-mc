@@ -65,6 +65,34 @@ void sync_ui_channels_from_mesh() {
   }
 }
 
+void sync_ui_wifi_state() {
+  static uint32_t last_sync_ms = 0;
+  static bool cached_config_server_on = false;
+  static bool cached_sta_connected = false;
+  static bool cached_ap_mode = false;
+
+  const uint32_t now = millis();
+  if (now - last_sync_ms < 500) {
+    return;
+  }
+  last_sync_ms = now;
+
+  const bool config_server_on = plumeria::web::running();
+  const char* net_mode = plumeria::web::mode();
+  const bool sta_connected = config_server_on && net_mode && strcmp(net_mode, "sta") == 0;
+  const bool ap_mode = config_server_on && net_mode && strcmp(net_mode, "ap") == 0;
+
+  if (config_server_on == cached_config_server_on && sta_connected == cached_sta_connected &&
+      ap_mode == cached_ap_mode) {
+    return;
+  }
+
+  cached_config_server_on = config_server_on;
+  cached_sta_connected = sta_connected;
+  cached_ap_mode = ap_mode;
+  g_ui.setWifiState(config_server_on, sta_connected, ap_mode);
+}
+
 }  // namespace
 
 void setup() {
@@ -99,6 +127,7 @@ void setup() {
   g_ui.setMeshReady(mesh_ready);
 
   plumeria::web::begin(&g_mesh, g_web_settings);
+  sync_ui_wifi_state();
 }
 
 void loop() {
@@ -107,6 +136,7 @@ void loop() {
   g_mesh.loop();
   sync_ui_channels_from_mesh();
   plumeria::web::loop();
+  sync_ui_wifi_state();
 
   plumeria::mesh::MeshEvent events[4];
   size_t event_count = g_mesh.drainEvents(events, 4);

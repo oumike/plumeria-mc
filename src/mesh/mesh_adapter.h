@@ -25,6 +25,19 @@ struct MeshRadioStats {
   uint32_t last_rx_ms;
 };
 
+struct MeshChannelConfig {
+  char name[32];
+  char psk_base64[49];
+};
+
+struct MeshContactSummary {
+  char name[32];
+  char public_key_hex[65];
+  bool favorite;
+  uint8_t type;
+  uint32_t lastmod;
+};
+
 struct MeshRuntime;
 
 class MeshAdapter {
@@ -36,7 +49,16 @@ class MeshAdapter {
   bool sendChannelMessage(const char* channel_name, const char* text);
   bool setNodeName(const char* node_name);
   void getNodeName(char* out_name, size_t out_size) const;
+  bool getPublicKeyHex(char* out_hex, size_t out_size) const;
+  bool setAdvertLocation(bool enabled, double latitude, double longitude);
+  void getAdvertLocation(bool* enabled, double* latitude, double* longitude) const;
+  bool broadcastSelfAdvertNow();
+  bool broadcastSelfAdvertFloodNow();
   int exportChannels(char names[][32], int max_names);
+  int exportChannelConfigs(MeshChannelConfig configs[], int max_configs) const;
+  int exportContacts(MeshContactSummary contacts[], int max_contacts) const;
+  bool setContactFavoriteByPublicKeyHex(const char* public_key_hex, bool favorite);
+  bool removeContactByPublicKeyHex(const char* public_key_hex);
   bool addChannel(const char* channel_name, const char* psk_base64 = nullptr);
   bool removeChannel(const char* channel_name);
   void getRadioStats(MeshRadioStats* out_stats) const;

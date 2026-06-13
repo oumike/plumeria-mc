@@ -2,7 +2,7 @@
 
 Empty multi-target ESP32 firmware scaffold based on the same release/build flow used in camillia-mt.
 
-Current focus target: LilyGo T-Lora Pager TFT (`tlora-pager-tft`).
+Current default target: T-Deck (`tdeck`), with multi-hardware support across listed environments.
 
 This firmware is currently **standalone-only** (no companion transport mode).
 
@@ -54,9 +54,9 @@ The firmware now uses a modular standalone structure:
 
 Mesh adapter persistence:
 
-- Identity persisted using MeshCore `IdentityStore`.
-- Contacts persisted to SPIFFS (`/mesh_contacts.bin`).
-- Channels persisted to SPIFFS (`/mesh_channels.bin`).
+- Identity persisted in NVS via `Preferences`.
+- Contacts persisted in NVS via `Preferences`.
+- Channels persisted in NVS via `Preferences`.
 
 ## CI/CD
 

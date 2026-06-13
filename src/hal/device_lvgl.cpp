@@ -7,6 +7,10 @@
 
 namespace {
 
+#ifndef PLUMERIA_KEY_DEBUG
+#define PLUMERIA_KEY_DEBUG 0
+#endif
+
 #if defined(DEVICE_TDECK)
 constexpr int kTftSck = 40;
 constexpr int kTftMiso = 38;
@@ -44,7 +48,7 @@ constexpr int kKeyboardSda = 18;
 constexpr int kKeyboardScl = 8;
 constexpr int kKeyboardInt = 46;
 constexpr int kKeyboardAddr = 0x55;
-constexpr uint32_t kKeyboardIdleProbeMs = 12;
+constexpr uint32_t kKeyboardIdleProbeMs = 12;  // Fallback polling for boards with unreliable keyboard IRQ.
 #else
 constexpr int kTftSck = 35;
 constexpr int kTftMiso = 33;
@@ -164,6 +168,96 @@ lv_color_t g_draw_pixels[kLvglMaxHorRes * kLvglBufferLines];
 lv_disp_drv_t g_disp_drv;
 lv_indev_drv_t g_indev_drv;
 lv_indev_drv_t g_touch_indev_drv;
+#if defined(DEVICE_TDECK)
+bool g_keyboard_available = false;
+uint8_t g_keyboard_fail_streak = 0;
+uint32_t g_last_keyboard_diag_ms = 0;
+enum class KeyboardMapMode : uint8_t {
+  Unknown = 0,
+  Ascii,
+  Hid,
+};
+KeyboardMapMode g_keyboard_map_mode = KeyboardMapMode::Unknown;
+#endif
+
+#if defined(DEVICE_TDECK)
+uint32_t mapKeyboardRawHid(uint8_t raw) {
+  switch (raw) {
+    case 0x28:
+      return LV_KEY_ENTER;
+    case 0x29:
+      return LV_KEY_ESC;
+    case 0x2A:
+      return LV_KEY_BACKSPACE;
+    case 0x4F:
+      return LV_KEY_RIGHT;
+    case 0x50:
+      return LV_KEY_LEFT;
+    case 0x51:
+      return LV_KEY_DOWN;
+    case 0x52:
+      return LV_KEY_UP;
+    case 0x2C:
+      return ' ';
+    case 0x27:
+      return '0';
+    default:
+      break;
+  }
+
+  // Some keyboards emit USB HID usage IDs for alphanumerics.
+  if (raw >= 0x04 && raw <= 0x1D) {
+    return static_cast<uint32_t>('a' + (raw - 0x04));
+  }
+  if (raw >= 0x1E && raw <= 0x26) {
+    return static_cast<uint32_t>('1' + (raw - 0x1E));
+  }
+
+  return static_cast<uint32_t>(raw);
+}
+
+uint32_t mapKeyboardRawAscii(uint8_t raw) {
+  switch (raw) {
+    case 0x0D:
+    case 0x0A:
+      return LV_KEY_ENTER;
+    case 0x1B:
+      return LV_KEY_ESC;
+    case 0x08:
+    case 0x7F:
+      return LV_KEY_BACKSPACE;
+    default:
+      break;
+  }
+
+  return static_cast<uint32_t>(raw);
+}
+
+uint32_t mapKeyboardRaw(uint8_t raw) {
+  if (g_keyboard_map_mode == KeyboardMapMode::Unknown) {
+    if (raw >= 0x20 && raw <= 0x7E) {
+      g_keyboard_map_mode = KeyboardMapMode::Ascii;
+    } else if (raw == 0x28 || raw == 0x29 || raw == 0x2A || raw == 0x2B || raw == 0x2C || raw == 0x4F ||
+               raw == 0x50 || raw == 0x51 || raw == 0x52 ||
+               ((raw >= 0x04 && raw <= 0x27) && raw != 0x08 && raw != 0x0A && raw != 0x0D)) {
+      g_keyboard_map_mode = KeyboardMapMode::Hid;
+    }
+#if PLUMERIA_KEY_DEBUG
+    if (g_keyboard_map_mode == KeyboardMapMode::Ascii) {
+      Serial.printf("[KEYHAL] map mode=ASCII raw=0x%02X\n", static_cast<unsigned>(raw));
+    } else if (g_keyboard_map_mode == KeyboardMapMode::Hid) {
+      Serial.printf("[KEYHAL] map mode=HID raw=0x%02X\n", static_cast<unsigned>(raw));
+    }
+#endif
+  }
+
+  if (g_keyboard_map_mode == KeyboardMapMode::Hid) {
+    return mapKeyboardRawHid(raw);
+  }
+
+  return mapKeyboardRawAscii(raw);
+}
+#endif
 
 void flush_lcd(lv_disp_drv_t* disp_drv, const lv_area_t* area, lv_color_t* color_p) {
   int32_t width = area->x2 - area->x1 + 1;
@@ -193,35 +287,59 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   // of trackball motion and click behavior.
   const uint32_t kb_now_ms = millis();
   bool irq_active = (digitalRead(kKeyboardInt) == LOW);
-  if (irq_active || (kb_now_ms - last_keyboard_probe_ms >= kKeyboardIdleProbeMs)) {
+  bool should_probe = irq_active;
+  if (!should_probe && kKeyboardIdleProbeMs > 0 &&
+      (kb_now_ms - last_keyboard_probe_ms >= kKeyboardIdleProbeMs)) {
+    should_probe = true;
+  }
+
+  if (should_probe) {
     last_keyboard_probe_ms = kb_now_ms;
-    Wire.requestFrom(static_cast<uint8_t>(kKeyboardAddr), static_cast<uint8_t>(1));
-    if (Wire.available()) {
+    const int got = static_cast<int>(Wire.requestFrom(static_cast<uint8_t>(kKeyboardAddr), static_cast<uint8_t>(1)));
+    const bool emit_diag = (kb_now_ms - g_last_keyboard_diag_ms) >= 1000;
+    if (got == 1 && Wire.available()) {
+      if (!g_keyboard_available) {
+        g_keyboard_available = true;
+#if PLUMERIA_KEY_DEBUG
+        Serial.println("[KEYHAL] keyboard became available");
+#endif
+      }
       uint8_t raw = Wire.read();
       if (raw != 0x00 && raw != 0xFF) {
-        uint32_t mapped = 0;
-        switch (raw) {
-          case 0x0D:
-          case 0x0A:
-            mapped = LV_KEY_ENTER;
-            break;
-          case 0x1B:
-            mapped = LV_KEY_ESC;
-            break;
-          case 0x08:
-          case 0x7F:
-            mapped = LV_KEY_BACKSPACE;
-            break;
-          default:
-            mapped = raw;
-            break;
-        }
+        g_keyboard_fail_streak = 0;
+        const uint32_t mapped = mapKeyboardRaw(raw);
+#if PLUMERIA_KEY_DEBUG
+        Serial.printf("[KEYHAL] raw=0x%02X mapped=%lu irq=%d\n", static_cast<unsigned>(raw),
+                      static_cast<unsigned long>(mapped), irq_active ? 1 : 0);
+#endif
 
         data->state = LV_INDEV_STATE_PRESSED;
         data->key = mapped;
         return;
       }
+#if PLUMERIA_KEY_DEBUG
+      if (emit_diag) {
+        Serial.printf("[KEYHAL] probe got raw=0x%02X (no key) irq=%d mode=%u\n", static_cast<unsigned>(raw),
+                      irq_active ? 1 : 0, static_cast<unsigned>(g_keyboard_map_mode));
+      }
+#endif
+#if PLUMERIA_KEY_DEBUG
+    } else if (emit_diag) {
+      Serial.printf("[KEYHAL] probe got=%d avail=%d irq=%d\n", got, Wire.available() ? 1 : 0, irq_active ? 1 : 0);
+#endif
+  g_keyboard_available = false;
     }
+#if PLUMERIA_KEY_DEBUG
+    if (emit_diag) {
+      g_last_keyboard_diag_ms = kb_now_ms;
+    }
+#endif
+#if PLUMERIA_KEY_DEBUG
+  } else if ((kb_now_ms - g_last_keyboard_diag_ms) >= 2000) {
+    Serial.printf("[KEYHAL] idle avail=%d should_probe=%d irq=%d\n", g_keyboard_available ? 1 : 0,
+                  should_probe ? 1 : 0, irq_active ? 1 : 0);
+    g_last_keyboard_diag_ms = kb_now_ms;
+#endif
   }
 #endif
 
@@ -296,7 +414,20 @@ bool DeviceLvgl::begin() {
   Wire.setClock(400000UL);
   delay(30);
   Wire.beginTransmission(kKeyboardAddr);
-  Wire.endTransmission();
+  const int kb_err = Wire.endTransmission();
+  g_keyboard_available = (kb_err == 0);
+  g_keyboard_fail_streak = 0;
+  g_keyboard_map_mode = KeyboardMapMode::Unknown;
+  g_last_keyboard_diag_ms = 0;
+#if PLUMERIA_KEY_DEBUG
+  Serial.printf("[KEYHAL] debug=1 addr=0x%02X idle_probe_ms=%lu begin_err=%d available=%d\n",
+                static_cast<unsigned>(kKeyboardAddr), static_cast<unsigned long>(kKeyboardIdleProbeMs), kb_err,
+                g_keyboard_available ? 1 : 0);
+#endif
+  if (!g_keyboard_available) {
+    Serial.printf("[HAL] keyboard not detected at 0x%02X (err=%d), polling disabled\n",
+                  static_cast<unsigned>(kKeyboardAddr), kb_err);
+  }
 #endif
 
   g_lcd.init();
