@@ -13,6 +13,7 @@ struct WebSettings {
   double node_latitude;
   double node_longitude;
   bool send_location_in_advert;
+  uint16_t advert_interval_minutes;
   char wifi_ssid[64];
   char wifi_pass[64];
   char timezone[64];

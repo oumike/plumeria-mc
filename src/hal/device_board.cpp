@@ -111,9 +111,9 @@ bool DeviceBoard::begin() {
   #endif
 
   #if defined(DEVICE_TDECK)
-  Serial.println("[HAL] T-Deck board boot scaffold initialized");
+  if (false) Serial.println("[HAL] T-Deck board boot scaffold initialized");
   #else
-  Serial.println("[HAL] T-Lora pager board boot scaffold initialized");
+  if (false) Serial.println("[HAL] T-Lora pager board boot scaffold initialized");
   #endif
   return true;
 }

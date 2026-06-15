@@ -11,11 +11,13 @@ namespace mesh {
 enum class MeshEventType : uint8_t {
   Info,
   ChannelMessage,
+  DirectMessage,
 };
 
 struct MeshEvent {
   MeshEventType type;
   char channel_name[32];
+  char peer_key[65];
   char text[96];
 };
 
@@ -36,6 +38,8 @@ struct MeshContactSummary {
   bool favorite;
   uint8_t type;
   uint32_t lastmod;
+  int32_t gps_lat_i;
+  int32_t gps_lon_i;
 };
 
 struct MeshRuntime;
@@ -50,8 +54,15 @@ class MeshAdapter {
   bool setNodeName(const char* node_name);
   void getNodeName(char* out_name, size_t out_size) const;
   bool getPublicKeyHex(char* out_hex, size_t out_size) const;
+  bool getIdentityKeysHex(char* out_public_hex, size_t public_hex_size,
+                          char* out_private_hex, size_t private_hex_size) const;
+  bool importIdentityKeysHex(const char* public_hex, const char* private_hex);
+  bool setGpsEnabled(bool enabled);
+  int getGpsSatelliteCount() const;
   bool setAdvertLocation(bool enabled, double latitude, double longitude);
   void getAdvertLocation(bool* enabled, double* latitude, double* longitude) const;
+  bool setAutoAdvertIntervalMinutes(uint16_t minutes);
+  uint16_t getAutoAdvertIntervalMinutes() const;
   bool broadcastSelfAdvertNow();
   bool broadcastSelfAdvertFloodNow();
   int exportChannels(char names[][32], int max_names);
@@ -70,6 +81,7 @@ class MeshAdapter {
 
   void queueInfo(const char* text);
   void queueChannelMessage(const char* channel_name, const char* text);
+  void queueDirectMessage(const char* contact_name, const char* contact_key, const char* text);
   void noteRxRaw();
   void noteRxPacket();
   void markContactsDirty();
@@ -79,7 +91,7 @@ class MeshAdapter {
   bool loadChannelsFromFs();
   bool saveChannelsToFs();
 
-  static constexpr size_t kMaxQueuedEvents = 8;
+  static constexpr size_t kMaxQueuedEvents = 32;
   MeshEvent event_queue_[kMaxQueuedEvents]{};
   size_t event_head_ = 0;
   size_t event_tail_ = 0;
@@ -87,6 +99,8 @@ class MeshAdapter {
 
   MeshRuntime* runtime_ = nullptr;
   uint32_t last_advert_ms_ = 0;
+  uint32_t auto_advert_interval_ms_ = 21600000UL;
+  uint16_t auto_advert_interval_minutes_ = 360;
   uint32_t last_persist_flush_ms_ = 0;
   uint32_t rx_raw_count_ = 0;
   uint32_t rx_packet_count_ = 0;

@@ -16,12 +16,14 @@ constexpr uint32_t kRebootDelayMs = 1500;
 constexpr uint32_t kNtpSyncTimeoutMs = 6000;
 constexpr time_t kTimeValidEpoch = 1700000000;
 constexpr char kPrefsNs[] = "plumeria_web";
-constexpr char kDefaultSsid[] = "rhinohome";
-constexpr char kDefaultPass[] = "fishfood is smelly";
+constexpr char kDefaultSsid[] = "";
+constexpr char kDefaultPass[] = "";
 constexpr char kDefaultNodeName[] = "Plumeria";
 constexpr double kDefaultNodeLatitude = 0.0;
 constexpr double kDefaultNodeLongitude = 0.0;
 constexpr bool kDefaultSendLocationInAdvert = false;
+constexpr uint16_t kDefaultAdvertIntervalMinutes = 360;
+constexpr uint16_t kMinAdvertIntervalMinutes = 60;
 constexpr char kDefaultTimezone[] = "UTC0";
 constexpr char kDefaultRegion[] = "US";
 constexpr float kDefaultBwKhz = 62.5f;
@@ -62,7 +64,10 @@ uint32_t g_reboot_at_ms = 0;
 char g_channels_web_buf[40][32]{};
 plumeria::mesh::MeshContactSummary g_contacts_web_buf[160]{};
 plumeria::mesh::MeshChannelConfig g_imported_channels_buf[40]{};
+plumeria::mesh::MeshChannelConfig g_export_channels_buf[40]{};
 char g_existing_channels_buf[40][32]{};
+char g_export_identity_public_hex[193]{};
+char g_export_identity_private_hex[193]{};
 
 bool contactSortBefore(const plumeria::mesh::MeshContactSummary& a,
                        const plumeria::mesh::MeshContactSummary& b) {
@@ -127,6 +132,7 @@ void saveSettings(const plumeria::web::WebSettings& settings) {
   prefs.putDouble("node_lat", settings.node_latitude);
   prefs.putDouble("node_lon", settings.node_longitude);
   prefs.putBool("send_loc_adv", settings.send_location_in_advert);
+  prefs.putUShort("adv_int_min", settings.advert_interval_minutes);
   prefs.putString("wifi_ssid", settings.wifi_ssid);
   prefs.putString("wifi_pass", settings.wifi_pass);
   prefs.putString("timezone", settings.timezone);
@@ -181,9 +187,9 @@ bool connectSta(const char* ssid, const char* pass) {
   setIpFrom(WiFi.localIP());
 
   if (syncTimeFromNtp()) {
-    Serial.println("[WEB] NTP time synced");
+    if (false) Serial.println("[WEB] NTP time synced");
   } else {
-    Serial.println("[WEB] NTP time sync timed out");
+    if (false) Serial.println("[WEB] NTP time sync timed out");
   }
 
   return true;
@@ -260,16 +266,33 @@ String buildConfigText() {
   out += "pwr: ";
   out += String(g_settings.lora_tx_power_dbm);
   out += "\n";
+  out += "advert_interval_minutes: ";
+  out += String(g_settings.advert_interval_minutes);
+  out += "\n";
+
+  if (g_mesh) {
+    memset(g_export_identity_public_hex, 0, sizeof(g_export_identity_public_hex));
+    memset(g_export_identity_private_hex, 0, sizeof(g_export_identity_private_hex));
+    if (g_mesh->getIdentityKeysHex(g_export_identity_public_hex, sizeof(g_export_identity_public_hex),
+                                   g_export_identity_private_hex, sizeof(g_export_identity_private_hex))) {
+      out += "identity_public_key: ";
+      out += g_export_identity_public_hex;
+      out += "\n";
+      out += "identity_private_key: ";
+      out += g_export_identity_private_hex;
+      out += "\n";
+    }
+  }
 
   out += "channels:\n";
   if (g_mesh) {
-    plumeria::mesh::MeshChannelConfig channels[40]{};
-    const int count = g_mesh->exportChannelConfigs(channels, 40);
+    memset(g_export_channels_buf, 0, sizeof(g_export_channels_buf));
+    const int count = g_mesh->exportChannelConfigs(g_export_channels_buf, 40);
     for (int i = 0; i < count; i++) {
       out += "channel: ";
-      out += configSafeValue(channels[i].name);
+      out += configSafeValue(g_export_channels_buf[i].name);
       out += "|";
-      out += configSafeValue(channels[i].psk_base64);
+      out += configSafeValue(g_export_channels_buf[i].psk_base64);
       out += "\n";
     }
   }
@@ -297,6 +320,10 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   plumeria::web::WebSettings imported = g_settings;
   bool saw_channels = false;
   int imported_channel_count = 0;
+  bool saw_identity_private_key = false;
+  bool saw_identity_public_key = false;
+  char imported_identity_public_hex[193] = {};
+  char imported_identity_private_hex[193] = {};
   memset(g_imported_channels_buf, 0, sizeof(g_imported_channels_buf));
 
   String all(text);
@@ -350,10 +377,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
     } else if (key.equals("send_loc_adv")) {
       imported.send_location_in_advert = parseBoolArg(value, imported.send_location_in_advert);
     } else if (key.equals("wifi_ssid")) {
-      if (value.length() == 0) {
-        setImportError(err, err_size, "wifi_ssid cannot be empty");
-        return false;
-      }
+      // Empty SSID is valid: device falls back to AP mode until configured.
       copyString(imported.wifi_ssid, sizeof(imported.wifi_ssid), value.c_str());
     } else if (key.equals("wifi_pass")) {
       copyString(imported.wifi_pass, sizeof(imported.wifi_pass), value.c_str());
@@ -410,6 +434,33 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.lora_tx_power_dbm = static_cast<int8_t>(pwr);
+    } else if (key.equals("advert_interval_minutes")) {
+      const int minutes = value.toInt();
+      if (minutes < static_cast<int>(kMinAdvertIntervalMinutes) || minutes > 65535) {
+        setImportError(err, err_size, "Advert interval out of range");
+        return false;
+      }
+      imported.advert_interval_minutes = static_cast<uint16_t>(minutes);
+    } else if (key.equals("identity_public_key")) {
+      value.trim();
+      if (value.length() > 0) {
+        if (value.length() >= static_cast<int>(sizeof(imported_identity_public_hex))) {
+          setImportError(err, err_size, "identity_public_key is too long");
+          return false;
+        }
+        copyString(imported_identity_public_hex, sizeof(imported_identity_public_hex), value.c_str());
+        saw_identity_public_key = true;
+      }
+    } else if (key.equals("identity_private_key")) {
+      value.trim();
+      if (value.length() > 0) {
+        if (value.length() >= static_cast<int>(sizeof(imported_identity_private_hex))) {
+          setImportError(err, err_size, "identity_private_key is too long");
+          return false;
+        }
+        copyString(imported_identity_private_hex, sizeof(imported_identity_private_hex), value.c_str());
+        saw_identity_private_key = true;
+      }
     } else if (key.equals("channel")) {
       saw_channels = true;
       if (imported_channel_count >= 40) {
@@ -443,16 +494,28 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
       (fabsf(g_settings.lora_bw_khz - imported.lora_bw_khz) > 0.05f) ||
       (g_settings.lora_sf != imported.lora_sf) || (g_settings.lora_cr != imported.lora_cr) ||
       (g_settings.lora_tx_power_dbm != imported.lora_tx_power_dbm);
+  bool identity_changed = false;
 
   g_settings = imported;
 
   if (g_mesh) {
+    if (saw_identity_private_key) {
+      const char* public_key_ptr = saw_identity_public_key ? imported_identity_public_hex : nullptr;
+      if (!g_mesh->importIdentityKeysHex(public_key_ptr, imported_identity_private_hex)) {
+        setImportError(err, err_size, "Failed to import identity keys");
+        return false;
+      }
+      identity_changed = true;
+    }
+
     g_mesh->setNodeName(g_settings.node_name);
     if (!g_mesh->setAdvertLocation(g_settings.send_location_in_advert, g_settings.node_latitude,
                                    g_settings.node_longitude)) {
       setImportError(err, err_size, "Failed to apply advert location");
       return false;
     }
+    g_mesh->setGpsEnabled(!g_settings.send_location_in_advert);
+    g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
 
     if (saw_channels) {
       memset(g_existing_channels_buf, 0, sizeof(g_existing_channels_buf));
@@ -483,7 +546,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   applyTimezoneOffsetFromSettings();
   saveSettings(g_settings);
 
-  if (queue_reboot || wifi_changed || radio_changed) {
+  if (queue_reboot || wifi_changed || radio_changed || identity_changed) {
     g_reboot_pending = true;
     g_reboot_at_ms = millis() + kRebootDelayMs;
   }
@@ -619,6 +682,8 @@ void handleRoot() {
       "<div class='row'><label>Spreading Factor<input id='sf' type='number' min='5' max='12' step='1'></label>"
       "<label>Coding Rate (4/x)<input id='cr' type='number' min='5' max='8' step='1'></label></div>"
       "<label>TX Power dBm<input id='pwr' type='number' min='1' max='30' step='1'></label>"
+      "<label>Advert Interval Minutes<input id='adv_int_min' type='number' min='60' step='1'></label>"
+      "<small>Automatic adverts send both zero-hop and flood at this interval (minimum 60 minutes).</small>"
       "<small>This firmware uses explicit LoRa values (freq, bw, sf, cr, tx power), not modem profile names.</small>"
       "</section>"
       "<section><h3>Channels</h3><div class='row'>"
@@ -674,13 +739,13 @@ void handleRoot() {
       "function refreshGpsModeIndicator(){const gpsMode=document.getElementById('gps_mode');const gpsLabel=document.getElementById('gps_mode_label');if(!gpsMode)return;if(gpsLabel)gpsLabel.textContent=gpsMode.checked?'GPS ON':'GPS OFF, using default location.';}"
       "function bindNodeNameInput(){const el=document.getElementById('node_name');if(!el)return;el.addEventListener('input',()=>{nodeNameDirty=true;});el.addEventListener('change',()=>{nodeNameDirty=true;});}"
       "function bindLocationInputs(){['node_lat','node_lon'].forEach(id=>{const el=document.getElementById(id);if(!el)return;el.addEventListener('input',()=>{locationDirty=true;});el.addEventListener('change',()=>{locationDirty=true;});});const cb=document.getElementById('send_loc_adv');if(cb){cb.addEventListener('change',()=>{locationDirty=true;});}const gpsMode=document.getElementById('gps_mode');if(gpsMode){gpsMode.addEventListener('change',()=>{locationDirty=true;refreshGpsModeIndicator();});}refreshGpsModeIndicator();}"
-      "function bindRadioInputs(){['region','freq','bw','sf','cr','pwr'].forEach(id=>{const el=document.getElementById(id);if(!el)return;el.addEventListener('input',markRadioDirty);el.addEventListener('change',markRadioDirty);});}"
+      "function bindRadioInputs(){['region','freq','bw','sf','cr','pwr','adv_int_min'].forEach(id=>{const el=document.getElementById(id);if(!el)return;el.addEventListener('input',markRadioDirty);el.addEventListener('change',markRadioDirty);});}"
       "function bindTimezoneInput(){const el=document.getElementById('timezone');if(!el)return;el.addEventListener('input',markTimezoneDirty);el.addEventListener('change',markTimezoneDirty);}"
       "async function copyPublicKey(){const el=document.getElementById('public_key');if(!el||!el.value){alert('No public key');return;}try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(el.value);}else{el.focus();el.select();document.execCommand('copy');}alert('Public key copied');}catch(_e){el.focus();el.select();document.execCommand('copy');alert('Public key copied');}}"
       "function calcTimezoneOffsetMinutes(tz){try{const parts=new Intl.DateTimeFormat('en-US',{timeZone:tz,timeZoneName:'longOffset'}).formatToParts(new Date());const zone=(parts.find(p=>p.type==='timeZoneName')||{}).value||'';const m=zone.match(/([+-])(\\d{1,2})(?::?(\\d{2}))?/);if(m){const sign=m[1]==='-'?-1:1;const hh=parseInt(m[2],10)||0;const mm=parseInt(m[3]||'0',10)||0;return sign*(hh*60+mm);}}catch(_e){}return 0;}"
       "async function jget(u){const r=await fetch(u);return r.json();}"
       "async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(b)});return r.json();}"
-      "async function loadStatus(forceRadio=false){const s=await jget('/api/status');const tz=s.timezone||'UTC0';const nodeEl=document.getElementById('node_name');const nodeFocused=(nodeEl&&document.activeElement===nodeEl);if(nodeEl&&(forceRadio||(!nodeNameDirty&&!nodeFocused))){nodeEl.value=s.node_name||'';}const pkEl=document.getElementById('public_key');if(pkEl&&s.public_key){pkEl.value=s.public_key;}if(forceRadio||!locationDirty){document.getElementById('node_lat').value=(typeof s.node_lat==='number')?s.node_lat:0;document.getElementById('node_lon').value=(typeof s.node_lon==='number')?s.node_lon:0;document.getElementById('send_loc_adv').checked=!!s.send_loc_adv;refreshGpsModeIndicator();}document.getElementById('wifi_ssid').value=s.wifi_ssid||'';document.getElementById('wifi_pass').value=s.wifi_pass||'';const tzSel=document.getElementById('timezone');const tzNeedsInit=!(tzSel&&tzSel.options&&tzSel.options.length>0);const tzFocused=(tzSel&&document.activeElement===tzSel);if(tzNeedsInit||forceRadio||(!timezoneDirty&&!tzFocused)){ensureTimezoneOptions(tz);}if(forceRadio||!radioDirty){document.getElementById('region').value=s.region||'US';document.getElementById('freq').value=s.freq;document.getElementById('bw').value=s.bw;document.getElementById('sf').value=s.sf;document.getElementById('cr').value=s.cr;document.getElementById('pwr').value=s.pwr;}}"
+      "async function loadStatus(forceRadio=false){const s=await jget('/api/status');const tz=s.timezone||'UTC0';const nodeEl=document.getElementById('node_name');const nodeFocused=(nodeEl&&document.activeElement===nodeEl);if(nodeEl&&(forceRadio||(!nodeNameDirty&&!nodeFocused))){nodeEl.value=s.node_name||'';}const pkEl=document.getElementById('public_key');if(pkEl&&s.public_key){pkEl.value=s.public_key;}if(forceRadio||!locationDirty){document.getElementById('node_lat').value=(typeof s.node_lat==='number')?s.node_lat:0;document.getElementById('node_lon').value=(typeof s.node_lon==='number')?s.node_lon:0;document.getElementById('send_loc_adv').checked=!!s.send_loc_adv;refreshGpsModeIndicator();}document.getElementById('wifi_ssid').value=s.wifi_ssid||'';document.getElementById('wifi_pass').value=s.wifi_pass||'';const tzSel=document.getElementById('timezone');const tzNeedsInit=!(tzSel&&tzSel.options&&tzSel.options.length>0);const tzFocused=(tzSel&&document.activeElement===tzSel);if(tzNeedsInit||forceRadio||(!timezoneDirty&&!tzFocused)){ensureTimezoneOptions(tz);}if(forceRadio||!radioDirty){document.getElementById('region').value=s.region||'US';document.getElementById('freq').value=s.freq;document.getElementById('bw').value=s.bw;document.getElementById('sf').value=s.sf;document.getElementById('cr').value=s.cr;document.getElementById('pwr').value=s.pwr;document.getElementById('adv_int_min').value=s.adv_int_min||360;}}"
       "async function loadPresets(){try{const p=await jget('/api/presets');regionDefaults=(p.region_defaults&&Object.keys(p.region_defaults).length>0)?p.region_defaults:regionDefaultsBootstrap;const r=document.getElementById('region');if(Array.isArray(p.regions)&&p.regions.length>0){r.innerHTML='';p.regions.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;if(v===p.selected_region)o.selected=true;r.appendChild(o);});}if(p.selected_region){r.value=p.selected_region;}}catch(_e){regionDefaults=regionDefaultsBootstrap;}}"
       "function applyRegionPreset(){const r=document.getElementById('region').value;const d=regionDefaults[r]||regionDefaultsBootstrap[r];if(!d)return;document.getElementById('freq').value=d.freq;document.getElementById('bw').value=d.bw;document.getElementById('sf').value=d.sf;document.getElementById('cr').value=d.cr;document.getElementById('pwr').value=d.pwr;radioDirty=true;}"
       "async function loadChannels(){const c=await jget('/api/channels');const ul=document.getElementById('channels');ul.innerHTML='';c.channels.forEach(n=>{const li=document.createElement('li');li.textContent=n;if(n==='Public'){const ro=document.createElement('small');ro.textContent=' (read-only)';li.appendChild(ro);}else{const b=document.createElement('button');b.textContent='Remove';b.style.width='auto';b.style.display='inline-block';b.style.marginLeft='8px';b.onclick=async()=>{await jpost('/api/channels/remove',{name:n});await loadChannels();};li.appendChild(b);}ul.appendChild(li);});}"
@@ -689,7 +754,7 @@ void handleRoot() {
       "async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||r.error||'done');}"
       "function utilExportConfig(){window.location='/api/util/export';}"
       "async function utilImportConfig(){const status=document.getElementById('util_status');const input=document.getElementById('util_cfg_file');if(!input||!input.files||input.files.length===0){if(status)status.textContent='Choose a config file first.';return;}const file=input.files[0];const text=await file.text();const r=await jpost('/api/util/import',{content:text});if(status)status.textContent=(r&&r.message)?r.message:(r&&r.error)?r.error:'done';if(!r||!r.ok){alert((r&&r.error)||'failed');return;}alert(r.message||'Config imported');}"
-      "async function saveAll(){if(channelMutationInFlight){alert('Channel update in progress, please wait');return;}const pendingName=(document.getElementById('ch_name').value||'').trim();const pendingPsk=(document.getElementById('ch_psk').value||'').trim();if(pendingName){if(pendingName[0]!=='#'&&!pendingPsk){alert('PSK is required for non-# channels');return;}let addRes=null;channelMutationInFlight=true;try{addRes=await jpost('/api/channels/add',{name:pendingName,psk:pendingPsk});}finally{channelMutationInFlight=false;}if(!addRes||!addRes.ok){alert((addRes&&addRes.error)||'failed to add channel');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}const tzVal=document.getElementById('timezone').value;const sendLoc=document.getElementById('send_loc_adv').checked?'1':'0';const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:sendLoc,ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tzVal,tz_offset:String(calcTimezoneOffsetMinutes(tzVal)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value});alert(r.message||r.error||'done');if(r.ok){timezoneDirty=false;nodeNameDirty=false;locationDirty=false;}}"
+      "async function saveAll(){if(channelMutationInFlight){alert('Channel update in progress, please wait');return;}const pendingName=(document.getElementById('ch_name').value||'').trim();const pendingPsk=(document.getElementById('ch_psk').value||'').trim();if(pendingName){if(pendingName[0]!=='#'&&!pendingPsk){alert('PSK is required for non-# channels');return;}let addRes=null;channelMutationInFlight=true;try{addRes=await jpost('/api/channels/add',{name:pendingName,psk:pendingPsk});}finally{channelMutationInFlight=false;}if(!addRes||!addRes.ok){alert((addRes&&addRes.error)||'failed to add channel');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}const tzVal=document.getElementById('timezone').value;const sendLoc=document.getElementById('send_loc_adv').checked?'1':'0';const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:sendLoc,ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tzVal,tz_offset:String(calcTimezoneOffsetMinutes(tzVal)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value});alert(r.message||r.error||'done');if(r.ok){timezoneDirty=false;nodeNameDirty=false;locationDirty=false;}}"
       "async function addChannel(){if(channelMutationInFlight){return;}const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}let r=null;channelMutationInFlight=true;try{r=await jpost('/api/channels/add',{name,psk});}finally{channelMutationInFlight=false;}if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}"
       "async function boot(){showTab('config');bindNodeNameInput();bindLocationInputs();bindRadioInputs();bindTimezoneInput();ensureTimezoneOptions('UTC0');await loadPresets();await loadStatus(true);await loadChannels();await loadContacts();setInterval(()=>{loadStatus(false);loadContacts();},4000);}boot();"
       "</script></div></body></html>";
@@ -747,6 +812,8 @@ void handleStatus() {
   payload += String(g_settings.lora_cr);
   payload += ",\"pwr\":";
   payload += String(g_settings.lora_tx_power_dbm);
+  payload += ",\"adv_int_min\":";
+  payload += String(g_settings.advert_interval_minutes);
   payload += ",\"rx_raw\":";
   payload += String(radio_stats.rx_raw_count);
   payload += ",\"rx_pkt\":";
@@ -953,6 +1020,7 @@ void handleSaveAll() {
   String sf = g_server.arg("sf");
   String cr = g_server.arg("cr");
   String pwr = g_server.arg("pwr");
+  String adv_int_min = g_server.arg("adv_int_min");
 
   node_name.trim();
   node_lat.trim();
@@ -976,6 +1044,7 @@ void handleSaveAll() {
   sf.trim();
   cr.trim();
   pwr.trim();
+  adv_int_min.trim();
 
   if (ssid.length() == 0) {
     sendJsonError("SSID is required");
@@ -1046,6 +1115,15 @@ void handleSaveAll() {
     return;
   }
 
+  int advert_interval_minutes = static_cast<int>(g_settings.advert_interval_minutes);
+  if (adv_int_min.length() > 0) {
+    advert_interval_minutes = adv_int_min.toInt();
+  }
+  if (advert_interval_minutes < static_cast<int>(kMinAdvertIntervalMinutes) || advert_interval_minutes > 65535) {
+    sendJsonError("Advert interval out of range");
+    return;
+  }
+
   const bool wifi_changed =
       (strcmp(g_settings.wifi_ssid, ssid.c_str()) != 0) || (strcmp(g_settings.wifi_pass, pass.c_str()) != 0);
   const bool radio_changed =
@@ -1063,6 +1141,7 @@ void handleSaveAll() {
   g_settings.lora_sf = static_cast<uint8_t>(sf_value);
   g_settings.lora_cr = static_cast<uint8_t>(cr_value);
   g_settings.lora_tx_power_dbm = static_cast<int8_t>(pwr_value);
+  g_settings.advert_interval_minutes = static_cast<uint16_t>(advert_interval_minutes);
   copyString(g_settings.wifi_ssid, sizeof(g_settings.wifi_ssid), ssid.c_str());
   copyString(g_settings.wifi_pass, sizeof(g_settings.wifi_pass), pass.c_str());
   copyString(g_settings.node_name, sizeof(g_settings.node_name), node_name.c_str());
@@ -1079,6 +1158,8 @@ void handleSaveAll() {
       sendJsonError("Failed to apply advert location");
       return;
     }
+    g_mesh->setGpsEnabled(!g_settings.send_location_in_advert);
+    g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
     g_mesh->broadcastSelfAdvertNow();
   }
 
@@ -1191,6 +1272,7 @@ void loadSettings(WebSettings* out_settings) {
   double node_latitude = prefs.getDouble("node_lat", kDefaultNodeLatitude);
   double node_longitude = prefs.getDouble("node_lon", kDefaultNodeLongitude);
   bool send_location_in_advert = prefs.getBool("send_loc_adv", kDefaultSendLocationInAdvert);
+  uint16_t advert_interval_minutes = prefs.getUShort("adv_int_min", kDefaultAdvertIntervalMinutes);
   String ssid = prefs.getString("wifi_ssid", kDefaultSsid);
   String pass = prefs.getString("wifi_pass", kDefaultPass);
   String timezone = prefs.getString("timezone", kDefaultTimezone);
@@ -1236,10 +1318,15 @@ void loadSettings(WebSettings* out_settings) {
   }
   prefs.end();
 
+  if (advert_interval_minutes < kMinAdvertIntervalMinutes) {
+    advert_interval_minutes = kDefaultAdvertIntervalMinutes;
+  }
+
   copyString(out_settings->node_name, sizeof(out_settings->node_name), node_name.c_str());
   out_settings->node_latitude = node_latitude;
   out_settings->node_longitude = node_longitude;
   out_settings->send_location_in_advert = send_location_in_advert;
+  out_settings->advert_interval_minutes = advert_interval_minutes;
   copyString(out_settings->wifi_ssid, sizeof(out_settings->wifi_ssid), ssid.c_str());
   copyString(out_settings->wifi_pass, sizeof(out_settings->wifi_pass), pass.c_str());
   copyString(out_settings->timezone, sizeof(out_settings->timezone), timezone.c_str());
@@ -1271,10 +1358,14 @@ bool begin(mesh::MeshAdapter* mesh_adapter, const WebSettings& initial_settings)
 
   g_mesh = mesh_adapter;
   g_settings = initial_settings;
-  if (g_mesh && g_settings.node_name[0] != '\0') {
-    g_mesh->setNodeName(g_settings.node_name);
+  if (g_mesh) {
+    if (g_settings.node_name[0] != '\0') {
+      g_mesh->setNodeName(g_settings.node_name);
+    }
     g_mesh->setAdvertLocation(g_settings.send_location_in_advert, g_settings.node_latitude,
                               g_settings.node_longitude);
+    g_mesh->setGpsEnabled(!g_settings.send_location_in_advert);
+    g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
   }
   applyTimezoneOffsetFromSettings();
   g_reboot_pending = false;
@@ -1286,7 +1377,7 @@ bool begin(mesh::MeshAdapter* mesh_adapter, const WebSettings& initial_settings)
   g_server.begin();
   g_running = true;
 
-  Serial.printf("[WEB] Config server running in %s mode at http://%s/\n", g_mode, g_ip);
+  if (false) Serial.printf("[WEB] Config server running in %s mode at http://%s/\n", g_mode, g_ip);
   return true;
 }
 
@@ -1357,6 +1448,7 @@ bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size) {
       setImportError(err, err_size, "Failed to apply advert location");
       return false;
     }
+    g_mesh->setGpsEnabled(!next.send_location_in_advert);
     g_mesh->broadcastSelfAdvertNow();
   }
 

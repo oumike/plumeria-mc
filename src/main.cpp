@@ -23,7 +23,7 @@ char g_channel_names_buf[kUiChannelCapacity][32]{};
 
 void initialize_lvgl() {
   lv_init();
-  Serial.println("[LVGL] Initialized");
+  if (false) Serial.println("[LVGL] Initialized");
 }
 
 void sync_ui_channels_from_mesh() {
@@ -99,13 +99,14 @@ void setup() {
   Serial.begin(115200);
 
   if (plumeria::config::kCompanionEnabled) {
-    Serial.println("[BOOT] Companion mode requested but disabled in this firmware.");
+    if (false) Serial.println("[BOOT] Companion mode requested but disabled in this firmware.");
   }
 
   initialize_lvgl();
 
   bool board_ready = g_board.begin();
   bool display_ready = g_display.begin();
+  if (false) Serial.printf("[BOOT] board_ready=%d display_ready=%d\n", board_ready ? 1 : 0, display_ready ? 1 : 0);
   bool mesh_ready = false;
 
   plumeria::web::loadSettings(&g_web_settings);
@@ -120,10 +121,18 @@ void setup() {
     memset(g_channel_names_buf, 0, sizeof(g_channel_names_buf));
     const int channel_count = g_mesh.exportChannels(g_channel_names_buf, kUiChannelCapacity);
     g_ui.setChannels(g_channel_names_buf, channel_count > 0 ? static_cast<size_t>(channel_count) : 0);
+
+    char pub_hex[65] = {};
+    if (g_mesh.getPublicKeyHex(pub_hex, sizeof(pub_hex))) {
+      if (false) Serial.printf("[BOOT][ID] pubkey=%s\n", pub_hex);
+    } else {
+      if (false) Serial.println("[BOOT][ID] pubkey=unavailable");
+    }
   }
 
   g_ui.attachMeshAdapter(&g_mesh);
-  g_ui.begin();
+  const bool ui_ready = g_ui.begin();
+  if (false) Serial.printf("[BOOT] ui_ready=%d\n", ui_ready ? 1 : 0);
   g_ui.setMeshReady(mesh_ready);
 
   plumeria::web::begin(&g_mesh, g_web_settings);
@@ -138,10 +147,18 @@ void loop() {
   plumeria::web::loop();
   sync_ui_wifi_state();
 
-  plumeria::mesh::MeshEvent events[4];
-  size_t event_count = g_mesh.drainEvents(events, 4);
-  for (size_t i = 0; i < event_count; i++) {
-    g_ui.applyEvent(events[i]);
+  plumeria::mesh::MeshEvent events[16];
+  while (true) {
+    size_t event_count = g_mesh.drainEvents(events, 16);
+    if (event_count == 0) {
+      break;
+    }
+    for (size_t i = 0; i < event_count; i++) {
+      g_ui.applyEvent(events[i]);
+    }
+    if (event_count < 16) {
+      break;
+    }
   }
 
   g_ui.loop();

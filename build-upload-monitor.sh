@@ -13,6 +13,7 @@ HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
 TLORA_PAGER_ENV_NAME="tlora-pager-tft"
 ENV_SELECTED_EXPLICITLY=false
 SHOULD_ERASE_FIRST=false
+SHOULD_FULLCLEAN=false
 
 has_env() {
 	local env_name="$1"
@@ -90,7 +91,7 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E]"
+	echo "Usage: $0 [--tdeck|-t] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E] [--fullclean|-F]"
 	echo "  --tdeck, -t  Use T-Deck environment ($TDECK_ENV_NAME)"
 	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME)"
 	echo "  --pager, -P   Use T-Lora Pager TFT environment ($TLORA_PAGER_ENV_NAME)"
@@ -98,6 +99,7 @@ show_usage() {
 	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec env ($HELTEC_VERTICAL_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
+	echo "  --fullclean, -F  Run PlatformIO fullclean before upload"
 }
 
 run_pio_target() {
@@ -105,6 +107,19 @@ run_pio_target() {
 	local label="$2"
 	echo "[PIO] $label ($SELECTED_ENV_NAME)..."
 	pio run -e "$SELECTED_ENV_NAME" -t "$target"
+}
+
+format_duration() {
+	local total_seconds="$1"
+	local hours=$((total_seconds / 3600))
+	local minutes=$(((total_seconds % 3600) / 60))
+	local seconds=$((total_seconds % 60))
+
+	if [ "$hours" -gt 0 ]; then
+		printf "%dh %02dm %02ds" "$hours" "$minutes" "$seconds"
+	else
+		printf "%dm %02ds" "$minutes" "$seconds"
+	fi
 }
 
 if ! command -v pio >/dev/null 2>&1; then
@@ -119,6 +134,9 @@ for arg in "$@"; do
 			;;
 		--erase|-E)
 			SHOULD_ERASE_FIRST=true
+			;;
+		--fullclean|-F)
+			SHOULD_FULLCLEAN=true
 			;;
 		--cardputer|-C)
 			select_env_or_exit "$CARDPUTER_ENV_NAME" "Environment '$CARDPUTER_ENV_NAME' not found in platformio.ini"
@@ -152,6 +170,12 @@ if [ "$SHOULD_ERASE_FIRST" = true ]; then
 	run_pio_target "erase" "Erasing device flash"
 fi
 
-run_pio_target "fullclean" "Full clean"
+BUILD_START_TS="$(date +%s)"
+if [ "$SHOULD_FULLCLEAN" = true ]; then
+	run_pio_target "fullclean" "Full clean"
+fi
 run_pio_target "upload" "Upload"
+BUILD_END_TS="$(date +%s)"
+BUILD_ELAPSED_SECS=$((BUILD_END_TS - BUILD_START_TS))
+echo "[PIO] Build completed in $(format_duration "$BUILD_ELAPSED_SECS")."
 run_pio_target "monitor" "Monitor"

@@ -34,8 +34,10 @@ class StandaloneUi {
   };
 
   static constexpr uint8_t kChannelCount = 40;
-  static constexpr uint8_t kShortcutCount = 4;
+  static constexpr uint8_t kShortcutCount = 3;
   static constexpr uint8_t kCfgRowCount = 6;
+  static constexpr uint8_t kContactActionCount = 2;
+  static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
   static constexpr size_t kMaxStoredChatRows = 128;
 
@@ -48,6 +50,7 @@ class StandaloneUi {
   void refreshDropdownVisuals();
   void refreshShortcutVisuals();
   void refreshHeaderVisuals();
+  void refreshUnreadPulse(uint32_t now_ms);
   void refreshComposeDialog();
   void refreshClockIfNeeded(uint32_t now_ms);
   void syncChannelsFromMeshIfNeeded(uint32_t now_ms);
@@ -63,7 +66,22 @@ class StandaloneUi {
   void refreshCfgDialog();
   void moveCfgSelection(int delta);
   void activateCfgSelection();
-  bool setGpsAdvertEnabled(bool enabled);
+  bool openContactsDialog();
+  bool ensureContactsDialogBuilt();
+  void closeContactsDialog(bool focus_chat = false);
+  void refreshContactsDialog();
+  void moveContactsSelection(int delta);
+  void activateContactsAction(uint8_t action_idx);
+  void openDmDialog(const char* contact_name, const char* contact_key);
+  void closeDmDialog(bool focus_chat = false);
+  void appendDmLine(const char* contact_name, const char* contact_key, const char* text, ChatLineKind kind);
+  void rebuildDmDialog();
+  void clearDmPanel();
+  void openHelpDialog();
+  void closeHelpDialog();
+  void openAdvertPopup(const char* text, bool is_error);
+  void closeAdvertPopup();
+  bool setGpsEnabled(bool enabled);
   bool exportConfigToSd();
   bool importConfigFromSd();
   bool sendComposeMessage();
@@ -85,6 +103,9 @@ class StandaloneUi {
   void clearChatPanel();
   bool loadChatHistoryFromFs();
   bool saveChatHistoryToFs();
+  bool loadDmHistoryFromFs();
+  bool saveDmHistoryToFs();
+  bool pruneStoredDmByRetention(uint32_t now_epoch);
 
   void handleKey(uint32_t key);
   void handleClick(lv_obj_t* target);
@@ -121,6 +142,28 @@ class StandaloneUi {
   lv_obj_t* cfg_status_label_ = nullptr;
   lv_obj_t* cfg_rows_[kCfgRowCount]{};
   lv_obj_t* cfg_row_labels_[kCfgRowCount]{};
+  lv_obj_t* contacts_dialog_ = nullptr;
+  lv_obj_t* contacts_title_label_ = nullptr;
+  lv_obj_t* contacts_status_label_ = nullptr;
+  lv_obj_t* contacts_nodes_panel_ = nullptr;
+  lv_obj_t* contacts_node_rows_[kMaxContactsUi]{};
+  lv_obj_t* contacts_node_labels_[kMaxContactsUi]{};
+  lv_obj_t* contacts_detail_panel_ = nullptr;
+  lv_obj_t* contacts_action_rows_[kContactActionCount]{};
+  lv_obj_t* contacts_action_labels_[kContactActionCount]{};
+  lv_obj_t* contacts_full_name_label_ = nullptr;
+  lv_obj_t* contacts_lat_lon_label_ = nullptr;
+  lv_obj_t* contacts_last_heard_label_ = nullptr;
+  lv_obj_t* dm_dialog_ = nullptr;
+  lv_obj_t* dm_title_label_ = nullptr;
+  lv_obj_t* dm_panel_ = nullptr;
+  lv_obj_t* dm_rows_[kMaxChatRows]{};
+  size_t dm_row_count_ = 0;
+  lv_obj_t* help_dialog_ = nullptr;
+  lv_obj_t* help_title_label_ = nullptr;
+  lv_obj_t* help_body_label_ = nullptr;
+  lv_obj_t* advert_popup_ = nullptr;
+  lv_obj_t* advert_popup_label_ = nullptr;
 
   lv_obj_t* shortcut_strip_ = nullptr;
   lv_obj_t* shortcut_btns_[kShortcutCount]{};
@@ -141,6 +184,7 @@ class StandaloneUi {
   lv_style_t style_dropdown_highlight_;
   lv_style_t style_dropdown_active_;
   lv_style_t style_shortcut_active_;
+  lv_style_t style_unread_edge_;
   lv_style_t style_text_main_;
   lv_style_t style_text_dim_;
   lv_style_t style_msg_rx_;
@@ -152,14 +196,28 @@ class StandaloneUi {
   bool started_ = false;
   bool channel_dropdown_open_ = false;
   bool compose_open_ = false;
+  bool compose_dm_mode_ = false;
+  bool compose_return_to_dm_ = false;
   bool cfg_open_ = false;
+  bool contacts_open_ = false;
+  bool dm_open_ = false;
+  bool help_open_ = false;
+  bool advert_popup_open_ = false;
+  bool has_unread_dm_ = false;
+  bool contacts_actions_focused_ = false;
   bool cfg_import_confirm_armed_ = false;
   uint8_t pending_chat_focus_attempts_ = 0;
   uint8_t dropdown_highlight_channel_ = 0;
   uint8_t cfg_selected_row_ = 0;
+  uint8_t contacts_selected_index_ = 0;
+  uint8_t contacts_action_index_ = 0;
+  uint8_t contacts_count_ = 0;
+  uint8_t contacts_row_capacity_ = 0;
   uint32_t last_selector_action_ms_ = 0;
+  uint32_t last_contacts_sync_ms_ = 0;
   char cfg_action_text_[48]{};
   char cfg_status_text_[96]{};
+  char contacts_status_text_[96]{};
 
   FocusZone focus_zone_ = FocusZone::Selector;
   uint8_t selected_channel_ = 0;
@@ -168,12 +226,29 @@ class StandaloneUi {
   uint8_t configured_channel_count_ = 0;
   char configured_channel_names_[kChannelCount][32]{};
   char compose_target_channel_[32]{};
+  char compose_target_dm_pubkey_[65]{};
+  char dm_active_name_[32]{};
+  char dm_active_key_[65]{};
+  char last_dm_sender_name_[32]{};
+  char last_dm_sender_key_[65]{};
   char pending_local_echo_channel_[32]{};
   char pending_local_echo_text_[96]{};
   uint32_t pending_local_echo_deadline_ms_ = 0;
   bool unread_channels_[kChannelCount]{};
+  mesh::MeshContactSummary contacts_cache_[kMaxContactsUi]{};
 
   mesh::MeshAdapter* mesh_adapter_ = nullptr;
+
+  struct StoredDmLine {
+    char contact_name[32];
+    char contact_key[65];
+    char text[96];
+    ChatLineKind kind;
+    uint32_t timestamp_epoch;
+  };
+  StoredDmLine stored_dm_[kMaxStoredChatRows]{};
+  size_t stored_dm_head_ = 0;
+  size_t stored_dm_count_ = 0;
 
   struct StoredChatLine {
     char channel_name[32];
@@ -185,6 +260,9 @@ class StandaloneUi {
   size_t stored_chat_count_ = 0;
   bool chat_history_dirty_ = false;
   uint32_t last_chat_persist_ms_ = 0;
+  bool dm_history_dirty_ = false;
+  uint32_t last_dm_persist_ms_ = 0;
+  uint32_t last_dm_retention_prune_ms_ = 0;
 
   bool mesh_ready_ = false;
   bool gps_ok_ = false;
@@ -196,6 +274,7 @@ class StandaloneUi {
   uint32_t last_clock_update_ms_ = 0;
   uint16_t last_clock_minute_ = 0xFFFF;
   uint32_t last_channel_sync_ms_ = 0;
+  uint32_t last_unread_pulse_ms_ = 0;
 };
 
 }  // namespace ui

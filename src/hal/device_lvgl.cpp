@@ -47,8 +47,12 @@ constexpr int kTouchAddr = 0x5D;
 constexpr int kKeyboardSda = 18;
 constexpr int kKeyboardScl = 8;
 constexpr int kKeyboardInt = 46;
-constexpr int kKeyboardAddr = 0x55;
+constexpr uint8_t kKeyboardAddrDefault = 0x55;
+constexpr uint8_t kKeyboardReadBytes = 2;
+constexpr uint8_t kKeyboardAddrCandidates[] = {0x55, 0x5F, 0x56};
 constexpr uint32_t kKeyboardIdleProbeMs = 12;  // Fallback polling for boards with unreliable keyboard IRQ.
+constexpr uint32_t kKeyboardRecoveryProbeMs = 1000;
+constexpr uint8_t kKeyboardMaxFailStreak = 4;
 #else
 constexpr int kTftSck = 35;
 constexpr int kTftMiso = 33;
@@ -172,12 +176,34 @@ lv_indev_drv_t g_touch_indev_drv;
 bool g_keyboard_available = false;
 uint8_t g_keyboard_fail_streak = 0;
 uint32_t g_last_keyboard_diag_ms = 0;
+uint8_t g_keyboard_addr = kKeyboardAddrDefault;
+uint8_t g_keyboard_addr_candidate_idx = 0;
+uint8_t g_last_keyboard_press_code = 0;
+uint32_t g_last_keyboard_press_ms = 0;
 enum class KeyboardMapMode : uint8_t {
   Unknown = 0,
   Ascii,
   Hid,
 };
 KeyboardMapMode g_keyboard_map_mode = KeyboardMapMode::Unknown;
+
+bool probeKeyboardAddress(uint8_t* out_addr) {
+  if (!out_addr) {
+    return false;
+  }
+
+  for (size_t i = 0; i < (sizeof(kKeyboardAddrCandidates) / sizeof(kKeyboardAddrCandidates[0])); i++) {
+    const uint8_t addr = kKeyboardAddrCandidates[i];
+    Wire.beginTransmission(addr);
+    const int err = Wire.endTransmission();
+    if (err == 0) {
+      *out_addr = addr;
+      return true;
+    }
+  }
+
+  return false;
+}
 #endif
 
 #if defined(DEVICE_TDECK)
@@ -244,9 +270,9 @@ uint32_t mapKeyboardRaw(uint8_t raw) {
     }
 #if PLUMERIA_KEY_DEBUG
     if (g_keyboard_map_mode == KeyboardMapMode::Ascii) {
-      Serial.printf("[KEYHAL] map mode=ASCII raw=0x%02X\n", static_cast<unsigned>(raw));
+      if (false) Serial.printf("[KEYHAL] map mode=ASCII raw=0x%02X\n", static_cast<unsigned>(raw));
     } else if (g_keyboard_map_mode == KeyboardMapMode::Hid) {
-      Serial.printf("[KEYHAL] map mode=HID raw=0x%02X\n", static_cast<unsigned>(raw));
+      if (false) Serial.printf("[KEYHAL] map mode=HID raw=0x%02X\n", static_cast<unsigned>(raw));
     }
 #endif
   }
@@ -278,6 +304,7 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   static uint32_t last_event_ms = 0;
 #if defined(DEVICE_TDECK)
   static uint32_t last_keyboard_probe_ms = 0;
+  static uint32_t last_keyboard_recover_probe_ms = 0;
 #endif
 
   data->state = LV_INDEV_STATE_RELEASED;
@@ -287,47 +314,122 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   // of trackball motion and click behavior.
   const uint32_t kb_now_ms = millis();
   bool irq_active = (digitalRead(kKeyboardInt) == LOW);
-  bool should_probe = irq_active;
-  if (!should_probe && kKeyboardIdleProbeMs > 0 &&
-      (kb_now_ms - last_keyboard_probe_ms >= kKeyboardIdleProbeMs)) {
-    should_probe = true;
+  bool should_probe = false;
+
+  if (!g_keyboard_available) {
+    // Keyboard missing/busy: probe slowly, but still attempt reads because some
+    // firmwares may not ACK a write probe while still supporting read requests.
+    if (kb_now_ms - last_keyboard_recover_probe_ms >= kKeyboardRecoveryProbeMs) {
+      last_keyboard_recover_probe_ms = kb_now_ms;
+      uint8_t detected_addr = g_keyboard_addr;
+      if (probeKeyboardAddress(&detected_addr)) {
+        g_keyboard_addr = detected_addr;
+      } else {
+        const size_t candidate_count = sizeof(kKeyboardAddrCandidates) / sizeof(kKeyboardAddrCandidates[0]);
+        if (candidate_count > 0) {
+          g_keyboard_addr = kKeyboardAddrCandidates[g_keyboard_addr_candidate_idx % candidate_count];
+          g_keyboard_addr_candidate_idx = static_cast<uint8_t>((g_keyboard_addr_candidate_idx + 1) % candidate_count);
+        }
+      }
+      should_probe = true;
+#if PLUMERIA_KEY_DEBUG
+      if ((kb_now_ms - g_last_keyboard_diag_ms) >= 1000) {
+        if (false) Serial.println("[KEYHAL] recover probe failed");
+        g_last_keyboard_diag_ms = kb_now_ms;
+      }
+#endif
+    }
+  } else {
+    should_probe = irq_active;
+    if (!should_probe && kKeyboardIdleProbeMs > 0 &&
+        (kb_now_ms - last_keyboard_probe_ms >= kKeyboardIdleProbeMs)) {
+      should_probe = true;
+    }
   }
 
   if (should_probe) {
     last_keyboard_probe_ms = kb_now_ms;
-    const int got = static_cast<int>(Wire.requestFrom(static_cast<uint8_t>(kKeyboardAddr), static_cast<uint8_t>(1)));
+    const int got = static_cast<int>(Wire.requestFrom(g_keyboard_addr, kKeyboardReadBytes));
     const bool emit_diag = (kb_now_ms - g_last_keyboard_diag_ms) >= 1000;
-    if (got == 1 && Wire.available()) {
+    if (got >= 1 && Wire.available()) {
       if (!g_keyboard_available) {
         g_keyboard_available = true;
+        g_keyboard_fail_streak = 0;
 #if PLUMERIA_KEY_DEBUG
-        Serial.println("[KEYHAL] keyboard became available");
+        if (false) Serial.println("[KEYHAL] keyboard became available");
 #endif
+        if (false) Serial.printf("[HAL] keyboard active at 0x%02X\n", static_cast<unsigned>(g_keyboard_addr));
       }
-      uint8_t raw = Wire.read();
+      const uint8_t raw0 = Wire.read();
+      uint8_t raw1 = 0x00;
+      if (Wire.available()) {
+        raw1 = Wire.read();
+      }
+
+      // Some keyboard firmwares publish two-byte reports where the actual key code
+      // is the second byte; prefer a non-empty second byte when present.
+      uint8_t raw = raw0;
+      if (raw1 != 0x00 && raw1 != 0xFF) {
+        raw = raw1;
+      }
+
+      const bool high_bit_set = (raw & 0x80) != 0;
+      const uint8_t raw_code = static_cast<uint8_t>(raw & 0x7F);
       if (raw != 0x00 && raw != 0xFF) {
         g_keyboard_fail_streak = 0;
-        const uint32_t mapped = mapKeyboardRaw(raw);
+        bool treat_as_release = false;
+        if (high_bit_set && raw_code == g_last_keyboard_press_code &&
+            (kb_now_ms - g_last_keyboard_press_ms) <= 120) {
+          treat_as_release = true;
+        }
+
+        if (treat_as_release) {
 #if PLUMERIA_KEY_DEBUG
-        Serial.printf("[KEYHAL] raw=0x%02X mapped=%lu irq=%d\n", static_cast<unsigned>(raw),
+          if (emit_diag) {
+            if (false) Serial.printf("[KEYHAL] raw=0x%02X (release)\n", static_cast<unsigned>(raw));
+          }
+#endif
+          return;
+        }
+
+        const uint32_t mapped = mapKeyboardRaw(raw_code);
+#if PLUMERIA_KEY_DEBUG
+  if (false) Serial.printf("[KEYHAL] raw0=0x%02X raw1=0x%02X raw=0x%02X code=0x%02X mapped=%lu irq=%d\n",
+          static_cast<unsigned>(raw0), static_cast<unsigned>(raw1), static_cast<unsigned>(raw),
+                      static_cast<unsigned>(raw_code),
                       static_cast<unsigned long>(mapped), irq_active ? 1 : 0);
 #endif
 
         data->state = LV_INDEV_STATE_PRESSED;
         data->key = mapped;
+        g_last_keyboard_press_code = raw_code;
+        g_last_keyboard_press_ms = kb_now_ms;
         return;
       }
 #if PLUMERIA_KEY_DEBUG
       if (emit_diag) {
-        Serial.printf("[KEYHAL] probe got raw=0x%02X (no key) irq=%d mode=%u\n", static_cast<unsigned>(raw),
+        if (false) Serial.printf("[KEYHAL] probe got raw=0x%02X (no key) irq=%d mode=%u\n", static_cast<unsigned>(raw),
                       irq_active ? 1 : 0, static_cast<unsigned>(g_keyboard_map_mode));
       }
 #endif
+    } else if (got == 0) {
+      // Idle poll with no key available; do not treat as an I2C failure.
+      g_keyboard_fail_streak = 0;
+    } else {
+      if (g_keyboard_fail_streak < 255) {
+        g_keyboard_fail_streak++;
+      }
+      if (g_keyboard_fail_streak >= kKeyboardMaxFailStreak) {
+        g_keyboard_available = false;
+      }
 #if PLUMERIA_KEY_DEBUG
-    } else if (emit_diag) {
-      Serial.printf("[KEYHAL] probe got=%d avail=%d irq=%d\n", got, Wire.available() ? 1 : 0, irq_active ? 1 : 0);
+      if (emit_diag) {
+    if (false) Serial.printf("[KEYHAL] probe fail addr=0x%02X got=%d avail=%d irq=%d streak=%u kb_avail=%d\n",
+          static_cast<unsigned>(g_keyboard_addr), got,
+                      Wire.available() ? 1 : 0, irq_active ? 1 : 0, static_cast<unsigned>(g_keyboard_fail_streak),
+                      g_keyboard_available ? 1 : 0);
+      }
 #endif
-  g_keyboard_available = false;
     }
 #if PLUMERIA_KEY_DEBUG
     if (emit_diag) {
@@ -336,7 +438,7 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 #endif
 #if PLUMERIA_KEY_DEBUG
   } else if ((kb_now_ms - g_last_keyboard_diag_ms) >= 2000) {
-    Serial.printf("[KEYHAL] idle avail=%d should_probe=%d irq=%d\n", g_keyboard_available ? 1 : 0,
+    if (false) Serial.printf("[KEYHAL] idle avail=%d should_probe=%d irq=%d\n", g_keyboard_available ? 1 : 0,
                   should_probe ? 1 : 0, irq_active ? 1 : 0);
     g_last_keyboard_diag_ms = kb_now_ms;
 #endif
@@ -413,20 +515,21 @@ bool DeviceLvgl::begin() {
   Wire.begin(kKeyboardSda, kKeyboardScl, 100000UL);
   Wire.setClock(400000UL);
   delay(30);
-  Wire.beginTransmission(kKeyboardAddr);
-  const int kb_err = Wire.endTransmission();
-  g_keyboard_available = (kb_err == 0);
+  uint8_t detected_addr = kKeyboardAddrDefault;
+  g_keyboard_available = probeKeyboardAddress(&detected_addr);
+  g_keyboard_addr = detected_addr;
   g_keyboard_fail_streak = 0;
   g_keyboard_map_mode = KeyboardMapMode::Unknown;
   g_last_keyboard_diag_ms = 0;
 #if PLUMERIA_KEY_DEBUG
-  Serial.printf("[KEYHAL] debug=1 addr=0x%02X idle_probe_ms=%lu begin_err=%d available=%d\n",
-                static_cast<unsigned>(kKeyboardAddr), static_cast<unsigned long>(kKeyboardIdleProbeMs), kb_err,
+  if (false) Serial.printf("[KEYHAL] debug=1 addr=0x%02X idle_probe_ms=%lu available=%d\n",
+                static_cast<unsigned>(g_keyboard_addr), static_cast<unsigned long>(kKeyboardIdleProbeMs),
                 g_keyboard_available ? 1 : 0);
 #endif
   if (!g_keyboard_available) {
-    Serial.printf("[HAL] keyboard not detected at 0x%02X (err=%d), polling disabled\n",
-                  static_cast<unsigned>(kKeyboardAddr), kb_err);
+    if (false) Serial.println("[HAL] keyboard not detected on known addresses, probing in recovery mode");
+  } else {
+    if (false) Serial.printf("[HAL] keyboard detected at 0x%02X\n", static_cast<unsigned>(g_keyboard_addr));
   }
 #endif
 
@@ -464,7 +567,7 @@ bool DeviceLvgl::begin() {
 #endif
 
   g_started = true;
-  Serial.printf("[HAL] LVGL display + scroll-wheel input ready (%ldx%ld)\n", static_cast<long>(panel_w),
+  if (false) Serial.printf("[HAL] LVGL display + scroll-wheel input ready (%ldx%ld)\n", static_cast<long>(panel_w),
                 static_cast<long>(panel_h));
   return true;
 }
