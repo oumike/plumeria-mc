@@ -26,23 +26,12 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Checkout MeshCore dependency
-        id: checkout_meshcore
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          repository: oumike/MeshCore
-          path: ../MeshCore
-          token: ${{ secrets.MESHCORE_PAT != '' && secrets.MESHCORE_PAT || github.token }}
-          fetch-depth: 1
-
       - name: Verify MeshCore layout
         run: |
           set -euo pipefail
-          if [ ! -d ../MeshCore/lib/ed25519 ]; then
-            echo "Unable to fetch dependency repo oumike/MeshCore."
-            echo "If MeshCore is private, add repo secret MESHCORE_PAT with read access to oumike/MeshCore."
-            echo "If MeshCore is public, verify repository name/path is correct."
+          if [ ! -d third_party/MeshCore/lib/ed25519 ]; then
+            echo "Vendored dependency missing: third_party/MeshCore/lib/ed25519"
+            echo "Ensure MeshCore subset is committed under third_party/MeshCore."
             exit 1
           fi
 
