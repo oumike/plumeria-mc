@@ -26,12 +26,24 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Fetch MeshCore dependency
+      - name: Verify MeshCore token
+        if: ${{ secrets.MESHCORE_PAT == '' }}
+        run: |
+          echo "Missing required secret: MESHCORE_PAT"
+          echo "Add a PAT with read access to oumike/MeshCore in repo secrets."
+          exit 1
+
+      - name: Checkout MeshCore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: oumike/MeshCore
+          path: ../MeshCore
+          token: ${{ secrets.MESHCORE_PAT }}
+          fetch-depth: 1
+
+      - name: Verify MeshCore layout
         run: |
           set -euo pipefail
-          if [ ! -d ../MeshCore/.git ]; then
-            git clone --depth 1 https://github.com/oumike/MeshCore ../MeshCore
-          fi
           test -d ../MeshCore/lib/ed25519
 
       - name: Build firmware
