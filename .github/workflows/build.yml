@@ -26,6 +26,14 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
+      - name: Fetch MeshCore dependency
+        run: |
+          set -euo pipefail
+          if [ ! -d ../MeshCore/.git ]; then
+            git clone --depth 1 https://github.com/oumike/MeshCore ../MeshCore
+          fi
+          test -d ../MeshCore/lib/ed25519
+
       - name: Build firmware
         run: |
           set -euo pipefail
