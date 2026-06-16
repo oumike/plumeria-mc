@@ -27,11 +27,14 @@ jobs:
         run: pip install platformio
 
       - name: Verify MeshCore token
-        if: ${{ secrets.MESHCORE_PAT == '' }}
+        env:
+          MESHCORE_PAT: ${{ secrets.MESHCORE_PAT }}
         run: |
-          echo "Missing required secret: MESHCORE_PAT"
-          echo "Add a PAT with read access to oumike/MeshCore in repo secrets."
-          exit 1
+          if [ -z "${MESHCORE_PAT:-}" ]; then
+            echo "Missing required secret: MESHCORE_PAT"
+            echo "Add a PAT with read access to oumike/MeshCore in repo secrets."
+            exit 1
+          fi
 
       - name: Checkout MeshCore dependency
         uses: actions/checkout@v4
