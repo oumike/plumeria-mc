@@ -26,28 +26,25 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Verify MeshCore token
-        env:
-          MESHCORE_PAT: ${{ secrets.MESHCORE_PAT }}
-        run: |
-          if [ -z "${MESHCORE_PAT:-}" ]; then
-            echo "Missing required secret: MESHCORE_PAT"
-            echo "Add a PAT with read access to oumike/MeshCore in repo secrets."
-            exit 1
-          fi
-
       - name: Checkout MeshCore dependency
+        id: checkout_meshcore
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: oumike/MeshCore
           path: ../MeshCore
-          token: ${{ secrets.MESHCORE_PAT }}
+          token: ${{ secrets.MESHCORE_PAT != '' && secrets.MESHCORE_PAT || github.token }}
           fetch-depth: 1
 
       - name: Verify MeshCore layout
         run: |
           set -euo pipefail
-          test -d ../MeshCore/lib/ed25519
+          if [ ! -d ../MeshCore/lib/ed25519 ]; then
+            echo "Unable to fetch dependency repo oumike/MeshCore."
+            echo "If MeshCore is private, add repo secret MESHCORE_PAT with read access to oumike/MeshCore."
+            echo "If MeshCore is public, verify repository name/path is correct."
+            exit 1
+          fi
 
       - name: Build firmware
         run: |
