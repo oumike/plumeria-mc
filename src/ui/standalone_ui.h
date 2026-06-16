@@ -13,6 +13,7 @@ class StandaloneUi {
   void loop();
 
   void attachMeshAdapter(mesh::MeshAdapter* adapter);
+  void setFirstInstallIdentityPrompt(bool enabled);
   void setChannels(const char names[][32], size_t count);
   void setMeshReady(bool ready);
   void setWifiState(bool config_server_on, bool sta_connected, bool ap_mode);
@@ -35,7 +36,7 @@ class StandaloneUi {
 
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 3;
-  static constexpr uint8_t kCfgRowCount = 6;
+  static constexpr uint8_t kCfgRowCount = 7;
   static constexpr uint8_t kContactActionCount = 2;
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
@@ -84,6 +85,9 @@ class StandaloneUi {
   bool setGpsEnabled(bool enabled);
   bool exportConfigToSd();
   bool importConfigFromSd();
+  bool deleteConfigFromSd();
+  void openIdentityNamePrompt();
+  bool applyIdentityNameFromPrompt();
   bool sendComposeMessage();
   void scrollChatUp();
   void scrollChatDown();
@@ -135,6 +139,7 @@ class StandaloneUi {
   size_t chat_row_count_ = 0;
   lv_obj_t* compose_dialog_ = nullptr;
   lv_obj_t* compose_title_label_ = nullptr;
+  lv_obj_t* compose_hint_label_ = nullptr;
   lv_obj_t* compose_input_ = nullptr;
   lv_obj_t* cfg_dialog_ = nullptr;
   lv_obj_t* cfg_title_label_ = nullptr;
@@ -206,6 +211,10 @@ class StandaloneUi {
   bool has_unread_dm_ = false;
   bool contacts_actions_focused_ = false;
   bool cfg_import_confirm_armed_ = false;
+  bool cfg_delete_confirm_armed_ = false;
+  bool first_install_identity_prompt_ = false;
+  bool first_install_auto_export_pending_ = false;
+  bool identity_prompt_open_ = false;
   uint8_t pending_chat_focus_attempts_ = 0;
   uint8_t dropdown_highlight_channel_ = 0;
   uint8_t cfg_selected_row_ = 0;
@@ -214,6 +223,7 @@ class StandaloneUi {
   uint8_t contacts_count_ = 0;
   uint8_t contacts_row_capacity_ = 0;
   uint32_t last_selector_action_ms_ = 0;
+  uint32_t last_dropdown_open_ms_ = 0;
   uint32_t last_contacts_sync_ms_ = 0;
   char cfg_action_text_[48]{};
   char cfg_status_text_[96]{};

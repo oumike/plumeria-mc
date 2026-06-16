@@ -4,6 +4,8 @@
 #include <Preferences.h>
 #include <SD.h>
 #include <SPI.h>
+#include <Wire.h>
+#include <esp_vfs_fat.h>
 #include <lvgl.h>
 #include <stdio.h>
 #include <string.h>
@@ -66,7 +68,9 @@ constexpr lv_coord_t kHeaderIconsGap = 10;
 constexpr lv_coord_t kComposeDialogMinW = 160;
 constexpr lv_coord_t kComposeDialogMaxW = 236;
 constexpr lv_coord_t kComposeDialogH = 90;
+constexpr lv_coord_t kComposeDialogSingleLineH = 78;
 constexpr lv_coord_t kComposeInputH = 54;
+constexpr lv_coord_t kComposeInputSingleLineH = 24;
 constexpr size_t kComposeMessageMaxChars = 90;
 constexpr lv_coord_t kContactsDialogMinW = 220;
 constexpr lv_coord_t kContactsDialogMinH = 170;
@@ -88,6 +92,7 @@ constexpr char kDmHistoryBlobKey[] = "dm_blob";
 constexpr char kDmHistoryCountKey[] = "dm_count";
 constexpr char kCfgSdDir[] = "/plumeria";
 constexpr char kCfgSdPath[] = "/plumeria/plumeria-config.yaml";
+constexpr char kCfgSdPathFallback[] = "/plumeria-config.yaml";
 constexpr uint32_t kCfgSdClockHz = 800000UL;
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -111,16 +116,17 @@ const char* kHelpBodyText =
   "z = Advert zero-hop\n"
   "f = Advert flood\n"
   "d = DM from Contacts\n"
-  "j/k or arrows = scroll/navigate\n"
+  "j = up, k = down (arrows also work)\n"
   "Backspace = close current dialog";
 
-const char* kCfgRowLabels[6] = {
+const char* kCfgRowLabels[7] = {
   "Node Name",
   "Radio Preset",
   "Web Config",
   "GPS",
   "Export Config",
   "Import Config",
+  "Delete Config",
 };
 
 const char* radioPresetDisplayName(const char* region) {
@@ -440,6 +446,188 @@ void setErrText(char* out_err, size_t out_err_size, const char* text) {
   out_err[out_err_size - 1] = '\0';
 }
 
+void clearSdVfsRegistration() {
+  // Ignore return value: if path is not registered this is a no-op.
+  (void)esp_vfs_fat_unregister_path("/sdcard");
+}
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+constexpr uint8_t kPagerXl9555RegOut0 = 0x02;
+constexpr uint8_t kPagerXl9555RegOut1 = 0x03;
+constexpr uint8_t kPagerXl9555RegCfg0 = 0x06;
+constexpr uint8_t kPagerXl9555RegCfg1 = 0x07;
+constexpr uint8_t kPagerExpSdDet = 10;
+constexpr uint8_t kPagerExpSdPullen = 11;
+constexpr uint8_t kPagerExpSdEn = 12;
+
+enum class PagerSdPullenMode : uint8_t {
+  kInput = 0,
+  kLow = 1,
+  kHigh = 2,
+};
+
+struct PagerSdProfile {
+  bool invert_dir_sense;
+  bool sd_en_high;
+  PagerSdPullenMode pullen_mode;
+};
+
+bool pagerXl9555WriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+bool pagerXl9555ReadReg(uint8_t addr, uint8_t reg, uint8_t* val) {
+  if (!val) {
+    return false;
+  }
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  if (Wire.requestFrom(static_cast<int>(addr), 1) != 1) {
+    return false;
+  }
+  *val = static_cast<uint8_t>(Wire.read());
+  return true;
+}
+
+void pagerXl9555SetOutput(uint8_t pin, bool level, bool invert_dir_sense,
+                          uint8_t* out0, uint8_t* out1,
+                          uint8_t* cfg0, uint8_t* cfg1) {
+  if (!out0 || !out1 || !cfg0 || !cfg1) {
+    return;
+  }
+  const uint8_t bit = static_cast<uint8_t>(1U << (pin & 0x07));
+  if (pin < 8) {
+    if (invert_dir_sense) {
+      *cfg0 |= bit;
+    } else {
+      *cfg0 &= static_cast<uint8_t>(~bit);
+    }
+    if (level) {
+      *out0 |= bit;
+    } else {
+      *out0 &= static_cast<uint8_t>(~bit);
+    }
+  } else {
+    if (invert_dir_sense) {
+      *cfg1 |= bit;
+    } else {
+      *cfg1 &= static_cast<uint8_t>(~bit);
+    }
+    if (level) {
+      *out1 |= bit;
+    } else {
+      *out1 &= static_cast<uint8_t>(~bit);
+    }
+  }
+}
+
+void pagerXl9555SetInput(uint8_t pin, bool invert_dir_sense, uint8_t* cfg0, uint8_t* cfg1) {
+  if (!cfg0 || !cfg1) {
+    return;
+  }
+  const uint8_t bit = static_cast<uint8_t>(1U << (pin & 0x07));
+  if (pin < 8) {
+    if (invert_dir_sense) {
+      *cfg0 &= static_cast<uint8_t>(~bit);
+    } else {
+      *cfg0 |= bit;
+    }
+  } else {
+    if (invert_dir_sense) {
+      *cfg1 &= static_cast<uint8_t>(~bit);
+    } else {
+      *cfg1 |= bit;
+    }
+  }
+}
+
+bool pagerGetSdProfile(int profile, PagerSdProfile* out_profile) {
+  if (!out_profile) {
+    return false;
+  }
+  switch (profile) {
+    case 0:
+      *out_profile = {false, true, PagerSdPullenMode::kInput};
+      return true;
+    case 1:
+      *out_profile = {false, false, PagerSdPullenMode::kInput};
+      return true;
+    case 2:
+      *out_profile = {false, true, PagerSdPullenMode::kLow};
+      return true;
+    case 3:
+      *out_profile = {true, true, PagerSdPullenMode::kInput};
+      return true;
+    case 4:
+      *out_profile = {true, false, PagerSdPullenMode::kInput};
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool pagerPrepareSdPower(int profile, char* out_err, size_t out_err_size) {
+  PagerSdProfile cfg{};
+  if (!pagerGetSdProfile(profile, &cfg)) {
+    setErrText(out_err, out_err_size, "Invalid SD profile");
+    return false;
+  }
+
+  Wire.begin(3, 2, 100000UL);
+
+  uint8_t exp_addr = 0xFF;
+  for (uint8_t a = 0x20; a <= 0x27; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) {
+      exp_addr = a;
+      break;
+    }
+  }
+
+  if (exp_addr == 0xFF) {
+    setErrText(out_err, out_err_size, "SD expander not found");
+    return false;
+  }
+
+  uint8_t out0 = 0xFF;
+  uint8_t out1 = 0xFF;
+  uint8_t cfg0 = 0xFF;
+  uint8_t cfg1 = 0xFF;
+  (void)pagerXl9555ReadReg(exp_addr, kPagerXl9555RegOut0, &out0);
+  (void)pagerXl9555ReadReg(exp_addr, kPagerXl9555RegOut1, &out1);
+  (void)pagerXl9555ReadReg(exp_addr, kPagerXl9555RegCfg0, &cfg0);
+  (void)pagerXl9555ReadReg(exp_addr, kPagerXl9555RegCfg1, &cfg1);
+
+  // Keep Pager SD probing scoped to SD-specific expander lines only.
+  pagerXl9555SetOutput(kPagerExpSdEn, cfg.sd_en_high, cfg.invert_dir_sense, &out0, &out1, &cfg0, &cfg1);
+  pagerXl9555SetInput(kPagerExpSdDet, cfg.invert_dir_sense, &cfg0, &cfg1);
+  if (cfg.pullen_mode == PagerSdPullenMode::kInput) {
+    pagerXl9555SetInput(kPagerExpSdPullen, cfg.invert_dir_sense, &cfg0, &cfg1);
+  } else {
+    pagerXl9555SetOutput(kPagerExpSdPullen, cfg.pullen_mode == PagerSdPullenMode::kHigh,
+                         cfg.invert_dir_sense, &out0, &out1, &cfg0, &cfg1);
+  }
+
+  const bool ok = pagerXl9555WriteReg(exp_addr, kPagerXl9555RegOut0, out0) &&
+                  pagerXl9555WriteReg(exp_addr, kPagerXl9555RegOut1, out1) &&
+                  pagerXl9555WriteReg(exp_addr, kPagerXl9555RegCfg0, cfg0) &&
+                  pagerXl9555WriteReg(exp_addr, kPagerXl9555RegCfg1, cfg1);
+  if (!ok) {
+    setErrText(out_err, out_err_size, "SD expander write failed");
+    return false;
+  }
+
+  setErrText(out_err, out_err_size, "");
+  return true;
+}
+#endif
+
 bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
   setErrText(out_err, out_err_size, "SD unsupported on Heltec");
@@ -491,11 +679,79 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
     digitalWrite(tft_cs, HIGH);
   }
 
-  SPI.begin(sd_sck, sd_miso, sd_mosi);
-  if (!SD.begin(sd_cs, SPI, kCfgSdClockHz)) {
-    setErrText(out_err, out_err_size, "SD mount failed");
-    return false;
+  // Avoid duplicate VFS registration when SD is already mounted.
+  if (SD.cardType() != CARD_NONE) {
+    setErrText(out_err, out_err_size, "");
+    return true;
   }
+
+  SD.end();
+  clearSdVfsRegistration();
+  SPI.end();
+  delay(6);
+  SPI.begin(sd_sck, sd_miso, sd_mosi);
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+  static const int kProfiles[] = {3, 2, 0, 1, 4};
+  static const uint32_t kSpeeds[] = {4000000UL, 1000000UL, 400000UL};
+  for (size_t pi = 0; pi < (sizeof(kProfiles) / sizeof(kProfiles[0])); pi++) {
+    if (!pagerPrepareSdPower(kProfiles[pi], out_err, out_err_size)) {
+      continue;
+    }
+    delay(12);
+    for (size_t si = 0; si < (sizeof(kSpeeds) / sizeof(kSpeeds[0])); si++) {
+      SD.end();
+      clearSdVfsRegistration();
+      SPI.end();
+      delay(6);
+      SPI.begin(sd_sck, sd_miso, sd_mosi);
+      Serial.printf("[SD] try profile=%d speed=%lu\n", kProfiles[pi],
+                    static_cast<unsigned long>(kSpeeds[si]));
+      if (!SD.begin(sd_cs, SPI, kSpeeds[si])) {
+        SD.end();
+        clearSdVfsRegistration();
+        SPI.end();
+        delay(6);
+        continue;
+      }
+      if (SD.cardType() == CARD_NONE) {
+        SD.end();
+        clearSdVfsRegistration();
+        SPI.end();
+        delay(6);
+        continue;
+      }
+      Serial.printf("[SD] mounted profile=%d speed=%lu\n", kProfiles[pi],
+                    static_cast<unsigned long>(kSpeeds[si]));
+      setErrText(out_err, out_err_size, "");
+      return true;
+    }
+    delay(8);
+  }
+  SD.end();
+  clearSdVfsRegistration();
+  SPI.end();
+  delay(6);
+  setErrText(out_err, out_err_size, "SD mount failed");
+  return false;
+#else
+  if (!SD.begin(sd_cs, SPI, kCfgSdClockHz)) {
+    // Recover from stale mount state by tearing down and retrying once.
+    SD.end();
+    clearSdVfsRegistration();
+    SPI.end();
+    delay(6);
+    SPI.begin(sd_sck, sd_miso, sd_mosi);
+    if (!SD.begin(sd_cs, SPI, kCfgSdClockHz)) {
+      SD.end();
+      clearSdVfsRegistration();
+      SPI.end();
+      delay(6);
+      setErrText(out_err, out_err_size, "SD mount failed");
+      return false;
+    }
+  }
+#endif
 
   if (SD.cardType() == CARD_NONE) {
     setErrText(out_err, out_err_size, "No SD card");
@@ -685,6 +941,11 @@ bool StandaloneUi::createStyles() {
 
 void StandaloneUi::attachMeshAdapter(mesh::MeshAdapter* adapter) {
   mesh_adapter_ = adapter;
+}
+
+void StandaloneUi::setFirstInstallIdentityPrompt(bool enabled) {
+  first_install_identity_prompt_ = enabled;
+  first_install_auto_export_pending_ = enabled;
 }
 
 bool StandaloneUi::ensureContactsDialogBuilt() {
@@ -1112,6 +1373,16 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_style(compose_title_label_, &style_text_main_, 0);
   lv_obj_align(compose_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
 
+  compose_hint_label_ = lv_label_create(compose_dialog_);
+  lv_obj_add_style(compose_hint_label_, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(compose_hint_label_, &lv_font_montserrat_10, 0);
+#endif
+  lv_obj_set_width(compose_hint_label_, LV_PCT(96));
+  lv_label_set_long_mode(compose_hint_label_, LV_LABEL_LONG_WRAP);
+  lv_obj_align(compose_hint_label_, LV_ALIGN_TOP_LEFT, 4, 16);
+  lv_label_set_text(compose_hint_label_, "");
+
   compose_input_ = lv_textarea_create(compose_dialog_);
   lv_obj_set_size(compose_input_, LV_PCT(92), kComposeInputH);
   lv_obj_align(compose_input_, LV_ALIGN_BOTTOM_MID, 0, -8);
@@ -1127,7 +1398,7 @@ void StandaloneUi::buildLayout() {
 
   cfg_dialog_ = lv_obj_create(root_);
   lv_obj_add_style(cfg_dialog_, &style_panel_, 0);
-  lv_obj_set_size(cfg_dialog_, clampCoord(main_w - 6, 220, 280), clampCoord(main_h - 10, 170, 230));
+  lv_obj_set_size(cfg_dialog_, clampCoord(main_w - 6, 220, 280), clampCoord(main_h - 10, 188, 230));
   lv_obj_center(cfg_dialog_);
   lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(cfg_dialog_, LV_OBJ_FLAG_SCROLLABLE);
@@ -1396,6 +1667,10 @@ bool StandaloneUi::begin() {
   last_dm_retention_prune_ms_ = last_chat_persist_ms_;
 
   started_ = true;
+  if (first_install_identity_prompt_) {
+    first_install_identity_prompt_ = false;
+    openIdentityNamePrompt();
+  }
   return true;
 }
 
@@ -1447,12 +1722,18 @@ void StandaloneUi::refreshComposeDialog() {
   }
 
   char title[64];
-  if (compose_dm_mode_) {
+  if (identity_prompt_open_) {
+    snprintf(title, sizeof(title), "Identity Name: ");
+  } else if (compose_dm_mode_) {
     snprintf(title, sizeof(title), "DM to %s", compose_target_channel_[0] ? compose_target_channel_ : "-");
   } else {
     snprintf(title, sizeof(title), "Send to %s", compose_target_channel_[0] ? compose_target_channel_ : "-");
   }
   lv_label_set_text(compose_title_label_, title);
+
+  if (compose_hint_label_) {
+    lv_label_set_text(compose_hint_label_, identity_prompt_open_ ? "Press enter to commit identity name." : "");
+  }
 }
 
 void StandaloneUi::refreshChannelVisuals() {
@@ -1594,6 +1875,7 @@ void StandaloneUi::openChannelDropdown() {
   }
 
   channel_dropdown_open_ = true;
+  last_dropdown_open_ms_ = millis();
   dropdown_highlight_channel_ = selected_channel_;
   refreshDropdownVisuals();
   refreshChannelVisuals();
@@ -1638,7 +1920,16 @@ void StandaloneUi::openComposeDialog() {
     strncpy(compose_target_channel_, configured_channel_names_[active_channel_], sizeof(compose_target_channel_) - 1);
     compose_target_channel_[sizeof(compose_target_channel_) - 1] = '\0';
   }
+
+  // Restore regular multi-line compose geometry when not in first-install prompt mode.
+  lv_obj_set_size(compose_dialog_, lv_obj_get_width(compose_dialog_), kComposeDialogH);
+  lv_obj_set_size(compose_input_, LV_PCT(92), kComposeInputH);
+  lv_obj_align(compose_input_, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_textarea_set_one_line(compose_input_, false);
+  lv_textarea_set_max_length(compose_input_, static_cast<uint16_t>(kComposeMessageMaxChars));
+
   lv_textarea_set_text(compose_input_, "");
+  lv_textarea_set_placeholder_text(compose_input_, "Type and press Enter");
   refreshComposeDialog();
 
   compose_open_ = true;
@@ -1647,6 +1938,67 @@ void StandaloneUi::openComposeDialog() {
   if (key_group_) {
     lv_group_focus_obj(compose_input_);
   }
+}
+
+void StandaloneUi::openIdentityNamePrompt() {
+  if (!compose_dialog_ || !compose_input_) {
+    return;
+  }
+
+  identity_prompt_open_ = true;
+  compose_dm_mode_ = false;
+  compose_target_channel_[0] = '\0';
+  compose_target_dm_pubkey_[0] = '\0';
+
+  // Single-line first-install prompt with compact dialog height.
+  lv_obj_set_size(compose_dialog_, lv_obj_get_width(compose_dialog_), kComposeDialogSingleLineH);
+  lv_obj_set_size(compose_input_, LV_PCT(92), kComposeInputSingleLineH);
+  lv_obj_align(compose_input_, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_textarea_set_one_line(compose_input_, true);
+
+  lv_textarea_set_text(compose_input_, "");
+  lv_textarea_set_max_length(compose_input_, 31);
+  lv_textarea_set_placeholder_text(compose_input_, "Enter identity name");
+  refreshComposeDialog();
+
+  compose_open_ = true;
+  lv_obj_clear_flag(compose_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(compose_dialog_);
+  if (key_group_) {
+    lv_group_focus_obj(compose_input_);
+  }
+}
+
+bool StandaloneUi::applyIdentityNameFromPrompt() {
+  if (!compose_input_) {
+    return false;
+  }
+
+  const char* raw = lv_textarea_get_text(compose_input_);
+  if (!raw) {
+    return false;
+  }
+
+  String name(raw);
+  name.trim();
+  if (name.length() == 0 || name.length() > 31) {
+    appendChatLine("[ERR] Identity name must be 1-31 chars", ChatLineKind::Error);
+    return false;
+  }
+
+  char err[96] = {};
+  if (!plumeria::web::setNodeName(name.c_str(), err, sizeof(err))) {
+    appendChatLine(err[0] ? err : "[ERR] Failed to set identity name", ChatLineKind::Error);
+    return false;
+  }
+
+  if (first_install_auto_export_pending_) {
+    first_install_auto_export_pending_ = false;
+    exportConfigToSd();
+  }
+
+  appendChatLine("[OK] Identity name saved", ChatLineKind::Ack);
+  return true;
 }
 
 void StandaloneUi::closeComposeDialog(bool restore_chat_focus) {
@@ -1787,6 +2139,19 @@ bool StandaloneUi::handleComposeKey(uint32_t key) {
   }
 
   const bool is_backspace = (key == LV_KEY_BACKSPACE || key == 8 || key == 127);
+
+  if (identity_prompt_open_) {
+    if (key == LV_KEY_ENTER || key == '\n' || key == '\r') {
+      if (applyIdentityNameFromPrompt()) {
+        identity_prompt_open_ = false;
+        closeComposeDialog(true);
+      }
+      return true;
+    }
+
+    // Keep the prompt open until a valid name is submitted.
+    return true;
+  }
 
   if (key == LV_KEY_ENTER || key == '\n' || key == '\r') {
     if (sendComposeMessage()) {
@@ -2102,10 +2467,13 @@ void StandaloneUi::refreshCfgDialog() {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
   lv_label_set_text(cfg_row_labels_[4], "Export Config: N/A (no SD)");
   lv_label_set_text(cfg_row_labels_[5], "Import Config: N/A (no SD)");
+  lv_label_set_text(cfg_row_labels_[6], "Delete Config: N/A (no SD)");
 #else
   lv_label_set_text(cfg_row_labels_[4], "Export Config to SD");
   lv_label_set_text(cfg_row_labels_[5], cfg_import_confirm_armed_ ? "Import Config [PRESS ENTER AGAIN]"
                                                                    : "Import Config to SD");
+  lv_label_set_text(cfg_row_labels_[6], cfg_delete_confirm_armed_ ? "Delete Config [PRESS ENTER AGAIN]"
+                                                                   : "Delete Config from SD");
 #endif
 
   for (uint8_t i = 0; i < kCfgRowCount; i++) {
@@ -2126,6 +2494,7 @@ void StandaloneUi::openCfgDialog() {
   cfg_open_ = true;
   cfg_selected_row_ = 0;
   cfg_import_confirm_armed_ = false;
+  cfg_delete_confirm_armed_ = false;
   cfg_action_text_[0] = '\0';
   cfg_status_text_[0] = '\0';
   lv_obj_clear_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
@@ -2145,6 +2514,7 @@ void StandaloneUi::closeCfgDialog(bool focus_chat) {
   }
   cfg_open_ = false;
   cfg_import_confirm_armed_ = false;
+  cfg_delete_confirm_armed_ = false;
   lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
   if (shortcut_strip_) {
     lv_obj_clear_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
@@ -2170,6 +2540,9 @@ void StandaloneUi::moveCfgSelection(int delta) {
   if (cfg_selected_row_ != 5) {
     cfg_import_confirm_armed_ = false;
   }
+  if (cfg_selected_row_ != 6) {
+    cfg_delete_confirm_armed_ = false;
+  }
   refreshCfgDialog();
   if (key_group_ && cfg_rows_[cfg_selected_row_]) {
     lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
@@ -2179,33 +2552,48 @@ void StandaloneUi::moveCfgSelection(int delta) {
 bool StandaloneUi::exportConfigToSd() {
   String text;
   if (!plumeria::web::exportConfigText(&text) || text.length() == 0) {
+    strncpy(cfg_status_text_, "Export failed: empty config", sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
     return false;
   }
 
   char sd_err[64] = {};
   if (!sdBeginForCurrentBoard(sd_err, sizeof(sd_err))) {
-    if (false) Serial.printf("[CFG] export SD init failed: %s\n", sd_err);
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Export failed: %s", sd_err[0] ? sd_err : "SD init failed");
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
     return false;
   }
 
-  if (!SD.exists(kCfgSdDir)) {
-    if (!SD.mkdir(kCfgSdDir)) {
-      return false;
-    }
+  bool dir_ready = SD.exists(kCfgSdDir);
+  if (!dir_ready) {
+    dir_ready = SD.mkdir(kCfgSdDir);
   }
 
-  if (SD.exists(kCfgSdPath)) {
-    SD.remove(kCfgSdPath);
+  const char* target_path = dir_ready ? kCfgSdPath : kCfgSdPathFallback;
+
+  if (SD.exists(target_path)) {
+    SD.remove(target_path);
   }
 
-  File file = SD.open(kCfgSdPath, FILE_WRITE);
+  File file = SD.open(target_path, FILE_WRITE);
   if (!file) {
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Export failed: open %s", target_path);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
     return false;
   }
 
   const size_t wrote = file.print(text);
   file.close();
-  return wrote == static_cast<size_t>(text.length());
+  if (wrote != static_cast<size_t>(text.length())) {
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Export failed: wrote %u/%u bytes",
+             static_cast<unsigned>(wrote), static_cast<unsigned>(text.length()));
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    return false;
+  }
+
+  snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Exported to %s", target_path);
+  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+  return true;
 }
 
 bool StandaloneUi::setGpsEnabled(bool enabled) {
@@ -2246,8 +2634,13 @@ bool StandaloneUi::importConfigFromSd() {
   }
 
   File file = SD.open(kCfgSdPath, FILE_READ);
+  const char* read_path = kCfgSdPath;
   if (!file) {
-    strncpy(cfg_status_text_, "Import failed: /plumeria/plumeria-config.yaml missing", sizeof(cfg_status_text_) - 1);
+    file = SD.open(kCfgSdPathFallback, FILE_READ);
+    read_path = kCfgSdPathFallback;
+  }
+  if (!file) {
+    strncpy(cfg_status_text_, "Import failed: config file missing", sizeof(cfg_status_text_) - 1);
     cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
     return false;
   }
@@ -2266,12 +2659,53 @@ bool StandaloneUi::importConfigFromSd() {
     return false;
   }
 
+  snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Import applied from %s", read_path);
+  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+
+  return true;
+}
+
+bool StandaloneUi::deleteConfigFromSd() {
+  char sd_err[64] = {};
+  if (!sdBeginForCurrentBoard(sd_err, sizeof(sd_err))) {
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Delete failed: %s", sd_err[0] ? sd_err : "SD init failed");
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    return false;
+  }
+
+  const bool has_primary = SD.exists(kCfgSdPath);
+  const bool has_fallback = SD.exists(kCfgSdPathFallback);
+  if (!has_primary && !has_fallback) {
+    strncpy(cfg_status_text_, "Delete skipped: config not found", sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    return true;
+  }
+
+  bool ok = true;
+  if (has_primary) {
+    ok = ok && SD.remove(kCfgSdPath);
+  }
+  if (has_fallback) {
+    ok = ok && SD.remove(kCfgSdPathFallback);
+  }
+
+  if (!ok) {
+    strncpy(cfg_status_text_, "Delete failed", sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    return false;
+  }
+
+  strncpy(cfg_status_text_, "Deleted config file(s)", sizeof(cfg_status_text_) - 1);
+  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
   return true;
 }
 
 void StandaloneUi::activateCfgSelection() {
   if (cfg_selected_row_ != 5) {
     cfg_import_confirm_armed_ = false;
+  }
+  if (cfg_selected_row_ != 6) {
+    cfg_delete_confirm_armed_ = false;
   }
 
   switch (cfg_selected_row_) {
@@ -2336,10 +2770,11 @@ void StandaloneUi::activateCfgSelection() {
       cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
 #else
       if (exportConfigToSd()) {
-        strncpy(cfg_status_text_, "Exported to /plumeria/plumeria-config.yaml", sizeof(cfg_status_text_) - 1);
         strncpy(cfg_action_text_, "Config exported", sizeof(cfg_action_text_) - 1);
       } else {
-        strncpy(cfg_status_text_, "Export failed", sizeof(cfg_status_text_) - 1);
+        if (cfg_status_text_[0] == '\0') {
+          strncpy(cfg_status_text_, "Export failed", sizeof(cfg_status_text_) - 1);
+        }
         strncpy(cfg_action_text_, "Export failed", sizeof(cfg_action_text_) - 1);
       }
       cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
@@ -2370,6 +2805,30 @@ void StandaloneUi::activateCfgSelection() {
         ESP.restart();
       } else {
         strncpy(cfg_action_text_, "Import failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+#endif
+      break;
+  case 6:
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+      strncpy(cfg_status_text_, "Delete unavailable on this hardware", sizeof(cfg_status_text_) - 1);
+      strncpy(cfg_action_text_, "Delete unavailable", sizeof(cfg_action_text_) - 1);
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+#else
+      if (!cfg_delete_confirm_armed_) {
+        cfg_delete_confirm_armed_ = true;
+        strncpy(cfg_status_text_, "Press Enter again to confirm delete", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Delete armed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      } else {
+        cfg_delete_confirm_armed_ = false;
+        if (deleteConfigFromSd()) {
+          strncpy(cfg_action_text_, "Config deleted", sizeof(cfg_action_text_) - 1);
+        } else {
+          strncpy(cfg_action_text_, "Delete failed", sizeof(cfg_action_text_) - 1);
+        }
         cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       }
 #endif
@@ -3217,7 +3676,7 @@ void StandaloneUi::pushChannelHistoryLine(const char* channel_name, const char* 
 
 bool StandaloneUi::loadChatHistoryFromFs() {
   Preferences prefs;
-  if (!prefs.begin(kUiPrefsNs, true)) {
+  if (!prefs.begin(kUiPrefsNs, false)) {
     return false;
   }
 
@@ -3383,7 +3842,7 @@ bool StandaloneUi::pruneStoredDmByRetention(uint32_t now_epoch) {
 
 bool StandaloneUi::loadDmHistoryFromFs() {
   Preferences prefs;
-  if (!prefs.begin(kUiPrefsNs, true)) {
+  if (!prefs.begin(kUiPrefsNs, false)) {
     return false;
   }
 
@@ -3643,11 +4102,11 @@ void StandaloneUi::handleKey(uint32_t key) {
   }
 
   if (cfg_open_) {
-    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'k')) {
+    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
       moveCfgSelection(-1);
       return;
     }
-    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'j')) {
+    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
       moveCfgSelection(1);
       return;
     }
@@ -3681,11 +4140,11 @@ void StandaloneUi::handleKey(uint32_t key) {
       openComposeDialog();
       return;
     }
-    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'k')) {
+    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
       lv_obj_scroll_by(dm_panel_, 0, -kMsgScrollStep, LV_ANIM_OFF);
       return;
     }
-    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'j')) {
+    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
       lv_obj_scroll_by(dm_panel_, 0, kMsgScrollStep, LV_ANIM_OFF);
       return;
     }
@@ -3693,7 +4152,7 @@ void StandaloneUi::handleKey(uint32_t key) {
   }
 
   if (contacts_open_) {
-    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'k')) {
+    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
       if (contacts_actions_focused_) {
         if (contacts_action_index_ == 0) {
           contacts_action_index_ = static_cast<uint8_t>(kContactActionCount - 1);
@@ -3709,7 +4168,7 @@ void StandaloneUi::handleKey(uint32_t key) {
       }
       return;
     }
-    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'j')) {
+    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
       if (contacts_actions_focused_) {
         contacts_action_index_ = static_cast<uint8_t>((contacts_action_index_ + 1) % kContactActionCount);
         refreshContactsDialog();
@@ -3758,15 +4217,18 @@ void StandaloneUi::handleKey(uint32_t key) {
   }
 
   if (channel_dropdown_open_) {
-    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'k')) {
+    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
       moveDropdownHighlight(-1);
       return;
     }
-    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'j')) {
+    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
       moveDropdownHighlight(1);
       return;
     }
     if (norm_key == LV_KEY_ENTER) {
+      if (now - last_dropdown_open_ms_ < kNavDebounceMs) {
+        return;
+      }
       if (now - last_selector_action_ms_ < kNavDebounceMs) {
         return;
       }
@@ -3831,12 +4293,12 @@ void StandaloneUi::handleKey(uint32_t key) {
       return;
     case 'j':
       if (kKeyboardNavEnabled && (focus_zone_ == FocusZone::Chat || chat_focused)) {
-        scrollChatUp();
+        scrollChatDown();
       }
       return;
     case 'k':
       if (kKeyboardNavEnabled && (focus_zone_ == FocusZone::Chat || chat_focused)) {
-        scrollChatDown();
+        scrollChatUp();
       }
       return;
     case 'c':
@@ -3936,7 +4398,10 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   }
 
   if (channel_dropdown_open_ && !in_selector && !in_dropdown) {
-    closeChannelDropdown(false);
+    const uint32_t now = millis();
+    if (now - last_dropdown_open_ms_ >= kNavDebounceMs) {
+      closeChannelDropdown(false);
+    }
   }
 
   if (in_selector) {
@@ -3955,6 +4420,12 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   }
 
   if (dropdown_row_idx >= 0) {
+    const uint32_t now = millis();
+    if (now - last_dropdown_open_ms_ < kNavDebounceMs) {
+      dropdown_highlight_channel_ = static_cast<uint8_t>(dropdown_row_idx);
+      refreshDropdownVisuals();
+      return;
+    }
     dropdown_highlight_channel_ = static_cast<uint8_t>(dropdown_row_idx);
     selectChannel(dropdown_row_idx, true);
     closeChannelDropdown(true);

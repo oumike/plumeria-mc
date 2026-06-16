@@ -13,23 +13,14 @@ fi
 # Required test order:
 # 1) tdeck
 # 2) pager
-# 3) heltec
-# 4) heltec-vertical
-# 5) cardputer
 TARGET_LABELS=(
   "tdeck"
   "pager"
-  "heltec"
-  "heltec-vertical"
-  "cardputer"
 )
 
 TARGET_ENVS=(
   "tdeck"
   "tlora-pager-tft"
-  "heltec-v4"
-  "heltec-v4-vertical"
-  "cardputer-cap"
 )
 
 has_env() {
@@ -63,8 +54,24 @@ for i in "${!TARGET_ENVS[@]}"; do
 
   echo ""
   echo "[UPLOAD] Next target: ${label} (${env_name})"
-  read -r -p "Press Enter to upload this target to connected hardware... " _
-  pio run -e "$env_name" -t upload
+  while true; do
+    echo "  1) Upload"
+    echo "  2) Skip"
+    read -r -p "Choose [1-2]: " choice
+    case "$choice" in
+      1)
+        pio run -e "$env_name" -t upload
+        break
+        ;;
+      2)
+        echo "[UPLOAD] Skipped ${label} (${env_name})."
+        break
+        ;;
+      *)
+        echo "Invalid choice. Enter 1 to upload or 2 to skip."
+        ;;
+    esac
+  done
 done
 
 echo ""

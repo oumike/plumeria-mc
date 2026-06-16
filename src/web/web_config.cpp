@@ -127,7 +127,9 @@ const RegionPreset* findRegion(const char* id) {
 
 void saveSettings(const plumeria::web::WebSettings& settings) {
   Preferences prefs;
-  prefs.begin(kPrefsNs, false);
+  if (!prefs.begin(kPrefsNs, false)) {
+    return;
+  }
   prefs.putString("node_name", settings.node_name);
   prefs.putDouble("node_lat", settings.node_latitude);
   prefs.putDouble("node_lon", settings.node_longitude);
@@ -186,11 +188,7 @@ bool connectSta(const char* ssid, const char* pass) {
   copyString(g_mode, sizeof(g_mode), "sta");
   setIpFrom(WiFi.localIP());
 
-  if (syncTimeFromNtp()) {
-    if (false) Serial.println("[WEB] NTP time synced");
-  } else {
-    if (false) Serial.println("[WEB] NTP time sync timed out");
-  }
+  syncTimeFromNtp();
 
   return true;
 }
@@ -496,12 +494,21 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
       (g_settings.lora_tx_power_dbm != imported.lora_tx_power_dbm);
   bool identity_changed = false;
 
+  if (saw_identity_public_key != saw_identity_private_key) {
+    setImportError(err, err_size, "Both identity_public_key and identity_private_key are required");
+    return false;
+  }
+
+  if (saw_identity_private_key && !g_mesh) {
+    setImportError(err, err_size, "Mesh adapter unavailable for identity import");
+    return false;
+  }
+
   g_settings = imported;
 
   if (g_mesh) {
     if (saw_identity_private_key) {
-      const char* public_key_ptr = saw_identity_public_key ? imported_identity_public_hex : nullptr;
-      if (!g_mesh->importIdentityKeysHex(public_key_ptr, imported_identity_private_hex)) {
+      if (!g_mesh->importIdentityKeysHex(imported_identity_public_hex, imported_identity_private_hex)) {
         setImportError(err, err_size, "Failed to import identity keys");
         return false;
       }
@@ -556,8 +563,10 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
 }
 
 void startFallbackAp() {
-  WiFi.disconnect(false);
+  WiFi.disconnect(false, true);
   WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  WiFi.setSleep(false);
   WiFi.softAP(kFallbackApSsid);
   delay(100);
 
@@ -566,9 +575,11 @@ void startFallbackAp() {
 }
 
 void bringupNetwork() {
-  if (!connectSta(g_settings.wifi_ssid, g_settings.wifi_pass)) {
-    startFallbackAp();
+  if (connectSta(g_settings.wifi_ssid, g_settings.wifi_pass)) {
+    return;
   }
+
+  startFallbackAp();
 }
 
 String jsonString(const char* raw) {
@@ -602,6 +613,241 @@ void sendJsonError(const char* message, int status = 400) {
 }
 
 void handleRoot() {
+  static const char kRootPage[] PROGMEM = R"HTML(
+<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Plumeria Config</title>
+<style>
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0e1622;color:#e7eef6;margin:0;padding:14px}
+.wrap{max-width:760px;margin:0 auto}.meta{font-size:.82rem;color:#9bb1c5;margin:0 0 10px}
+section{background:#162333;border:1px solid #2a435d;border-radius:8px;padding:10px;margin:0 0 10px}
+label{display:block;font-size:.85rem;color:#b7cadd;margin-top:6px}
+input,select,button,textarea{width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #355674;background:#0f1a28;color:#e7eef6;font:inherit}
+button{margin-top:8px;background:#2c9bc8;border-color:#2c9bc8;font-weight:700}
+small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tabs{display:flex;gap:8px;margin:0 0 10px}.tabbtn{width:auto;min-width:120px;margin-top:0;background:#1a2b3a}.tabbtn.active{background:#2c9bc8}
+.tab{display:none}.tab.active{display:block}.contact-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#contacts{list-style:none;padding-left:0;max-height:220px;overflow:auto;margin:0}
+#contacts li{display:flex;gap:6px;align-items:center;margin:0 0 6px}
+#contacts .name{flex:1}.mini{width:auto;min-width:70px;margin-top:0;padding:4px 6px;font-size:.78rem}
+#map{height:280px;border:1px solid #2a435d;border-radius:8px}
+@media(max-width:760px){.row,.contact-grid{grid-template-columns:1fr}}
+</style>
+</head><body><div class='wrap'>
+<h1>Plumeria Web Config</h1>
+<div id='meta' class='meta'>Loading...</div>
+<div class='tabs'>
+<button type='button' id='tab_btn_config' class='tabbtn active' onclick='showTab("config")'>Configuration</button>
+<button type='button' id='tab_btn_contacts' class='tabbtn' onclick='showTab("contacts")'>Contacts</button>
+<button type='button' id='tab_btn_utils' class='tabbtn' onclick='showTab("utils")'>Utilities</button>
+</div>
+
+<div id='tab_config' class='tab active'>
+<section><h3>Identity</h3>
+<label>Node Name<input id='node_name' maxlength='31'></label>
+<label>Public Key<input id='public_key' readonly></label>
+</section>
+
+<section><h3>Radio</h3>
+<div class='row'>
+<label>Region<select id='region'></select></label>
+<label>&nbsp;<button type='button' id='apply_region_defaults' style='margin-top:22px'>Apply Region Defaults</button></label>
+</div>
+<label>Frequency MHz<input id='freq' type='number' step='0.001'></label>
+<div class='row'>
+<label>Bandwidth kHz<input id='bw' type='number' step='0.1'></label>
+<label>Spreading Factor<input id='sf' type='number' min='5' max='12'></label>
+</div>
+<div class='row'>
+<label>Coding Rate<input id='cr' type='number' min='5' max='8'></label>
+<label>TX Power dBm<input id='pwr' type='number' min='1' max='30'></label>
+</div>
+<label>Advert Interval Minutes<input id='adv_int_min' type='number' min='60' step='1'></label>
+</section>
+
+<section><h3>Channels</h3>
+<div class='row'>
+<label>Name<input id='ch_name' placeholder='Public, #SomeChannel'></label>
+<label>PSK Base64 (optional for #channels)<input id='ch_psk' placeholder='izOH6cXN6mrJ5e26oRXNcg=='></label>
+</div>
+<button type='button' onclick='addChannel()'>Add Channel</button>
+<ul id='channels'></ul>
+</section>
+
+<section><h3>Timezone & Location</h3>
+<label>Timezone<select id='timezone'></select></label>
+<div class='row'>
+<label>Latitude<input id='node_lat' type='number' step='0.000001' min='-90' max='90'></label>
+<label>Longitude<input id='node_lon' type='number' step='0.000001' min='-180' max='180'></label>
+</div>
+<label><input id='send_loc_adv' type='checkbox' style='width:auto;margin-right:8px'>Send location in adverts</label>
+</section>
+
+<section><h3>Wi-Fi</h3>
+<label>SSID<input id='wifi_ssid'></label>
+<label>Password<input id='wifi_pass'></label>
+<button type='button' onclick='saveAll()'>Save Settings</button>
+</section>
+</div>
+
+<div id='tab_contacts' class='tab'>
+<section><h3>Contacts Map</h3><div id='map'></div><small id='map_meta'>No points yet.</small></section>
+<section><h3>Contacts</h3>
+<div class='contact-grid'>
+<ul id='contacts'></ul>
+<div id='contact_detail'>Select a contact.</div>
+</div>
+</section>
+</div>
+
+<div id='tab_utils' class='tab'>
+<section><h3>Advert Utilities</h3>
+<button type='button' onclick='utilAdvertLocal()'>Advert Local (Zero Hop)</button>
+<button type='button' onclick='utilAdvertFlood()'>Advert Flood</button>
+</section>
+<section><h3>Config Utilities</h3>
+<button type='button' onclick='utilExportConfig()'>Export Config</button>
+<label>Import Config File<input id='util_cfg_file' type='file' accept='.yaml,.yml,.txt'></label>
+<button type='button' onclick='utilImportConfig()'>Import Config</button>
+<small id='util_status'>Ready.</small>
+</section>
+</div>
+
+<script>
+let statusCache=null,presets={},contactsCache=[],selContact='';
+let map=null,layer=null,leafletLoading=false;
+let nodeNameDirty=false,locationDirty=false,wifiDirty=false,radioDirty=false,timezoneDirty=false;
+const fallbackPresets={
+  "US":{freq:910.525,bw:62.5,sf:7,cr:5,pwr:22},
+  "EU_868":{freq:869.525,bw:62.5,sf:8,cr:5,pwr:22},
+  "EU_433":{freq:433.500,bw:62.5,sf:8,cr:5,pwr:10},
+  "ANZ":{freq:921.500,bw:62.5,sf:8,cr:5,pwr:22},
+  "JP":{freq:922.000,bw:62.5,sf:8,cr:5,pwr:13},
+  "KR":{freq:921.500,bw:62.5,sf:8,cr:5,pwr:22},
+  "IN":{freq:866.000,bw:62.5,sf:8,cr:5,pwr:22},
+  "TH":{freq:922.500,bw:62.5,sf:8,cr:5,pwr:16},
+  "BR_902":{freq:904.750,bw:62.5,sf:8,cr:5,pwr:22}
+};
+
+function showTab(tab){['config','contacts','utils'].forEach(t=>{const p=document.getElementById('tab_'+t),b=document.getElementById('tab_btn_'+t);if(p)p.classList.toggle('active',t===tab);if(b)b.classList.toggle('active',t===tab);});if(tab==='contacts'){setTimeout(drawMap,10);}}
+async function jget(u){const r=await fetch(u);return r.json();}
+async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(b)});return r.json();}
+function tzOffsetMinutes(tz){try{const p=new Intl.DateTimeFormat('en-US',{timeZone:tz,timeZoneName:'longOffset'}).formatToParts(new Date());const v=(p.find(x=>x.type==='timeZoneName')||{}).value||'';const m=v.match(/([+-])(\d{1,2})(?::?(\d{2}))?/);if(m){const s=m[1]==='-'?-1:1,h=parseInt(m[2],10)||0,n=parseInt(m[3]||'0',10)||0;return s*(h*60+n);}}catch(_e){}return 0;}
+function validCoord(lat,lon){return Number.isFinite(lat)&&Number.isFinite(lon)&&lat>=-90&&lat<=90&&lon>=-180&&lon<=180&&!(lat===0&&lon===0);}
+function bindDirtyTracking(){
+  const node=document.getElementById('node_name');
+  if(node){node.addEventListener('input',()=>{nodeNameDirty=true;});node.addEventListener('change',()=>{nodeNameDirty=true;});}
+  ['node_lat','node_lon'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{locationDirty=true;});e.addEventListener('change',()=>{locationDirty=true;});}});
+  const sendLoc=document.getElementById('send_loc_adv');
+  if(sendLoc){sendLoc.addEventListener('change',()=>{locationDirty=true;});}
+  ['wifi_ssid','wifi_pass'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{wifiDirty=true;});e.addEventListener('change',()=>{wifiDirty=true;});}});
+  ['region','freq','bw','sf','cr','pwr','adv_int_min'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{radioDirty=true;});e.addEventListener('change',()=>{radioDirty=true;});}});
+  const tz=document.getElementById('timezone');
+  if(tz){tz.addEventListener('input',()=>{timezoneDirty=true;});tz.addEventListener('change',()=>{timezoneDirty=true;});}
+}
+function applyRegionPreset(){const r=document.getElementById('region');if(!r)return;const d=(presets&&presets[r.value])||fallbackPresets[r.value];if(!d)return;document.getElementById('freq').value=d.freq;document.getElementById('bw').value=d.bw;document.getElementById('sf').value=d.sf;document.getElementById('cr').value=d.cr;document.getElementById('pwr').value=d.pwr;radioDirty=true;}
+function bindRegionPresetUi(){const r=document.getElementById('region');if(r){r.onchange=applyRegionPreset;}const b=document.getElementById('apply_region_defaults');if(b){b.onclick=applyRegionPreset;}}
+
+function ensureTimezoneOptions(selected){const el=document.getElementById('timezone');if(!el)return;let zones=[];if(typeof Intl!=='undefined'&&typeof Intl.supportedValuesOf==='function'){try{zones=Intl.supportedValuesOf('timeZone');}catch(_e){zones=[];}}if(!zones.length)zones=['UTC0'];if(!zones.includes('UTC0'))zones.unshift('UTC0');if(selected&&!zones.includes(selected))zones.unshift(selected);el.innerHTML='';zones.forEach(z=>{const o=document.createElement('option');o.value=z;o.textContent=z;if(z===selected)o.selected=true;el.appendChild(o);});}
+
+function populatePresetRegions(regions,selected){const r=document.getElementById('region');if(!r)return;r.innerHTML='';(regions||[]).forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;if(v===selected)o.selected=true;r.appendChild(o);});}
+async function loadPresets(){
+  try{
+    const p=await jget('/api/presets');
+    presets=(p&&p.region_defaults)?p.region_defaults:fallbackPresets;
+    const regions=(p&&Array.isArray(p.regions)&&p.regions.length)?p.regions:Object.keys(presets);
+    populatePresetRegions(regions,p&&p.selected_region?p.selected_region:'US');
+  }catch(_e){
+    presets=fallbackPresets;
+    populatePresetRegions(Object.keys(fallbackPresets),'US');
+  }
+  bindRegionPresetUi();
+}
+
+async function loadStatus(force=false){
+  const s=await jget('/api/status');
+  statusCache=s;
+  document.getElementById('meta').textContent='Mode: '+(s.mode||'?')+' | IP: '+(s.ip||'?');
+
+  const nodeEl=document.getElementById('node_name');
+  const nodeFocused=(nodeEl&&document.activeElement===nodeEl);
+  if(nodeEl&&(force||(!nodeNameDirty&&!nodeFocused))){nodeEl.value=s.node_name||'';}
+
+  const pkEl=document.getElementById('public_key');
+  if(pkEl){pkEl.value=s.public_key||'';}
+
+  const wifiSsid=document.getElementById('wifi_ssid');
+  const wifiPass=document.getElementById('wifi_pass');
+  const wifiFocused=(document.activeElement===wifiSsid||document.activeElement===wifiPass);
+  if(force||(!wifiDirty&&!wifiFocused)){
+    if(wifiSsid)wifiSsid.value=s.wifi_ssid||'';
+    if(wifiPass)wifiPass.value=s.wifi_pass||'';
+  }
+
+  const regionEl=document.getElementById('region');
+  const freqEl=document.getElementById('freq');
+  const bwEl=document.getElementById('bw');
+  const sfEl=document.getElementById('sf');
+  const crEl=document.getElementById('cr');
+  const pwrEl=document.getElementById('pwr');
+  const advEl=document.getElementById('adv_int_min');
+  const radioFocused=(document.activeElement===regionEl||document.activeElement===freqEl||document.activeElement===bwEl||document.activeElement===sfEl||document.activeElement===crEl||document.activeElement===pwrEl||document.activeElement===advEl);
+  if(force||(!radioDirty&&!radioFocused)){
+    if(regionEl)regionEl.value=s.region||'US';
+    if(freqEl)freqEl.value=s.freq;
+    if(bwEl)bwEl.value=s.bw;
+    if(sfEl)sfEl.value=s.sf;
+    if(crEl)crEl.value=s.cr;
+    if(pwrEl)pwrEl.value=s.pwr;
+    if(advEl)advEl.value=s.adv_int_min||360;
+  }
+
+  const latEl=document.getElementById('node_lat');
+  const lonEl=document.getElementById('node_lon');
+  const sendLoc=document.getElementById('send_loc_adv');
+  const locFocused=(document.activeElement===latEl||document.activeElement===lonEl);
+  if(force||(!locationDirty&&!locFocused)){
+    if(latEl)latEl.value=s.node_lat;
+    if(lonEl)lonEl.value=s.node_lon;
+    if(sendLoc)sendLoc.checked=!!s.send_loc_adv;
+  }
+
+  const tzEl=document.getElementById('timezone');
+  const tzFocused=(document.activeElement===tzEl);
+  if(force||(!timezoneDirty&&!tzFocused)){
+    ensureTimezoneOptions(s.timezone||'UTC0');
+  }
+}
+
+async function loadChannels(){const c=await jget('/api/channels');const ul=document.getElementById('channels');ul.innerHTML='';(c.channels||[]).forEach(n=>{const li=document.createElement('li');li.textContent=n;if(n!=='Public'){const b=document.createElement('button');b.className='mini';b.textContent='Remove';b.onclick=async()=>{await jpost('/api/channels/remove',{name:n});await loadChannels();};li.appendChild(b);}ul.appendChild(li);});}
+
+function renderContactDetail(){const d=document.getElementById('contact_detail');if(!selContact){d.textContent='Select a contact.';return;}const c=contactsCache.find(x=>x.pubkey===selContact);if(!c){d.textContent='Contact not found.';return;}const lat=Number(c.gps_lat),lon=Number(c.gps_lon);d.innerHTML='<div><strong>Name:</strong> '+(c.name||'(unnamed)')+'</div><div><strong>Public Key:</strong> '+(c.pubkey||'')+'</div><div><strong>Favorite:</strong> '+(c.favorite?'Yes':'No')+'</div><div><strong>Last Heard:</strong> '+String(c.lastmod||0)+'</div><div><strong>GPS:</strong> '+(validCoord(lat,lon)?(lat.toFixed(6)+', '+lon.toFixed(6)):'Unavailable')+'</div>';}
+
+function ensureLeaflet(){return new Promise(resolve=>{if(window.L){resolve(true);return;}if(leafletLoading){setTimeout(()=>ensureLeaflet().then(resolve),120);return;}leafletLoading=true;if(!document.getElementById('leaflet_css')){const l=document.createElement('link');l.id='leaflet_css';l.rel='stylesheet';l.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.appendChild(l);}if(!document.getElementById('leaflet_js')){const s=document.createElement('script');s.id='leaflet_js';s.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';s.onload=()=>{leafletLoading=false;resolve(!!window.L);};s.onerror=()=>{leafletLoading=false;resolve(false);};document.head.appendChild(s);}else{const w=()=>{if(window.L){leafletLoading=false;resolve(true);}else setTimeout(w,120);};w();}});}
+
+async function drawMap(){const meta=document.getElementById('map_meta');const ok=await ensureLeaflet();if(!ok){if(meta)meta.textContent='Map tiles unavailable (offline).';return;}if(!map){map=L.map('map',{zoomControl:true,attributionControl:true});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);layer=L.layerGroup().addTo(map);}layer.clearLayers();const pts=[];contactsCache.forEach(c=>{const lat=Number(c.gps_lat),lon=Number(c.gps_lon);if(validCoord(lat,lon))pts.push({lat,lon,name:c.name||'(unnamed)',key:c.pubkey,self:false});});if(statusCache){const lat=Number(statusCache.node_lat),lon=Number(statusCache.node_lon);if(validCoord(lat,lon))pts.push({lat,lon,name:statusCache.node_name||'Me',key:'__self__',self:true});}pts.forEach(p=>{const m=L.circleMarker([p.lat,p.lon],{radius:p.self?7:6,color:p.self?'#59e4a7':'#ffc078',weight:2,fillOpacity:1}).addTo(layer);m.bindTooltip(p.self?'ME':p.name,{permanent:false});m.on('click',()=>{if(!p.self){selContact=p.key;renderContactDetail();renderContacts();}});});if(pts.length){map.setView([pts[0].lat,pts[0].lon],pts[0].self?13:8);}else{map.setView([0,0],2);}if(meta)meta.textContent=pts.length?('Points: '+pts.length):'No points yet.';setTimeout(()=>map.invalidateSize(false),0);}
+
+function renderContacts(){const ul=document.getElementById('contacts');ul.innerHTML='';if(!contactsCache.length){const li=document.createElement('li');li.textContent='No contacts heard yet';ul.appendChild(li);renderContactDetail();drawMap();return;}contactsCache.forEach(c=>{const li=document.createElement('li');const n=document.createElement('button');n.className='name mini';n.textContent=c.name||'(unnamed)';n.onclick=()=>{selContact=c.pubkey;renderContactDetail();drawMap();};const f=document.createElement('button');f.className='mini';f.textContent=c.favorite?'Unfavorite':'Favorite';f.onclick=async()=>{await jpost('/api/contacts/favorite',{pubkey:c.pubkey,favorite:c.favorite?'0':'1'});await loadContacts();};const d=document.createElement('button');d.className='mini';d.textContent='Delete';d.onclick=async()=>{if(!confirm('Delete contact?'))return;await jpost('/api/contacts/remove',{pubkey:c.pubkey});await loadContacts();};li.appendChild(n);li.appendChild(f);li.appendChild(d);ul.appendChild(li);});if(!selContact&&contactsCache.length)selContact=contactsCache[0].pubkey;renderContactDetail();drawMap();}
+
+async function loadContacts(){const c=await jget('/api/contacts');contactsCache=Array.isArray(c.contacts)?c.contacts:[];contactsCache.sort((a,b)=>{if(!!a.favorite!==!!b.favorite)return a.favorite?-1:1;return Number(b.lastmod||0)-Number(a.lastmod||0);});renderContacts();}
+
+async function addChannel(){const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}const r=await jpost('/api/channels/add',{name,psk});if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}
+
+async function saveAll(){const tz=document.getElementById('timezone').value;const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,tz_offset:String(tzOffsetMinutes(tz)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value});alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
+
+async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||((r&&r.error)||'done'));}
+async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||((r&&r.error)||'done'));}
+function utilExportConfig(){window.location='/api/util/export';}
+async function utilImportConfig(){const status=document.getElementById('util_status');const input=document.getElementById('util_cfg_file');if(!input||!input.files||input.files.length===0){if(status)status.textContent='Choose a config file first.';return;}const file=input.files[0];const text=await file.text();const r=await jpost('/api/util/import',{content:text});if(status)status.textContent=(r&&r.message)?r.message:((r&&r.error)||'done');}
+
+async function boot(){try{await loadPresets();bindDirtyTracking();await loadStatus(true);await loadChannels();await loadContacts();setInterval(()=>{loadStatus(false);loadContacts();},5000);}catch(e){document.getElementById('meta').textContent='UI init failed: '+e;}}
+boot();
+</script>
+</div></body></html>
+)HTML";
+
+  g_server.send(200, "text/html", kRootPage);
+  return;
+
   String region_options;
   String region_defaults_js = "{";
   for (size_t i = 0; i < (sizeof(kRegionPresets) / sizeof(kRegionPresets[0])); i++) {
@@ -662,9 +908,25 @@ void handleRoot() {
       ".tabbtn.active{background:#2c9bc8;border-color:#2c9bc8;}"
       ".tab-panel{display:none;}"
       ".tab-panel.active{display:block;}"
+      ".map-wrap{position:relative;height:300px;border:1px solid #2a435d;border-radius:8px;overflow:hidden;background:linear-gradient(180deg,#12263a,#0b192a);}"
+      ".map-wrap canvas{display:block;width:100%;height:100%;}"
+      ".map-wrap .map-host{width:100%;height:100%;}"
+      ".map-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px;font-size:.76rem;}"
+      ".map-toolbar button{width:auto;min-width:44px;margin-top:0;padding:4px 8px;font-size:.74rem;min-height:26px;}"
+      ".contacts-layout{display:grid;grid-template-columns:1.1fr .9fr;gap:10px;}"
+      ".contacts-list{max-height:280px;overflow:auto;padding-left:0;list-style:none;margin:0;font-size:.78rem;}"
+      ".contacts-list li{margin:0 0 6px;display:flex;gap:4px;align-items:center;}"
+      ".contacts-list button{margin-top:0;}"
+      ".contacts-list .pick{flex:1;text-align:left;background:#15293d;border-color:#355674;font-weight:600;font-size:.78rem;padding:5px 6px;min-height:28px;}"
+      ".contacts-list .pick.active{background:#2c9bc8;border-color:#2c9bc8;}"
+      ".contacts-list .mini{width:auto;min-width:62px;padding:4px 6px;font-size:.74rem;min-height:28px;background:#1d334a;border-color:#355674;}"
+      ".contact-detail{border:1px solid #2a435d;border-radius:8px;padding:8px;min-height:280px;background:#0f1a28;font-size:.76rem;}"
+      ".contact-detail .kv{margin:0 0 4px;word-break:break-word;}"
+      "@media(max-width:760px){.contacts-layout{grid-template-columns:1fr;}.contact-detail{min-height:0;}}"
       "</style></head><body><div class='wrap'>"
       "<h1>Plumeria Web Config</h1>"
       "<div class='tabs'><button type='button' id='tab_btn_config' class='tabbtn active' onclick='showTab(\"config\")'>Configuration</button>"
+      "<button type='button' id='tab_btn_contacts' class='tabbtn' onclick='showTab(\"contacts\")'>Contacts</button>"
       "<button type='button' id='tab_btn_utils' class='tabbtn' onclick='showTab(\"utils\")'>Utilities</button></div>"
       "<div id='tab_config' class='tab-panel active'>"
       "<section><h3>Identity</h3>"
@@ -673,9 +935,7 @@ void handleRoot() {
       "<small>Used for node adverts and sender name in channel chats.</small>"
       "</section>"
       "<section><h3>Radio Configuration</h3>"
-      "<div class='row'><label>Region<select id='region' onchange='applyRegionPreset();markRadioDirty();'>" +
-      region_options +
-      "</select></label>"
+      "<div class='row'><label>Region<select id='region' onchange='applyRegionPreset();markRadioDirty();'>__REGION_OPTIONS__</select></label>"
       "<label>&nbsp;<button type='button' onclick='applyRegionPreset()' style='margin-top:22px'>Apply Region Defaults</button></label></div>"
       "<div class='row'><label>Frequency MHz<input id='freq' type='number' step='0.001'></label>"
       "<label>Bandwidth kHz<input id='bw' type='number' step='0.1'></label></div>"
@@ -692,9 +952,6 @@ void handleRoot() {
       "</div><button onclick='addChannel()'>Add Channel</button>"
       "<small>#channels derive encryption key from SHA-256(channel name); PSK is ignored for #channels.</small>"
       "<ul id='channels'></ul></section>"
-      "<section><h3>Contacts</h3>"
-      "<small>Heard contacts on mesh. Favorites are protected from oldest-contact overwrite.</small>"
-      "<ul id='contacts'></ul></section>"
       "<section><h3>Timezone</h3>"
       "<label>Timezone<select id='timezone'></select></label>"
       "<small>Timezone list is populated from browser-supported IANA zones.</small>"
@@ -716,6 +973,23 @@ void handleRoot() {
       "<section><button onclick='saveAll()'>Save Settings</button>"
       "<small>Reboots only when Wi-Fi or radio settings change.</small></section>"
       "</div>"
+      "<div id='tab_contacts' class='tab-panel'>"
+      "<section><h3>Contacts Heat Map</h3>"
+      "<div class='map-toolbar'>"
+      "<button type='button' onclick='zoomContactsMap(1.25)'>+</button>"
+      "<button type='button' onclick='zoomContactsMap(0.8)'>-</button>"
+      "<button type='button' onclick='focusMapOnMe()'>ME</button>"
+      "<small id='contacts_map_meta'>No map points yet.</small></div>"
+      "<div class='map-wrap'><canvas id='contacts_map'></canvas></div>"
+      "<small>Heat points include heard contacts with location and your node location.</small>"
+      "</section>"
+      "<section><h3>Contacts</h3>"
+      "<small>Click a contact to inspect telemetry. Favorites are protected from oldest-contact overwrite.</small>"
+      "<div class='contacts-layout'>"
+      "<ul id='contacts' class='contacts-list'></ul>"
+      "<div id='contact_detail' class='contact-detail'>Select a contact to view telemetry.</div>"
+      "</div></section>"
+      "</div>"
       "<div id='tab_utils' class='tab-panel'>"
       "<section><h3>Advert Utilities</h3>"
       "<button type='button' onclick='utilAdvertLocal()'>Advert Local (Zero Hop)</button>"
@@ -729,35 +1003,58 @@ void handleRoot() {
       "</section>"
       "</div>"
       "<script>"
-      "const regionDefaultsBootstrap=" +
-      region_defaults_js +
-      ";let regionDefaults=regionDefaultsBootstrap;let radioDirty=false;let timezoneDirty=false;let nodeNameDirty=false;let locationDirty=false;let channelMutationInFlight=false;"
-      "function showTab(tab){const cfg=document.getElementById('tab_config');const util=document.getElementById('tab_utils');const bCfg=document.getElementById('tab_btn_config');const bUtil=document.getElementById('tab_btn_utils');if(!cfg||!util||!bCfg||!bUtil)return;const configOn=tab==='config';cfg.classList.toggle('active',configOn);util.classList.toggle('active',!configOn);bCfg.classList.toggle('active',configOn);bUtil.classList.toggle('active',!configOn);}"
+      "const regionDefaultsBootstrap=__REGION_DEFAULTS__;let regionDefaults=regionDefaultsBootstrap;let radioDirty=false;let timezoneDirty=false;let nodeNameDirty=false;let locationDirty=false;let wifiDirty=false;let channelMutationInFlight=false;let contactsCache=[];let selectedContactKey='';let statusCache=null;let contactsMapView={centerLat:0,centerLon:0,zoom:1};let contactsMapCenterSet=false;let contactsLeafletMap=null;let contactsLeafletLayer=null;let contactsLeafletLoading=false;let contactsMapHostId='contacts_map_leaflet';"
+      "function showTab(tab){const cfg=document.getElementById('tab_config');const contacts=document.getElementById('tab_contacts');const util=document.getElementById('tab_utils');const bCfg=document.getElementById('tab_btn_config');const bContacts=document.getElementById('tab_btn_contacts');const bUtil=document.getElementById('tab_btn_utils');if(!cfg||!contacts||!util||!bCfg||!bContacts||!bUtil)return;const configOn=tab==='config';const contactsOn=tab==='contacts';const utilsOn=tab==='utils';cfg.classList.toggle('active',configOn);contacts.classList.toggle('active',contactsOn);util.classList.toggle('active',utilsOn);bCfg.classList.toggle('active',configOn);bContacts.classList.toggle('active',contactsOn);bUtil.classList.toggle('active',utilsOn);if(contactsOn){setTimeout(()=>{drawContactsMap();},0);}}"
       "function ensureTimezoneOptions(selected){const tzSel=document.getElementById('timezone');if(!tzSel)return;const current=tzSel.value;const hasOptions=tzSel.options&&tzSel.options.length>0;if(hasOptions){if(selected&&selected.length>0){let found=false;for(let i=0;i<tzSel.options.length;i++){if(tzSel.options[i].value===selected){found=true;break;}}if(!found){const opt=document.createElement('option');opt.value=selected;opt.textContent=selected;tzSel.insertBefore(opt,tzSel.firstChild);}if(current!==selected){tzSel.value=selected;}}return;}let zones=[];if(typeof Intl!=='undefined'&&typeof Intl.supportedValuesOf==='function'){try{zones=Intl.supportedValuesOf('timeZone');}catch(_e){zones=[];}}if(!Array.isArray(zones)||zones.length===0){zones=['UTC0'];}if(!zones.includes('UTC0')){zones.unshift('UTC0');}if(selected&&selected.length>0&&!zones.includes(selected)){zones.unshift(selected);}tzSel.innerHTML='';zones.forEach(z=>{const opt=document.createElement('option');opt.value=z;opt.textContent=z;if(z===selected)opt.selected=true;tzSel.appendChild(opt);});if(!selected&&tzSel.options.length>0){tzSel.selectedIndex=0;}}"
       "function markRadioDirty(){radioDirty=true;}"
       "function markTimezoneDirty(){timezoneDirty=true;}"
       "function refreshGpsModeIndicator(){const gpsMode=document.getElementById('gps_mode');const gpsLabel=document.getElementById('gps_mode_label');if(!gpsMode)return;if(gpsLabel)gpsLabel.textContent=gpsMode.checked?'GPS ON':'GPS OFF, using default location.';}"
       "function bindNodeNameInput(){const el=document.getElementById('node_name');if(!el)return;el.addEventListener('input',()=>{nodeNameDirty=true;});el.addEventListener('change',()=>{nodeNameDirty=true;});}"
       "function bindLocationInputs(){['node_lat','node_lon'].forEach(id=>{const el=document.getElementById(id);if(!el)return;el.addEventListener('input',()=>{locationDirty=true;});el.addEventListener('change',()=>{locationDirty=true;});});const cb=document.getElementById('send_loc_adv');if(cb){cb.addEventListener('change',()=>{locationDirty=true;});}const gpsMode=document.getElementById('gps_mode');if(gpsMode){gpsMode.addEventListener('change',()=>{locationDirty=true;refreshGpsModeIndicator();});}refreshGpsModeIndicator();}"
+      "function bindWifiInputs(){['wifi_ssid','wifi_pass'].forEach(id=>{const el=document.getElementById(id);if(!el)return;el.addEventListener('input',()=>{wifiDirty=true;});el.addEventListener('change',()=>{wifiDirty=true;});});}"
       "function bindRadioInputs(){['region','freq','bw','sf','cr','pwr','adv_int_min'].forEach(id=>{const el=document.getElementById(id);if(!el)return;el.addEventListener('input',markRadioDirty);el.addEventListener('change',markRadioDirty);});}"
       "function bindTimezoneInput(){const el=document.getElementById('timezone');if(!el)return;el.addEventListener('input',markTimezoneDirty);el.addEventListener('change',markTimezoneDirty);}"
       "async function copyPublicKey(){const el=document.getElementById('public_key');if(!el||!el.value){alert('No public key');return;}try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(el.value);}else{el.focus();el.select();document.execCommand('copy');}alert('Public key copied');}catch(_e){el.focus();el.select();document.execCommand('copy');alert('Public key copied');}}"
       "function calcTimezoneOffsetMinutes(tz){try{const parts=new Intl.DateTimeFormat('en-US',{timeZone:tz,timeZoneName:'longOffset'}).formatToParts(new Date());const zone=(parts.find(p=>p.type==='timeZoneName')||{}).value||'';const m=zone.match(/([+-])(\\d{1,2})(?::?(\\d{2}))?/);if(m){const sign=m[1]==='-'?-1:1;const hh=parseInt(m[2],10)||0;const mm=parseInt(m[3]||'0',10)||0;return sign*(hh*60+mm);}}catch(_e){}return 0;}"
       "async function jget(u){const r=await fetch(u);return r.json();}"
       "async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(b)});return r.json();}"
-      "async function loadStatus(forceRadio=false){const s=await jget('/api/status');const tz=s.timezone||'UTC0';const nodeEl=document.getElementById('node_name');const nodeFocused=(nodeEl&&document.activeElement===nodeEl);if(nodeEl&&(forceRadio||(!nodeNameDirty&&!nodeFocused))){nodeEl.value=s.node_name||'';}const pkEl=document.getElementById('public_key');if(pkEl&&s.public_key){pkEl.value=s.public_key;}if(forceRadio||!locationDirty){document.getElementById('node_lat').value=(typeof s.node_lat==='number')?s.node_lat:0;document.getElementById('node_lon').value=(typeof s.node_lon==='number')?s.node_lon:0;document.getElementById('send_loc_adv').checked=!!s.send_loc_adv;refreshGpsModeIndicator();}document.getElementById('wifi_ssid').value=s.wifi_ssid||'';document.getElementById('wifi_pass').value=s.wifi_pass||'';const tzSel=document.getElementById('timezone');const tzNeedsInit=!(tzSel&&tzSel.options&&tzSel.options.length>0);const tzFocused=(tzSel&&document.activeElement===tzSel);if(tzNeedsInit||forceRadio||(!timezoneDirty&&!tzFocused)){ensureTimezoneOptions(tz);}if(forceRadio||!radioDirty){document.getElementById('region').value=s.region||'US';document.getElementById('freq').value=s.freq;document.getElementById('bw').value=s.bw;document.getElementById('sf').value=s.sf;document.getElementById('cr').value=s.cr;document.getElementById('pwr').value=s.pwr;document.getElementById('adv_int_min').value=s.adv_int_min||360;}}"
+      "function hasValidCoord(lat,lon){return Number.isFinite(lat)&&Number.isFinite(lon)&&lat>=-90&&lat<=90&&lon>=-180&&lon<=180&&!(lat===0&&lon===0);}"
+      "function clamp(v,min,max){return Math.max(min,Math.min(max,v));}"
+      "function contactDisplayName(ct){return (ct&&ct.name&&ct.name.length>0)?ct.name:'(unnamed)';}"
+      "function formatLastHeard(lastmod){const v=Number(lastmod||0);if(!Number.isFinite(v)||v<=0)return 'unknown';if(v>1000000000&&v<4100000000){try{return new Date(v*1000).toLocaleString();}catch(_e){return String(v);}}return String(v);}"
+      "function getMapPoints(){const pts=[];contactsCache.forEach(ct=>{const lat=Number(ct.gps_lat);const lon=Number(ct.gps_lon);if(!hasValidCoord(lat,lon))return;pts.push({lat,lon,label:contactDisplayName(ct),key:ct.pubkey,isSelf:false,lastmod:Number(ct.lastmod||0),favorite:!!ct.favorite});});if(statusCache){const selfLat=Number(statusCache.node_lat);const selfLon=Number(statusCache.node_lon);if(hasValidCoord(selfLat,selfLon)){pts.push({lat:selfLat,lon:selfLon,label:(statusCache.node_name&&statusCache.node_name.length>0)?statusCache.node_name:'Me',key:'__self__',isSelf:true,lastmod:0,favorite:true});}}return pts;}"
+      "function projectMapPoint(lat,lon,w,h){const zoom=clamp(Number(contactsMapView.zoom||1),0.4,8);const latSpan=clamp(140/zoom,14,180);const lonSpan=clamp(220/zoom,20,360);const centerLat=clamp(Number(contactsMapView.centerLat||0),-90,90);let centerLon=Number(contactsMapView.centerLon||0);while(centerLon>180)centerLon-=360;while(centerLon<-180)centerLon+=360;let dlon=lon-centerLon;while(dlon>180)dlon-=360;while(dlon<-180)dlon+=360;const dlat=centerLat-lat;if(Math.abs(dlon)>lonSpan/2||Math.abs(dlat)>latSpan/2)return null;const x=(w/2)+(dlon/(lonSpan/2))*(w/2);const y=(h/2)+(dlat/(latSpan/2))*(h/2);return {x,y};}"
+      "function drawContactsMap(){const canvas=document.getElementById('contacts_map');const meta=document.getElementById('contacts_map_meta');if(!canvas)return;const rect=canvas.getBoundingClientRect();const w=Math.max(220,Math.floor(rect.width||220));const h=Math.max(180,Math.floor(rect.height||300));const dpr=Math.max(1,Math.min(2,window.devicePixelRatio||1));if(canvas.width!==Math.floor(w*dpr)||canvas.height!==Math.floor(h*dpr)){canvas.width=Math.floor(w*dpr);canvas.height=Math.floor(h*dpr);}const ctx=canvas.getContext('2d');if(!ctx)return;ctx.setTransform(1,0,0,1,0,0);ctx.scale(dpr,dpr);const bg=ctx.createLinearGradient(0,0,0,h);bg.addColorStop(0,'#142c42');bg.addColorStop(1,'#0a1523');ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);ctx.strokeStyle='rgba(110,154,194,.24)';ctx.lineWidth=1;for(let i=1;i<6;i++){const gx=Math.round((w*i)/6)+0.5;ctx.beginPath();ctx.moveTo(gx,0);ctx.lineTo(gx,h);ctx.stroke();}for(let i=1;i<4;i++){const gy=Math.round((h*i)/4)+0.5;ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(w,gy);ctx.stroke();}const pts=getMapPoints();if(pts.length>0&&!contactsMapCenterSet){contactsMapView.centerLat=pts[0].lat;contactsMapView.centerLon=pts[0].lon;contactsMapCenterSet=true;}const nowSec=Math.floor(Date.now()/1000);pts.forEach(pt=>{const p=projectMapPoint(pt.lat,pt.lon,w,h);if(!p)return;const ageSec=(pt.lastmod>0&&pt.lastmod<4100000000)?Math.max(0,nowSec-pt.lastmod):0;const decay=pt.isSelf?1:clamp(1-(ageSec/(24*3600)),0.25,1);const radius=pt.isSelf?22:16;const heat=ctx.createRadialGradient(p.x,p.y,1,p.x,p.y,radius);heat.addColorStop(0,pt.isSelf?'rgba(82,224,160,'+(0.55*decay)+')':'rgba(255,166,78,'+(0.50*decay)+')');heat.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=heat;ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);ctx.fill();});pts.forEach(pt=>{const p=projectMapPoint(pt.lat,pt.lon,w,h);if(!p)return;const selected=selectedContactKey&&selectedContactKey===pt.key;ctx.fillStyle=pt.isSelf?'#59e4a7':'#ffc078';ctx.strokeStyle=selected?'#ffffff':'rgba(20,34,50,.8)';ctx.lineWidth=selected?3:2;ctx.beginPath();ctx.arc(p.x,p.y,pt.isSelf?6:5,0,Math.PI*2);ctx.fill();ctx.stroke();if(selected||pt.isSelf){ctx.fillStyle='#e7eef6';ctx.font='12px system-ui, Segoe UI, Arial, sans-serif';ctx.fillText(pt.isSelf?'ME':(pt.label||'Contact'),p.x+8,p.y-8);}});if(meta){meta.textContent=pts.length>0?('Points: '+pts.length+' | Zoom: '+(Number(contactsMapView.zoom||1).toFixed(2))):'No map points yet.';}}"
+      "function zoomContactsMap(factor){const next=clamp(Number(contactsMapView.zoom||1)*Number(factor||1),0.4,8);contactsMapView.zoom=next;drawContactsMap();}"
+      "function focusMapOnMe(){if(!statusCache)return;const lat=Number(statusCache.node_lat);const lon=Number(statusCache.node_lon);if(!hasValidCoord(lat,lon)){alert('Your node has no valid location set');return;}contactsMapView.centerLat=lat;contactsMapView.centerLon=lon;contactsMapView.zoom=Math.max(contactsMapView.zoom||1,1.2);contactsMapCenterSet=true;drawContactsMap();}"
+      "function selectContact(pubkey){selectedContactKey=pubkey||'';renderContactsList();renderContactDetail();drawContactsMap();}"
+      "function renderContactDetail(){const detail=document.getElementById('contact_detail');if(!detail)return;if(!selectedContactKey){detail.textContent='Select a contact to view telemetry.';return;}const ct=contactsCache.find(c=>c.pubkey===selectedContactKey);if(!ct){detail.textContent='Selected contact is no longer available.';return;}const lat=Number(ct.gps_lat);const lon=Number(ct.gps_lon);const hasLoc=hasValidCoord(lat,lon);let html='';html+='<div class=\"kv\"><strong>Name:</strong> '+contactDisplayName(ct)+'</div>';html+='<div class=\"kv\"><strong>Public Key:</strong> '+(ct.pubkey||'')+'</div>';html+='<div class=\"kv\"><strong>Favorite:</strong> '+(ct.favorite?'Yes':'No')+'</div>';html+='<div class=\"kv\"><strong>Type:</strong> '+String((ct.type===undefined||ct.type===null)?'':ct.type)+'</div>';html+='<div class=\"kv\"><strong>Last Heard:</strong> '+formatLastHeard(ct.lastmod)+'</div>';html+='<div class=\"kv\"><strong>GPS (int):</strong> '+String(ct.gps_lat_i||0)+', '+String(ct.gps_lon_i||0)+'</div>';html+='<div class=\"kv\"><strong>GPS (deg):</strong> '+(hasLoc?(lat.toFixed(6)+', '+lon.toFixed(6)):'Unavailable')+'</div>';detail.innerHTML=html;}"
+      "function renderContactsList(){const ul=document.getElementById('contacts');if(!ul)return;ul.innerHTML='';if(!Array.isArray(contactsCache)||contactsCache.length===0){const li=document.createElement('li');li.textContent='No contacts heard yet';ul.appendChild(li);renderContactDetail();drawContactsMap();return;}contactsCache.forEach(ct=>{const li=document.createElement('li');const pick=document.createElement('button');pick.type='button';pick.className='pick'+((selectedContactKey&&selectedContactKey===ct.pubkey)?' active':'');pick.textContent=contactDisplayName(ct);pick.onclick=()=>selectContact(ct.pubkey);const fav=document.createElement('button');fav.type='button';fav.className='mini';fav.textContent=ct.favorite?'Unfavorite':'Favorite';fav.onclick=async()=>{const r=await jpost('/api/contacts/favorite',{pubkey:ct.pubkey,favorite:ct.favorite?'0':'1'});if(!r||!r.ok){alert((r&&r.error)||'failed');return;}await loadContacts();};const del=document.createElement('button');del.type='button';del.className='mini';del.textContent='Delete';del.onclick=async()=>{if(!confirm('Delete contact '+contactDisplayName(ct)+'?'))return;const r=await jpost('/api/contacts/remove',{pubkey:ct.pubkey});if(!r||!r.ok){alert((r&&r.error)||'failed');return;}await loadContacts();};li.appendChild(pick);li.appendChild(fav);li.appendChild(del);ul.appendChild(li);});renderContactDetail();drawContactsMap();}"
+      "async function loadStatus(forceRadio=false){const s=await jget('/api/status');statusCache=s;const tz=s.timezone||'UTC0';const nodeEl=document.getElementById('node_name');const nodeFocused=(nodeEl&&document.activeElement===nodeEl);if(nodeEl&&(forceRadio||(!nodeNameDirty&&!nodeFocused))){nodeEl.value=s.node_name||'';}const pkEl=document.getElementById('public_key');if(pkEl&&s.public_key){pkEl.value=s.public_key;}if(forceRadio||!locationDirty){document.getElementById('node_lat').value=(typeof s.node_lat==='number')?s.node_lat:0;document.getElementById('node_lon').value=(typeof s.node_lon==='number')?s.node_lon:0;document.getElementById('send_loc_adv').checked=!!s.send_loc_adv;refreshGpsModeIndicator();}const ssidEl=document.getElementById('wifi_ssid');const passEl=document.getElementById('wifi_pass');const wifiFocused=(document.activeElement===ssidEl||document.activeElement===passEl);if(forceRadio||(!wifiDirty&&!wifiFocused)){if(ssidEl)ssidEl.value=s.wifi_ssid||'';if(passEl)passEl.value=s.wifi_pass||'';}const tzSel=document.getElementById('timezone');const tzNeedsInit=!(tzSel&&tzSel.options&&tzSel.options.length>0);const tzFocused=(tzSel&&document.activeElement===tzSel);if(tzNeedsInit||forceRadio||(!timezoneDirty&&!tzFocused)){ensureTimezoneOptions(tz);}if(forceRadio||!radioDirty){document.getElementById('region').value=s.region||'US';document.getElementById('freq').value=s.freq;document.getElementById('bw').value=s.bw;document.getElementById('sf').value=s.sf;document.getElementById('cr').value=s.cr;document.getElementById('pwr').value=s.pwr;document.getElementById('adv_int_min').value=s.adv_int_min||360;}if(forceRadio&&hasValidCoord(Number(s.node_lat),Number(s.node_lon))){contactsMapView.centerLat=Number(s.node_lat);contactsMapView.centerLon=Number(s.node_lon);contactsMapCenterSet=true;}drawContactsMap();}"
       "async function loadPresets(){try{const p=await jget('/api/presets');regionDefaults=(p.region_defaults&&Object.keys(p.region_defaults).length>0)?p.region_defaults:regionDefaultsBootstrap;const r=document.getElementById('region');if(Array.isArray(p.regions)&&p.regions.length>0){r.innerHTML='';p.regions.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;if(v===p.selected_region)o.selected=true;r.appendChild(o);});}if(p.selected_region){r.value=p.selected_region;}}catch(_e){regionDefaults=regionDefaultsBootstrap;}}"
       "function applyRegionPreset(){const r=document.getElementById('region').value;const d=regionDefaults[r]||regionDefaultsBootstrap[r];if(!d)return;document.getElementById('freq').value=d.freq;document.getElementById('bw').value=d.bw;document.getElementById('sf').value=d.sf;document.getElementById('cr').value=d.cr;document.getElementById('pwr').value=d.pwr;radioDirty=true;}"
       "async function loadChannels(){const c=await jget('/api/channels');const ul=document.getElementById('channels');ul.innerHTML='';c.channels.forEach(n=>{const li=document.createElement('li');li.textContent=n;if(n==='Public'){const ro=document.createElement('small');ro.textContent=' (read-only)';li.appendChild(ro);}else{const b=document.createElement('button');b.textContent='Remove';b.style.width='auto';b.style.display='inline-block';b.style.marginLeft='8px';b.onclick=async()=>{await jpost('/api/channels/remove',{name:n});await loadChannels();};li.appendChild(b);}ul.appendChild(li);});}"
-      "async function loadContacts(){const c=await jget('/api/contacts');const ul=document.getElementById('contacts');ul.innerHTML='';if(!c.contacts||c.contacts.length===0){const li=document.createElement('li');li.textContent='No contacts heard yet';ul.appendChild(li);return;}c.contacts.forEach(ct=>{const li=document.createElement('li');const name=ct.name&&ct.name.length>0?ct.name:'(unnamed)';const shortPk=(ct.pubkey&&ct.pubkey.length>=12)?ct.pubkey.substring(0,12)+'...':'';li.textContent=`${name} ${shortPk?'('+shortPk+')':''}`;const fav=document.createElement('button');fav.textContent=ct.favorite?'Unfavorite':'Favorite';fav.style.width='auto';fav.style.display='inline-block';fav.style.marginLeft='8px';fav.onclick=async()=>{const r=await jpost('/api/contacts/favorite',{pubkey:ct.pubkey,favorite:ct.favorite?'0':'1'});if(!r||!r.ok){alert((r&&r.error)||'failed');return;}await loadContacts();};const del=document.createElement('button');del.textContent='Delete';del.style.width='auto';del.style.display='inline-block';del.style.marginLeft='8px';del.onclick=async()=>{if(!confirm('Delete contact '+name+'?')){return;}const r=await jpost('/api/contacts/remove',{pubkey:ct.pubkey});if(!r||!r.ok){alert((r&&r.error)||'failed');return;}await loadContacts();};li.appendChild(fav);li.appendChild(del);ul.appendChild(li);});}"
+      "async function loadContacts(){const c=await jget('/api/contacts');contactsCache=Array.isArray(c.contacts)?c.contacts:[];contactsCache.sort((a,b)=>{if(!!a.favorite!==!!b.favorite)return a.favorite?-1:1;const am=Number(a.lastmod||0);const bm=Number(b.lastmod||0);if(am!==bm)return bm-am;const an=(a.name||'').toLowerCase();const bn=(b.name||'').toLowerCase();if(an<bn)return-1;if(an>bn)return 1;return 0;});if(selectedContactKey&&!contactsCache.some(ct=>ct.pubkey===selectedContactKey)){selectedContactKey='';}if(!selectedContactKey&&contactsCache.length>0){selectedContactKey=contactsCache[0].pubkey;}renderContactsList();}"
       "async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||r.error||'done');}"
       "async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||r.error||'done');}"
       "function utilExportConfig(){window.location='/api/util/export';}"
       "async function utilImportConfig(){const status=document.getElementById('util_status');const input=document.getElementById('util_cfg_file');if(!input||!input.files||input.files.length===0){if(status)status.textContent='Choose a config file first.';return;}const file=input.files[0];const text=await file.text();const r=await jpost('/api/util/import',{content:text});if(status)status.textContent=(r&&r.message)?r.message:(r&&r.error)?r.error:'done';if(!r||!r.ok){alert((r&&r.error)||'failed');return;}alert(r.message||'Config imported');}"
-      "async function saveAll(){if(channelMutationInFlight){alert('Channel update in progress, please wait');return;}const pendingName=(document.getElementById('ch_name').value||'').trim();const pendingPsk=(document.getElementById('ch_psk').value||'').trim();if(pendingName){if(pendingName[0]!=='#'&&!pendingPsk){alert('PSK is required for non-# channels');return;}let addRes=null;channelMutationInFlight=true;try{addRes=await jpost('/api/channels/add',{name:pendingName,psk:pendingPsk});}finally{channelMutationInFlight=false;}if(!addRes||!addRes.ok){alert((addRes&&addRes.error)||'failed to add channel');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}const tzVal=document.getElementById('timezone').value;const sendLoc=document.getElementById('send_loc_adv').checked?'1':'0';const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:sendLoc,ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tzVal,tz_offset:String(calcTimezoneOffsetMinutes(tzVal)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value});alert(r.message||r.error||'done');if(r.ok){timezoneDirty=false;nodeNameDirty=false;locationDirty=false;}}"
+      "async function saveAll(){if(channelMutationInFlight){alert('Channel update in progress, please wait');return;}const pendingName=(document.getElementById('ch_name').value||'').trim();const pendingPsk=(document.getElementById('ch_psk').value||'').trim();if(pendingName){if(pendingName[0]!=='#'&&!pendingPsk){alert('PSK is required for non-# channels');return;}let addRes=null;channelMutationInFlight=true;try{addRes=await jpost('/api/channels/add',{name:pendingName,psk:pendingPsk});}finally{channelMutationInFlight=false;}if(!addRes||!addRes.ok){alert((addRes&&addRes.error)||'failed to add channel');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}const tzVal=document.getElementById('timezone').value;const sendLoc=document.getElementById('send_loc_adv').checked?'1':'0';const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:sendLoc,ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tzVal,tz_offset:String(calcTimezoneOffsetMinutes(tzVal)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value});alert(r.message||r.error||'done');if(r.ok){timezoneDirty=false;nodeNameDirty=false;locationDirty=false;wifiDirty=false;}}"
       "async function addChannel(){if(channelMutationInFlight){return;}const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}let r=null;channelMutationInFlight=true;try{r=await jpost('/api/channels/add',{name,psk});}finally{channelMutationInFlight=false;}if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}"
-      "async function boot(){showTab('config');bindNodeNameInput();bindLocationInputs();bindRadioInputs();bindTimezoneInput();ensureTimezoneOptions('UTC0');await loadPresets();await loadStatus(true);await loadChannels();await loadContacts();setInterval(()=>{loadStatus(false);loadContacts();},4000);}boot();"
+      "function ensureContactsMapHost(){const wrap=document.querySelector('.map-wrap');if(!wrap)return null;let host=document.getElementById(contactsMapHostId);if(host)return host;wrap.innerHTML='<div id=\"'+contactsMapHostId+'\" class=\"map-host\"></div>';host=document.getElementById(contactsMapHostId);return host;}"
+      "function ensureLeafletLoaded(){return new Promise(resolve=>{if(window.L){resolve(true);return;}if(contactsLeafletLoading){setTimeout(()=>{ensureLeafletLoaded().then(resolve);},120);return;}contactsLeafletLoading=true;if(!document.getElementById('leaflet_css')){const link=document.createElement('link');link.id='leaflet_css';link.rel='stylesheet';link.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.appendChild(link);}if(document.getElementById('leaflet_js')){const wait=()=>{if(window.L){contactsLeafletLoading=false;resolve(true);}else{setTimeout(wait,120);}};wait();return;}const script=document.createElement('script');script.id='leaflet_js';script.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';script.onload=()=>{contactsLeafletLoading=false;resolve(!!window.L);};script.onerror=()=>{contactsLeafletLoading=false;resolve(false);};document.head.appendChild(script);});}"
+      "async function drawContactsMap(){const meta=document.getElementById('contacts_map_meta');const pts=getMapPoints();if(meta){meta.textContent=pts.length>0?('Points: '+pts.length):'No map points yet.';}const host=ensureContactsMapHost();if(!host)return;const ok=await ensureLeafletLoaded();if(!ok){if(meta)meta.textContent='Map tiles unavailable (offline).';return;}if(!contactsLeafletMap){contactsLeafletMap=L.map(host,{zoomControl:false,attributionControl:true});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(contactsLeafletMap);contactsLeafletLayer=L.layerGroup().addTo(contactsLeafletMap);contactsLeafletMap.on('moveend zoomend',()=>{const c=contactsLeafletMap.getCenter();contactsMapView.centerLat=c.lat;contactsMapView.centerLon=c.lng;contactsMapView.zoom=contactsLeafletMap.getZoom();contactsMapCenterSet=true;});}if(!contactsMapCenterSet){const self=statusCache&&hasValidCoord(Number(statusCache.node_lat),Number(statusCache.node_lon));if(self){contactsMapView.centerLat=Number(statusCache.node_lat);contactsMapView.centerLon=Number(statusCache.node_lon);contactsMapView.zoom=13;}else if(pts.length>0){contactsMapView.centerLat=pts[0].lat;contactsMapView.centerLon=pts[0].lon;contactsMapView.zoom=8;}else{contactsMapView.centerLat=0;contactsMapView.centerLon=0;contactsMapView.zoom=2;}contactsMapCenterSet=true;}contactsLeafletMap.setView([contactsMapView.centerLat,contactsMapView.centerLon],Math.round(clamp(Number(contactsMapView.zoom||2),2,19)),{animate:false});if(!contactsLeafletLayer)return;contactsLeafletLayer.clearLayers();const nowSec=Math.floor(Date.now()/1000);pts.forEach(pt=>{const selected=selectedContactKey&&selectedContactKey===pt.key;const ageSec=(pt.lastmod>0&&pt.lastmod<4100000000)?Math.max(0,nowSec-pt.lastmod):0;const decay=pt.isSelf?1:clamp(1-(ageSec/(24*3600)),0.25,1);const heatColor=pt.isSelf?'#52e0a0':'#ffa64e';const pointColor=pt.isSelf?'#59e4a7':'#ffc078';L.circle([pt.lat,pt.lon],{radius:pt.isSelf?260:180,stroke:false,fillColor:heatColor,fillOpacity:(pt.isSelf?0.38:0.30)*decay}).addTo(contactsLeafletLayer);const m=L.circleMarker([pt.lat,pt.lon],{radius:pt.isSelf?7:6,color:selected?'#ffffff':'#142232',weight:selected?3:2,fillColor:pointColor,fillOpacity:1}).addTo(contactsLeafletLayer);if(selected||pt.isSelf){m.bindTooltip(pt.isSelf?'ME':(pt.label||'Contact'),{permanent:true,direction:'right',offset:[8,0]});}m.on('click',()=>{if(pt.isSelf){focusMapOnMe();}else{selectContact(pt.key);}});});if(meta){meta.textContent=pts.length>0?('Points: '+pts.length+' | Zoom: '+Number(contactsMapView.zoom||2).toFixed(0)):'No map points yet.';}setTimeout(()=>{if(contactsLeafletMap){contactsLeafletMap.invalidateSize(false);}},0);}"
+      "function zoomContactsMap(factor){if(contactsLeafletMap){const delta=(Number(factor||1)>=1)?1:-1;contactsLeafletMap.setZoom(clamp(contactsLeafletMap.getZoom()+delta,2,19));return;}contactsMapView.zoom=clamp(Number(contactsMapView.zoom||2)*Number(factor||1),2,19);drawContactsMap();}"
+      "function focusMapOnMe(){if(!statusCache)return;const lat=Number(statusCache.node_lat);const lon=Number(statusCache.node_lon);if(!hasValidCoord(lat,lon)){alert('Your node has no valid location set');return;}contactsMapView.centerLat=lat;contactsMapView.centerLon=lon;contactsMapView.zoom=Math.max(Number(contactsMapView.zoom||2),13);contactsMapCenterSet=true;if(contactsLeafletMap){contactsLeafletMap.setView([lat,lon],Math.round(clamp(contactsMapView.zoom,2,19)));}drawContactsMap();}"
+      "async function boot(){showTab('config');bindNodeNameInput();bindLocationInputs();bindWifiInputs();bindRadioInputs();bindTimezoneInput();window.addEventListener('resize',()=>{drawContactsMap();});ensureTimezoneOptions('UTC0');await loadPresets();await loadStatus(true);await loadChannels();await loadContacts();setInterval(()=>{loadStatus(false);loadContacts();},4000);}boot();"
       "</script></div></body></html>";
+
+  html.replace("__REGION_OPTIONS__", region_options);
+  html.replace("__REGION_DEFAULTS__", region_defaults_js);
+  if (html.length() == 0) {
+    g_server.send(503, "text/plain", "Web UI unavailable (low memory)");
+    return;
+  }
 
   g_server.send(200, "text/html", html);
 }
@@ -904,6 +1201,14 @@ void handleContacts() {
       payload += String(static_cast<unsigned>(g_contacts_web_buf[i].type));
       payload += ",\"lastmod\":";
       payload += String(g_contacts_web_buf[i].lastmod);
+      payload += ",\"gps_lat_i\":";
+      payload += String(g_contacts_web_buf[i].gps_lat_i);
+      payload += ",\"gps_lon_i\":";
+      payload += String(g_contacts_web_buf[i].gps_lon_i);
+      payload += ",\"gps_lat\":";
+      payload += String(static_cast<double>(g_contacts_web_buf[i].gps_lat_i) / 10000000.0, 7);
+      payload += ",\"gps_lon\":";
+      payload += String(static_cast<double>(g_contacts_web_buf[i].gps_lon_i) / 10000000.0, 7);
       payload += "}";
     }
   }
@@ -1232,7 +1537,18 @@ void handleChannelRemove() {
 }
 
 void registerRoutes() {
-  g_server.on("/", HTTP_GET, handleRoot);
+  g_server.on("/", HTTP_ANY, handleRoot);
+  g_server.on("/index.html", HTTP_ANY, handleRoot);
+  g_server.on("/generate_204", HTTP_ANY, handleRoot);              // Android captive portal probe
+  g_server.on("/gen_204", HTTP_ANY, handleRoot);                   // Some Android variants
+  g_server.on("/hotspot-detect.html", HTTP_ANY, handleRoot);       // Apple captive portal probe
+  g_server.on("/library/test/success.html", HTTP_ANY, handleRoot); // Apple captive portal probe
+  g_server.on("/connecttest.txt", HTTP_ANY, handleRoot);           // Microsoft captive portal probe
+  g_server.on("/ncsi.txt", HTTP_ANY, handleRoot);                  // Microsoft captive portal probe
+  g_server.on("/favicon.ico", HTTP_ANY, []() { g_server.send(204, "text/plain", ""); });
+  g_server.on("/apple-touch-icon.png", HTTP_ANY, []() { g_server.send(204, "text/plain", ""); });
+  g_server.on("/apple-touch-icon-precomposed.png", HTTP_ANY, []() { g_server.send(204, "text/plain", ""); });
+  g_server.on("/robots.txt", HTTP_ANY, []() { g_server.send(204, "text/plain", ""); });
   g_server.on("/api/status", HTTP_GET, handleStatus);
   g_server.on("/api/presets", HTTP_GET, handlePresets);
   g_server.on("/api/channels", HTTP_GET, handleChannels);
@@ -1249,6 +1565,12 @@ void registerRoutes() {
   g_server.on("/api/util/import", HTTP_POST, handleUtilImportConfig);
 
   g_server.onNotFound([]() {
+    const String uri = g_server.uri();
+    // In AP mode, redirect unknown browser/captive portal paths to the root UI.
+    if (uri.length() > 0 && !uri.startsWith("/api/")) {
+      handleRoot();
+      return;
+    }
     g_server.send(404, "application/json", "{\"ok\":false,\"error\":\"not found\"}");
   });
 }
@@ -1266,18 +1588,60 @@ void loadSettings(WebSettings* out_settings) {
   memset(out_settings, 0, sizeof(WebSettings));
 
   Preferences prefs;
-  prefs.begin(kPrefsNs, true);
+  // Use RW open so first boot creates namespace without noisy NOT_FOUND logs.
+  if (!prefs.begin(kPrefsNs, false)) {
+    return;
+  }
 
-  String node_name = prefs.getString("node_name", kDefaultNodeName);
-  double node_latitude = prefs.getDouble("node_lat", kDefaultNodeLatitude);
-  double node_longitude = prefs.getDouble("node_lon", kDefaultNodeLongitude);
-  bool send_location_in_advert = prefs.getBool("send_loc_adv", kDefaultSendLocationInAdvert);
-  uint16_t advert_interval_minutes = prefs.getUShort("adv_int_min", kDefaultAdvertIntervalMinutes);
-  String ssid = prefs.getString("wifi_ssid", kDefaultSsid);
-  String pass = prefs.getString("wifi_pass", kDefaultPass);
-  String timezone = prefs.getString("timezone", kDefaultTimezone);
-  int tz_offset = prefs.getInt("tz_offset", 0);
-  String region = prefs.getString("region", kDefaultRegion);
+  String node_name = kDefaultNodeName;
+  if (prefs.isKey("node_name")) {
+    node_name = prefs.getString("node_name", kDefaultNodeName);
+  }
+
+  double node_latitude = kDefaultNodeLatitude;
+  if (prefs.isKey("node_lat")) {
+    node_latitude = prefs.getDouble("node_lat", kDefaultNodeLatitude);
+  }
+
+  double node_longitude = kDefaultNodeLongitude;
+  if (prefs.isKey("node_lon")) {
+    node_longitude = prefs.getDouble("node_lon", kDefaultNodeLongitude);
+  }
+
+  bool send_location_in_advert = kDefaultSendLocationInAdvert;
+  if (prefs.isKey("send_loc_adv")) {
+    send_location_in_advert = prefs.getBool("send_loc_adv", kDefaultSendLocationInAdvert);
+  }
+
+  uint16_t advert_interval_minutes = kDefaultAdvertIntervalMinutes;
+  if (prefs.isKey("adv_int_min")) {
+    advert_interval_minutes = prefs.getUShort("adv_int_min", kDefaultAdvertIntervalMinutes);
+  }
+
+  String ssid = kDefaultSsid;
+  if (prefs.isKey("wifi_ssid")) {
+    ssid = prefs.getString("wifi_ssid", kDefaultSsid);
+  }
+
+  String pass = kDefaultPass;
+  if (prefs.isKey("wifi_pass")) {
+    pass = prefs.getString("wifi_pass", kDefaultPass);
+  }
+
+  String timezone = kDefaultTimezone;
+  if (prefs.isKey("timezone")) {
+    timezone = prefs.getString("timezone", kDefaultTimezone);
+  }
+
+  int tz_offset = 0;
+  if (prefs.isKey("tz_offset")) {
+    tz_offset = prefs.getInt("tz_offset", 0);
+  }
+
+  String region = kDefaultRegion;
+  if (prefs.isKey("region")) {
+    region = prefs.getString("region", kDefaultRegion);
+  }
 
   const bool has_explicit_radio =
       prefs.isKey("lora_freq") || prefs.isKey("lora_bw") || prefs.isKey("lora_sf") ||
@@ -1376,8 +1740,6 @@ bool begin(mesh::MeshAdapter* mesh_adapter, const WebSettings& initial_settings)
 
   g_server.begin();
   g_running = true;
-
-  if (false) Serial.printf("[WEB] Config server running in %s mode at http://%s/\n", g_mode, g_ip);
   return true;
 }
 
@@ -1430,6 +1792,36 @@ bool exportConfigText(String* out_text) {
 
 bool importConfigText(const char* text, bool queue_reboot, char* err, size_t err_size) {
   return applyConfigTextInternal(text, queue_reboot, err, err_size);
+}
+
+bool setNodeName(const char* node_name, char* err, size_t err_size) {
+  if (!node_name || node_name[0] == '\0') {
+    setImportError(err, err_size, "Node name is required");
+    return false;
+  }
+
+  const size_t name_len = strlen(node_name);
+  if (name_len == 0 || name_len > 31) {
+    setImportError(err, err_size, "Node name length invalid");
+    return false;
+  }
+
+  WebSettings next{};
+  loadSettings(&next);
+  copyString(next.node_name, sizeof(next.node_name), node_name);
+
+  if (g_mesh) {
+    g_mesh->setNodeName(next.node_name);
+    g_mesh->broadcastSelfAdvertNow();
+  }
+
+  saveSettings(next);
+  if (g_running) {
+    g_settings = next;
+  }
+
+  setImportError(err, err_size, "");
+  return true;
 }
 
 bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size) {

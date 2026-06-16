@@ -39,6 +39,7 @@ const char* ip();
 
 bool exportConfigText(String* out_text);
 bool importConfigText(const char* text, bool queue_reboot, char* err, size_t err_size);
+bool setNodeName(const char* node_name, char* err, size_t err_size);
 bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size);
 
 }  // namespace web

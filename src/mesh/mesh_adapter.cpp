@@ -168,7 +168,7 @@ int loadChannelsSnapshotFromNvs(PersistedChannel* out_channels, int max_channels
   }
 
   Preferences prefs;
-  if (!prefs.begin(kMeshPrefsNs, true)) {
+  if (!prefs.begin(kMeshPrefsNs, false)) {
     if (false) Serial.println("[PERSIST][CH] NVS open failed for read");
     return 0;
   }
@@ -256,7 +256,7 @@ int loadContactsSnapshotFromNvs(PersistedContact* out_contacts, int max_contacts
   }
 
   Preferences prefs;
-  if (!prefs.begin(kMeshPrefsNs, true)) {
+  if (!prefs.begin(kMeshPrefsNs, false)) {
     if (false) Serial.println("[PERSIST][CT] NVS open failed for read");
     return 0;
   }
@@ -297,7 +297,7 @@ bool loadIdentityFromNvs(::mesh::LocalIdentity* identity) {
   }
 
   Preferences prefs;
-  if (!prefs.begin(kMeshPrefsNs, true)) {
+  if (!prefs.begin(kMeshPrefsNs, false)) {
     if (false) Serial.println("[PERSIST][ID] NVS open failed for read");
     return false;
   }
@@ -968,7 +968,9 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
 
   runtime_->mesh->setNodeName(kDefaultNodeName);
 
-  if (!loadIdentityFromNvs(&runtime_->mesh->self_id)) {
+  identity_loaded_from_nvs_ = loadIdentityFromNvs(&runtime_->mesh->self_id);
+  adverts_unlocked_for_boot_ = identity_loaded_from_nvs_;
+  if (!identity_loaded_from_nvs_) {
     runtime_->mesh->self_id = ::mesh::LocalIdentity(&runtime_->fast_rng);
     int attempts = 0;
     while (attempts < 10 &&
@@ -1016,7 +1018,11 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
 
   loadContactsFromFs();
 
-  runtime_->mesh->broadcastSelfAdvert();
+  // On fresh installs (no identity in NVS yet), avoid announcing a temporary
+  // random identity before config import restores the intended keys.
+  if (adverts_unlocked_for_boot_) {
+    runtime_->mesh->broadcastSelfAdvert();
+  }
 
   char info[96];
   snprintf(info, sizeof(info), "Mesh init %.3fMHz SF%u BW%.1fkHz CR4/%u", radio_config.frequency_mhz,
@@ -1042,7 +1048,7 @@ void MeshAdapter::loop() {
   runtime_->rtc_clock.tick();
 
   const uint32_t now = millis();
-  if (now - last_advert_ms_ >= auto_advert_interval_ms_) {
+  if (adverts_unlocked_for_boot_ && now - last_advert_ms_ >= auto_advert_interval_ms_) {
     runtime_->mesh->broadcastSelfAdvert();
     runtime_->mesh->broadcastSelfAdvertFlood();
     last_advert_ms_ = now;
@@ -1202,7 +1208,15 @@ bool MeshAdapter::importIdentityKeysHex(const char* public_hex, const char* priv
   }
 
   runtime_->mesh->self_id = imported_identity;
-  return saveIdentityToNvs(&runtime_->mesh->self_id);
+  const bool saved = saveIdentityToNvs(&runtime_->mesh->self_id);
+  if (saved) {
+    identity_loaded_from_nvs_ = true;
+  }
+  return saved;
+}
+
+bool MeshAdapter::identityLoadedFromNvs() const {
+  return identity_loaded_from_nvs_;
 }
 
 bool MeshAdapter::setGpsEnabled(bool enabled) {
@@ -1289,7 +1303,7 @@ void MeshAdapter::getAdvertLocation(bool* enabled, double* latitude, double* lon
 }
 
 bool MeshAdapter::broadcastSelfAdvertNow() {
-  if (!ready_ || !runtime_ || !runtime_->mesh) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !adverts_unlocked_for_boot_) {
     return false;
   }
 
@@ -1299,7 +1313,7 @@ bool MeshAdapter::broadcastSelfAdvertNow() {
 }
 
 bool MeshAdapter::broadcastSelfAdvertFloodNow() {
-  if (!ready_ || !runtime_ || !runtime_->mesh) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !adverts_unlocked_for_boot_) {
     return false;
   }
 

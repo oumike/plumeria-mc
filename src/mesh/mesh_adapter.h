@@ -57,6 +57,7 @@ class MeshAdapter {
   bool getIdentityKeysHex(char* out_public_hex, size_t public_hex_size,
                           char* out_private_hex, size_t private_hex_size) const;
   bool importIdentityKeysHex(const char* public_hex, const char* private_hex);
+  bool identityLoadedFromNvs() const;
   bool setGpsEnabled(bool enabled);
   int getGpsSatelliteCount() const;
   bool setAdvertLocation(bool enabled, double latitude, double longitude);
@@ -105,6 +106,8 @@ class MeshAdapter {
   uint32_t rx_raw_count_ = 0;
   uint32_t rx_packet_count_ = 0;
   uint32_t last_rx_ms_ = 0;
+  bool identity_loaded_from_nvs_ = false;
+  bool adverts_unlocked_for_boot_ = false;
   bool contacts_dirty_ = false;
   bool channels_dirty_ = false;
   bool ready_ = false;
