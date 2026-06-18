@@ -40,6 +40,9 @@ struct MeshContactSummary {
   uint32_t lastmod;
   int32_t gps_lat_i;
   int32_t gps_lon_i;
+  uint8_t telemetry_adv_type;
+  uint16_t telemetry_feat1;
+  uint16_t telemetry_feat2;
 };
 
 struct MeshRuntime;
@@ -80,6 +83,18 @@ class MeshAdapter {
  private:
   friend class StandaloneChatMesh;
 
+  static constexpr size_t kPubKeySize = 32;
+  static constexpr size_t kMaxContactTelemetry = 48;
+
+  struct ContactTelemetrySnapshot {
+    uint8_t pub_key[kPubKeySize];
+    uint8_t advert_type;
+    uint16_t feat1;
+    uint16_t feat2;
+    uint32_t last_update_ms;
+    bool used;
+  };
+
   void queueInfo(const char* text);
   void queueChannelMessage(const char* channel_name, const char* text);
   void queueDirectMessage(const char* contact_name, const char* contact_key, const char* text);
@@ -87,6 +102,8 @@ class MeshAdapter {
   void noteRxPacket();
   void markContactsDirty();
   void markChannelsDirty();
+  void noteContactAdvertTelemetry(const uint8_t* pub_key, uint8_t advert_type, uint16_t feat1, uint16_t feat2);
+  bool loadContactTelemetry(const uint8_t* pub_key, MeshContactSummary* out_summary) const;
   bool loadContactsFromFs();
   bool saveContactsToFs();
   bool loadChannelsFromFs();
@@ -106,6 +123,7 @@ class MeshAdapter {
   uint32_t rx_raw_count_ = 0;
   uint32_t rx_packet_count_ = 0;
   uint32_t last_rx_ms_ = 0;
+  ContactTelemetrySnapshot contact_telemetry_[kMaxContactTelemetry]{};
   bool identity_loaded_from_nvs_ = false;
   bool adverts_unlocked_for_boot_ = false;
   bool contacts_dirty_ = false;

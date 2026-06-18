@@ -32,18 +32,34 @@ namespace {
 #ifndef BOARD_POWERON
 #define BOARD_POWERON 10
 #endif
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#ifndef BOARD_POWERON
+#define BOARD_POWERON 7
+#endif
 #else
 #ifndef BOARD_POWERON
 #define BOARD_POWERON -1
 #endif
 #endif
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#ifndef BOARD_VEXT_ENABLE
+#define BOARD_VEXT_ENABLE 36
+#endif
+#else
 #ifndef BOARD_VEXT_ENABLE
 #define BOARD_VEXT_ENABLE -1
 #endif
+#endif
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#ifndef BOARD_VEXT_ON_LEVEL
+#define BOARD_VEXT_ON_LEVEL LOW
+#endif
+#else
 #ifndef BOARD_VEXT_ON_LEVEL
 #define BOARD_VEXT_ON_LEVEL HIGH
+#endif
 #endif
 
 #if defined(DEVICE_TDECK)

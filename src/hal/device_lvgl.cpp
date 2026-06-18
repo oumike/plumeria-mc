@@ -8,6 +8,11 @@
 #include <freertos/task.h>
 #include <lvgl.h>
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#include <chsc6x.h>
+#include <lgfx/v1/Touch.hpp>
+#endif
+
 namespace {
 
 #ifndef PLUMERIA_KEY_DEBUG
@@ -15,12 +20,16 @@ namespace {
 #endif
 
 #if defined(DEVICE_TDECK)
+constexpr int kTftSpiHost = SPI2_HOST;
+constexpr bool kTftSpi3Wire = false;
 constexpr int kTftSck = 40;
 constexpr int kTftMiso = 38;
 constexpr int kTftMosi = 41;
 constexpr int kTftCs = 12;
 constexpr int kTftDc = 11;
+constexpr int kTftRst = -1;
 constexpr int kTftBacklight = 42;
+constexpr bool kBacklightInvert = false;
 
 constexpr int kPanelWidth = 240;
 constexpr int kPanelHeight = 320;
@@ -30,6 +39,7 @@ constexpr int kPanelOffsetY = 0;
 constexpr int kScrollWheelUpPin = 3;
 constexpr int kScrollWheelDownPin = 2;
 constexpr int kScrollWheelPressPin = 0;
+constexpr bool kHasPhysicalWheel = true;
 
 constexpr uint16_t kLvglMaxHorRes = 320;
 constexpr uint16_t kLvglFallbackHorRes = 320;
@@ -37,6 +47,8 @@ constexpr uint16_t kLvglFallbackVerRes = 240;
 constexpr int kDisplayRotation = 1;
 constexpr int kDisplayBrightness = 128;
 constexpr int kBacklightPwmChannel = 0;
+constexpr int kBacklightPwmFreq = 12000;
+constexpr bool kUsePwmBacklight = true;
 constexpr uint32_t kTftWriteHz = 40000000;
 constexpr uint32_t kTftReadHz = 1000000;
 
@@ -64,12 +76,16 @@ constexpr uint32_t kKeyboardBusRecoverDelayMs = 2;
 constexpr uint8_t kKeyboardMaxFailStreak = 4;
 constexpr bool kEnableTouchInput = true;
 #elif defined(DEVICE_TLORA_PAGER_TFT)
+constexpr int kTftSpiHost = SPI2_HOST;
+constexpr bool kTftSpi3Wire = false;
 constexpr int kTftSck = 35;
 constexpr int kTftMiso = 33;
 constexpr int kTftMosi = 34;
 constexpr int kTftCs = 38;
 constexpr int kTftDc = 37;
+constexpr int kTftRst = -1;
 constexpr int kTftBacklight = 42;
+constexpr bool kBacklightInvert = false;
 
 constexpr int kPanelWidth = 222;
 constexpr int kPanelHeight = 480;
@@ -79,12 +95,15 @@ constexpr int kPanelOffsetY = 0;
 constexpr int kScrollWheelUpPin = 40;
 constexpr int kScrollWheelDownPin = 41;
 constexpr int kScrollWheelPressPin = 7;
+constexpr bool kHasPhysicalWheel = true;
 constexpr uint16_t kLvglMaxHorRes = 480;
 constexpr uint16_t kLvglFallbackHorRes = 480;
 constexpr uint16_t kLvglFallbackVerRes = 222;
 constexpr int kDisplayRotation = 3;
 constexpr int kDisplayBrightness = 130;
 constexpr int kBacklightPwmChannel = 7;
+constexpr int kBacklightPwmFreq = 12000;
+constexpr bool kUsePwmBacklight = true;
 constexpr uint32_t kTftWriteHz = 40000000;
 constexpr uint32_t kTftReadHz = 16000000;
 
@@ -100,12 +119,16 @@ constexpr uint32_t kKeyboardRecoveryProbeMs = 1000;
 constexpr uint32_t kKeyboardBusRecoverDelayMs = 2;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
 // Placeholder profile for future Cardputer-specific display/input tuning.
+constexpr int kTftSpiHost = SPI2_HOST;
+constexpr bool kTftSpi3Wire = false;
 constexpr int kTftSck = 35;
 constexpr int kTftMiso = 33;
 constexpr int kTftMosi = 34;
 constexpr int kTftCs = 38;
 constexpr int kTftDc = 37;
+constexpr int kTftRst = -1;
 constexpr int kTftBacklight = 42;
+constexpr bool kBacklightInvert = false;
 
 constexpr int kPanelWidth = 222;
 constexpr int kPanelHeight = 480;
@@ -115,47 +138,73 @@ constexpr int kPanelOffsetY = 0;
 constexpr int kScrollWheelUpPin = 40;
 constexpr int kScrollWheelDownPin = 41;
 constexpr int kScrollWheelPressPin = 7;
+constexpr bool kHasPhysicalWheel = true;
 constexpr uint16_t kLvglMaxHorRes = 480;
 constexpr uint16_t kLvglFallbackHorRes = 480;
 constexpr uint16_t kLvglFallbackVerRes = 222;
 constexpr int kDisplayRotation = 3;
 constexpr int kDisplayBrightness = 130;
 constexpr int kBacklightPwmChannel = 7;
+constexpr int kBacklightPwmFreq = 12000;
+constexpr bool kUsePwmBacklight = true;
 constexpr uint32_t kTftWriteHz = 40000000;
 constexpr uint32_t kTftReadHz = 16000000;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
-// Placeholder profile for future Heltec horizontal/vertical split behavior.
-constexpr int kTftSck = 35;
-constexpr int kTftMiso = 33;
-constexpr int kTftMosi = 34;
-constexpr int kTftCs = 38;
-constexpr int kTftDc = 37;
-constexpr int kTftBacklight = 42;
+// Heltec V4 TFT expansion wiring (camillia-mt known-good profile).
+constexpr int kTftSpiHost = SPI3_HOST;
+constexpr bool kTftSpi3Wire = true;
+constexpr int kTftSck = 17;
+constexpr int kTftMiso = -1;
+constexpr int kTftMosi = 33;
+constexpr int kTftCs = 15;
+constexpr int kTftDc = 16;
+constexpr int kTftRst = 18;
+constexpr int kTftBacklight = 21;
+constexpr bool kBacklightInvert = false;
 
-constexpr int kPanelWidth = 222;
-constexpr int kPanelHeight = 480;
-constexpr int kPanelOffsetX = 49;
+constexpr int kPanelWidth = 240;
+constexpr int kPanelHeight = 320;
+constexpr int kPanelOffsetX = 0;
 constexpr int kPanelOffsetY = 0;
 
-constexpr int kScrollWheelUpPin = 40;
-constexpr int kScrollWheelDownPin = 41;
-constexpr int kScrollWheelPressPin = 7;
-constexpr uint16_t kLvglMaxHorRes = 480;
-constexpr uint16_t kLvglFallbackHorRes = 480;
-constexpr uint16_t kLvglFallbackVerRes = 222;
+constexpr int kScrollWheelUpPin = -1;
+constexpr int kScrollWheelDownPin = -1;
+constexpr int kScrollWheelPressPin = -1;
+constexpr bool kHasPhysicalWheel = false;
+constexpr uint16_t kLvglMaxHorRes = 320;
+constexpr uint16_t kLvglFallbackHorRes = 320;
+constexpr uint16_t kLvglFallbackVerRes = 240;
+#if defined(DEVICE_UI_VERTICAL)
+constexpr int kDisplayRotation = 0;
+#else
 constexpr int kDisplayRotation = 3;
-constexpr int kDisplayBrightness = 130;
+#endif
+constexpr int kDisplayBrightness = 220;
 constexpr int kBacklightPwmChannel = 7;
+constexpr int kBacklightPwmFreq = 44100;
+constexpr bool kUsePwmBacklight = true;
 constexpr uint32_t kTftWriteHz = 40000000;
-constexpr uint32_t kTftReadHz = 16000000;
+constexpr uint32_t kTftReadHz = 4000000;
+
+constexpr int kTouchSda = 47;
+constexpr int kTouchScl = 48;
+constexpr int kTouchInt = -1;
+constexpr int kTouchRst = 44;
+constexpr int kTouchI2cPort = 1;
+constexpr int kTouchAddr = 0x2E;
+constexpr bool kEnableTouchInput = true;
 #else
 // Generic placeholder profile for non-target boards.
+constexpr int kTftSpiHost = SPI2_HOST;
+constexpr bool kTftSpi3Wire = false;
 constexpr int kTftSck = 35;
 constexpr int kTftMiso = 33;
 constexpr int kTftMosi = 34;
 constexpr int kTftCs = 38;
 constexpr int kTftDc = 37;
+constexpr int kTftRst = -1;
 constexpr int kTftBacklight = 42;
+constexpr bool kBacklightInvert = false;
 
 constexpr int kPanelWidth = 222;
 constexpr int kPanelHeight = 480;
@@ -165,12 +214,15 @@ constexpr int kPanelOffsetY = 0;
 constexpr int kScrollWheelUpPin = 40;
 constexpr int kScrollWheelDownPin = 41;
 constexpr int kScrollWheelPressPin = 7;
+constexpr bool kHasPhysicalWheel = true;
 constexpr uint16_t kLvglMaxHorRes = 480;
 constexpr uint16_t kLvglFallbackHorRes = 480;
 constexpr uint16_t kLvglFallbackVerRes = 222;
 constexpr int kDisplayRotation = 3;
 constexpr int kDisplayBrightness = 130;
 constexpr int kBacklightPwmChannel = 7;
+constexpr int kBacklightPwmFreq = 12000;
+constexpr bool kUsePwmBacklight = true;
 constexpr uint32_t kTftWriteHz = 40000000;
 constexpr uint32_t kTftReadHz = 16000000;
 #endif
@@ -195,14 +247,84 @@ constexpr bool kWheelInvertDirection = false;
 #endif
 constexpr uint16_t kLvglBufferLines = 20;
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+class Panel_HeltecV4Tft : public lgfx::Panel_ST7789 {
+ protected:
+  const uint8_t* getInitCommands(uint8_t listno) const override {
+    static uint8_t list[] = {0x26, 1, 0x01, 0xFF, 0xFF};
+    if (listno == 1) {
+      return list;
+    }
+    return lgfx::Panel_ST7789::getInitCommands(listno);
+  }
+};
+
+class Touch_Heltec_CHSC6X : public lgfx::ITouch {
+ public:
+  Touch_Heltec_CHSC6X() {
+    _cfg.i2c_addr = kTouchAddr;
+    _cfg.x_min = 0;
+    _cfg.x_max = kPanelWidth - 1;
+    _cfg.y_min = 0;
+    _cfg.y_max = kPanelHeight - 1;
+  }
+
+  bool init(void) override {
+    if (touch_ == nullptr) {
+      if (kTouchI2cPort == 1) {
+        touch_ = new chsc6x(&Wire1, kTouchSda, kTouchScl, kTouchInt, kTouchRst);
+      } else {
+        touch_ = new chsc6x(&Wire, kTouchSda, kTouchScl, kTouchInt, kTouchRst);
+      }
+    }
+    touch_->chsc6x_init();
+    return true;
+  }
+
+  uint_fast8_t getTouchRaw(lgfx::touch_point_t* tp, uint_fast8_t /*count*/) override {
+    uint16_t raw_x = 0;
+    uint16_t raw_y = 0;
+    if (touch_ && touch_->chsc6x_read_touch_info(&raw_x, &raw_y) == 0) {
+      int16_t x = static_cast<int16_t>(raw_x);
+      int16_t y = static_cast<int16_t>(raw_y);
+
+      // Some CHSC6X firmware reports swapped axes; normalize to panel-native coords.
+      if (x >= kPanelWidth || y >= kPanelHeight) {
+        x = static_cast<int16_t>(raw_y);
+        y = static_cast<int16_t>(raw_x);
+      }
+
+      if (x < 0) x = 0;
+      if (y < 0) y = 0;
+      if (x >= kPanelWidth) x = kPanelWidth - 1;
+      if (y >= kPanelHeight) y = kPanelHeight - 1;
+
+      tp[0].x = x;
+      tp[0].y = y;
+      tp[0].size = 1;
+      tp[0].id = 1;
+      return 1;
+    }
+
+    tp[0].size = 0;
+    return 0;
+  }
+
+  void wakeup(void) override {}
+  void sleep(void) override {}
+
+ private:
+  chsc6x* touch_ = nullptr;
+};
+#endif
+
 #if defined(DEVICE_TDECK)
 using DisplayPanel = lgfx::Panel_ST7789;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
 // Placeholder until Cardputer panel profile is implemented.
 using DisplayPanel = lgfx::Panel_ST7796;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
-// Placeholder until Heltec panel profile is implemented.
-using DisplayPanel = lgfx::Panel_ST7796;
+using DisplayPanel = Panel_HeltecV4Tft;
 #else
 using DisplayPanel = lgfx::Panel_ST7796;
 #endif
@@ -212,11 +334,11 @@ class LGFX_DeviceDisplay : public lgfx::LGFX_Device {
   LGFX_DeviceDisplay() {
     {
       auto cfg = bus_.config();
-      cfg.spi_host = SPI2_HOST;
+      cfg.spi_host = static_cast<spi_host_device_t>(kTftSpiHost);
       cfg.spi_mode = 0;
       cfg.freq_write = kTftWriteHz;
       cfg.freq_read = kTftReadHz;
-      cfg.spi_3wire = false;
+      cfg.spi_3wire = kTftSpi3Wire;
       cfg.use_lock = true;
       cfg.pin_sclk = kTftSck;
       cfg.pin_miso = kTftMiso;
@@ -229,28 +351,28 @@ class LGFX_DeviceDisplay : public lgfx::LGFX_Device {
     {
       auto cfg = panel_.config();
       cfg.pin_cs = kTftCs;
-      cfg.pin_rst = -1;
+      cfg.pin_rst = kTftRst;
       cfg.panel_width = kPanelWidth;
       cfg.panel_height = kPanelHeight;
       cfg.offset_x = kPanelOffsetX;
       cfg.offset_y = kPanelOffsetY;
       cfg.invert = true;
       cfg.rgb_order = false;
-      cfg.readable = true;
+      cfg.readable = (kTftMiso >= 0) && !kTftSpi3Wire;
       panel_.config(cfg);
     }
 
-    {
+    if (kUsePwmBacklight && kTftBacklight >= 0) {
       auto cfg = light_.config();
       cfg.pin_bl = kTftBacklight;
-      cfg.invert = false;
-      cfg.freq = 12000;
+      cfg.invert = kBacklightInvert;
+      cfg.freq = kBacklightPwmFreq;
       cfg.pwm_channel = kBacklightPwmChannel;
       light_.config(cfg);
       panel_.setLight(&light_);
     }
 
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     if (kEnableTouchInput) {
       auto cfg = touch_.config();
       cfg.x_min = 0;
@@ -280,6 +402,8 @@ class LGFX_DeviceDisplay : public lgfx::LGFX_Device {
   lgfx::Light_PWM light_;
 #if defined(DEVICE_TDECK)
   lgfx::Touch_GT911 touch_;
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+  Touch_Heltec_CHSC6X touch_;
 #endif
 };
 
@@ -780,6 +904,10 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 
   data->state = LV_INDEV_STATE_RELEASED;
 
+  if (!kHasPhysicalWheel || kScrollWheelUpPin < 0 || kScrollWheelDownPin < 0 || kScrollWheelPressPin < 0) {
+    return;
+  }
+
 #if defined(DEVICE_TDECK)
   // Prioritize keyboard keys so Enter/backspace/text are delivered independently
   // of trackball motion and click behavior.
@@ -1065,18 +1193,30 @@ bool DeviceLvgl::begin() {
     return true;
   }
 
-  pinMode(kScrollWheelUpPin, INPUT_PULLUP);
-  pinMode(kScrollWheelDownPin, INPUT_PULLUP);
-  pinMode(kScrollWheelPressPin, INPUT_PULLUP);
+  Serial.println("[HAL] display begin: start");
+
+  if (kHasPhysicalWheel && kScrollWheelUpPin >= 0 && kScrollWheelDownPin >= 0 && kScrollWheelPressPin >= 0) {
+    pinMode(kScrollWheelUpPin, INPUT_PULLUP);
+    pinMode(kScrollWheelDownPin, INPUT_PULLUP);
+    pinMode(kScrollWheelPressPin, INPUT_PULLUP);
+  }
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
   pinMode(kKeyboardInt, INPUT_PULLUP);
 #endif
 
+  Serial.printf("[HAL] display pins sck=%d miso=%d mosi=%d cs=%d dc=%d rst=%d bl=%d\n",
+                kTftSck, kTftMiso, kTftMosi, kTftCs, kTftDc, kTftRst, kTftBacklight);
+
   g_lcd.init();
+  Serial.println("[HAL] display init done");
+
   g_lcd.setRotation(kDisplayRotation);
+  Serial.printf("[HAL] display rotation=%d\n", kDisplayRotation);
   g_lcd.setBrightness(kDisplayBrightness);
+  Serial.printf("[HAL] display brightness=%d\n", kDisplayBrightness);
   g_lcd.fillScreen(TFT_BLACK);
+  Serial.println("[HAL] display clear done");
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
   initKeyboardInterface();
@@ -1112,13 +1252,16 @@ bool DeviceLvgl::begin() {
   g_disp_drv.flush_cb = flush_lcd;
   g_disp_drv.draw_buf = &g_draw_buf;
   lv_disp_drv_register(&g_disp_drv);
+  Serial.printf("[HAL] LVGL display registered (%ldx%ld)\n", static_cast<long>(panel_w),
+                static_cast<long>(panel_h));
 
   lv_indev_drv_init(&g_indev_drv);
   g_indev_drv.type = LV_INDEV_TYPE_KEYPAD;
   g_indev_drv.read_cb = read_scroll_wheel;
   lv_indev_drv_register(&g_indev_drv);
+  Serial.println("[HAL] LVGL input registered");
 
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
   if (kEnableTouchInput) {
     lv_indev_drv_init(&g_touch_indev_drv);
     g_touch_indev_drv.type = LV_INDEV_TYPE_POINTER;
@@ -1128,7 +1271,7 @@ bool DeviceLvgl::begin() {
 #endif
 
   g_started = true;
-  if (false) Serial.printf("[HAL] LVGL display + scroll-wheel input ready (%ldx%ld)\n", static_cast<long>(panel_w),
+  Serial.printf("[HAL] display begin: ready (%ldx%ld)\n", static_cast<long>(panel_w),
                 static_cast<long>(panel_h));
   return true;
 }

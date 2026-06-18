@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <esp_vfs_fat.h>
+#include <esp_system.h>
 #include <lvgl.h>
 #include <stdarg.h>
 #include <string.h>
@@ -490,6 +491,12 @@ void sync_ui_wifi_state() {
 void setup() {
   Serial.begin(115200);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  // Let USB CDC settle on S3 boards so early boot logs are visible during debug.
+  delay(250);
+  Serial.printf("[BOOT] setup enter reset_reason=%d\n", static_cast<int>(esp_reset_reason()));
+#endif
+
   if (kPagerBootDiag) {
     const uint32_t start_wait = millis();
     while (!Serial && (millis() - start_wait) < 2500) {
@@ -503,11 +510,27 @@ void setup() {
     if (false) Serial.println("[BOOT] Companion mode requested but disabled in this firmware.");
   }
 
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+  Serial.println("[BOOT] lvgl init start");
+  #endif
   initialize_lvgl();
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+  Serial.println("[BOOT] lvgl init done");
+  #endif
   pagerDiagLog("lvgl init done");
 
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+  Serial.println("[BOOT] board begin start");
+  #endif
   bool board_ready = g_board.begin();
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+  Serial.printf("[BOOT] board begin done=%d\n", board_ready ? 1 : 0);
+  Serial.println("[BOOT] display begin start");
+  #endif
   bool display_ready = g_display.begin();
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+  Serial.printf("[BOOT] display begin done=%d\n", display_ready ? 1 : 0);
+  #endif
   pagerDiagLog("hal ready board=%d display=%d", board_ready ? 1 : 0, display_ready ? 1 : 0);
   if (false) Serial.printf("[BOOT] board_ready=%d display_ready=%d\n", board_ready ? 1 : 0, display_ready ? 1 : 0);
   bool mesh_ready = false;

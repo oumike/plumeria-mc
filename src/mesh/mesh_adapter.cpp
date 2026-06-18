@@ -637,6 +637,21 @@ class StandaloneChatMesh : public BaseChatMesh {
     adapter_->markContactsDirty();
   }
 
+  void onAdvertRecv(::mesh::Packet* packet, const ::mesh::Identity& id, uint32_t timestamp,
+                    const uint8_t* app_data, size_t app_data_len) override {
+    BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
+    if (!adapter_ || !app_data || app_data_len == 0 || app_data_len > MAX_ADVERT_DATA_SIZE) {
+      return;
+    }
+
+    AdvertDataParser parser(app_data, static_cast<uint8_t>(app_data_len));
+    if (!parser.isValid()) {
+      return;
+    }
+
+    adapter_->noteContactAdvertTelemetry(id.pub_key, parser.getType(), parser.getFeat1(), parser.getFeat2());
+  }
+
   ContactInfo* processAck(const uint8_t* data) override {
     (void)data;
     return nullptr;
@@ -925,6 +940,15 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
 
   runtime_->board.begin();
   runtime_->rtc_clock.begin();
+
+  Serial.printf(
+      "[RADIO] cfg sck=%d miso=%d mosi=%d cs=%d dio1=%d rst=%d busy=%d freq=%.3f bw=%.1f sf=%u cr=%u tx=%d\\n",
+      static_cast<int>(radio_config.spi_sck), static_cast<int>(radio_config.spi_miso),
+      static_cast<int>(radio_config.spi_mosi), static_cast<int>(radio_config.radio_cs),
+      static_cast<int>(radio_config.radio_dio1), static_cast<int>(radio_config.radio_rst),
+      static_cast<int>(radio_config.radio_busy), static_cast<double>(radio_config.frequency_mhz),
+      static_cast<double>(radio_config.bandwidth_khz), static_cast<unsigned>(radio_config.spreading_factor),
+      static_cast<unsigned>(radio_config.coding_rate), static_cast<int>(radio_config.tx_power_dbm));
 
   runtime_->lora_spi.begin(radio_config.spi_sck, radio_config.spi_miso, radio_config.spi_mosi);
   runtime_->radio_module = new Module(radio_config.radio_cs, radio_config.radio_dio1, radio_config.radio_rst,
@@ -1416,6 +1440,7 @@ int MeshAdapter::exportContacts(MeshContactSummary contacts[], int max_contacts)
     summary.lastmod = contact.lastmod;
     summary.gps_lat_i = contact.gps_lat;
     summary.gps_lon_i = contact.gps_lon;
+    loadContactTelemetry(contact.id.pub_key, &summary);
     contacts[exported++] = summary;
   }
 
@@ -1469,6 +1494,17 @@ bool MeshAdapter::removeContactByPublicKeyHex(const char* public_key_hex) {
 
   if (!runtime_->mesh->removeContact(*contact)) {
     return false;
+  }
+
+  for (size_t i = 0; i < kMaxContactTelemetry; i++) {
+    ContactTelemetrySnapshot& slot = contact_telemetry_[i];
+    if (!slot.used) {
+      continue;
+    }
+    if (memcmp(slot.pub_key, pub_key, kPubKeySize) == 0) {
+      memset(&slot, 0, sizeof(slot));
+      break;
+    }
   }
 
   markContactsDirty();
@@ -1649,6 +1685,64 @@ void MeshAdapter::markContactsDirty() {
 
 void MeshAdapter::markChannelsDirty() {
   channels_dirty_ = true;
+}
+
+void MeshAdapter::noteContactAdvertTelemetry(const uint8_t* pub_key, uint8_t advert_type,
+                                             uint16_t feat1, uint16_t feat2) {
+  if (!pub_key || (feat1 == 0 && feat2 == 0)) {
+    return;
+  }
+
+  size_t target = kMaxContactTelemetry;
+  size_t oldest = 0;
+  bool saw_oldest = false;
+  for (size_t i = 0; i < kMaxContactTelemetry; i++) {
+    const ContactTelemetrySnapshot& slot = contact_telemetry_[i];
+    if (!slot.used) {
+      target = i;
+      break;
+    }
+    if (memcmp(slot.pub_key, pub_key, kPubKeySize) == 0) {
+      target = i;
+      break;
+    }
+    if (!saw_oldest || slot.last_update_ms < contact_telemetry_[oldest].last_update_ms) {
+      oldest = i;
+      saw_oldest = true;
+    }
+  }
+  if (target == kMaxContactTelemetry) {
+    target = oldest;
+  }
+
+  ContactTelemetrySnapshot& slot = contact_telemetry_[target];
+  memcpy(slot.pub_key, pub_key, kPubKeySize);
+  slot.advert_type = advert_type;
+  slot.feat1 = feat1;
+  slot.feat2 = feat2;
+  slot.last_update_ms = millis();
+  slot.used = true;
+}
+
+bool MeshAdapter::loadContactTelemetry(const uint8_t* pub_key, MeshContactSummary* out_summary) const {
+  if (!pub_key || !out_summary) {
+    return false;
+  }
+
+  for (size_t i = 0; i < kMaxContactTelemetry; i++) {
+    const ContactTelemetrySnapshot& slot = contact_telemetry_[i];
+    if (!slot.used) {
+      continue;
+    }
+    if (memcmp(slot.pub_key, pub_key, kPubKeySize) == 0) {
+      out_summary->telemetry_adv_type = slot.advert_type;
+      out_summary->telemetry_feat1 = slot.feat1;
+      out_summary->telemetry_feat2 = slot.feat2;
+      return true;
+    }
+  }
+
+  return false;
 }
 
 bool MeshAdapter::loadContactsFromFs() {

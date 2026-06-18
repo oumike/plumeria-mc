@@ -36,7 +36,11 @@ class StandaloneUi {
 
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 3;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  static constexpr uint8_t kCfgRowCount = 4;
+#else
   static constexpr uint8_t kCfgRowCount = 7;
+#endif
   static constexpr uint8_t kContactActionCount = 2;
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
@@ -70,7 +74,7 @@ class StandaloneUi {
   bool openContactsDialog();
   bool ensureContactsDialogBuilt();
   void closeContactsDialog(bool focus_chat = false);
-  void refreshContactsDialog();
+  void refreshContactsDialog(bool reload_from_mesh = true);
   void moveContactsSelection(int delta);
   void activateContactsAction(uint8_t action_idx);
   void openDmDialog(const char* contact_name, const char* contact_key);
@@ -80,6 +84,8 @@ class StandaloneUi {
   void clearDmPanel();
   void openHelpDialog();
   void closeHelpDialog();
+  void triggerAdvertZeroHop();
+  void triggerAdvertFlood();
   void openAdvertPopup(const char* text, bool is_error);
   void closeAdvertPopup();
   bool setGpsEnabled(bool enabled);
@@ -113,8 +119,11 @@ class StandaloneUi {
 
   void handleKey(uint32_t key);
   void handleClick(lv_obj_t* target);
+  void showComposeKeyboard();
+  void hideComposeKeyboard();
 
   static void onFocusableEvent(lv_event_t* event);
+  static void onComposeKeyboardEvent(lv_event_t* event);
 
   lv_obj_t* root_ = nullptr;
   lv_obj_t* main_panel_ = nullptr;
@@ -135,21 +144,32 @@ class StandaloneUi {
   lv_obj_t* battery_bar_ = nullptr;
 
   lv_obj_t* chat_panel_ = nullptr;
+  lv_obj_t* chat_advz_btn_ = nullptr;
+  lv_obj_t* chat_advz_label_ = nullptr;
+  lv_obj_t* chat_advf_btn_ = nullptr;
+  lv_obj_t* chat_advf_label_ = nullptr;
+  lv_obj_t* chat_new_btn_ = nullptr;
+  lv_obj_t* chat_new_label_ = nullptr;
   lv_obj_t* chat_rows_[kMaxChatRows]{};
   size_t chat_row_count_ = 0;
   lv_obj_t* compose_dialog_ = nullptr;
   lv_obj_t* compose_title_label_ = nullptr;
   lv_obj_t* compose_hint_label_ = nullptr;
   lv_obj_t* compose_input_ = nullptr;
+  lv_obj_t* compose_keyboard_ = nullptr;
   lv_obj_t* cfg_dialog_ = nullptr;
   lv_obj_t* cfg_title_label_ = nullptr;
   lv_obj_t* cfg_action_label_ = nullptr;
   lv_obj_t* cfg_status_label_ = nullptr;
+  lv_obj_t* cfg_close_btn_ = nullptr;
+  lv_obj_t* cfg_close_label_ = nullptr;
   lv_obj_t* cfg_rows_[kCfgRowCount]{};
   lv_obj_t* cfg_row_labels_[kCfgRowCount]{};
   lv_obj_t* contacts_dialog_ = nullptr;
   lv_obj_t* contacts_title_label_ = nullptr;
   lv_obj_t* contacts_status_label_ = nullptr;
+  lv_obj_t* contacts_close_btn_ = nullptr;
+  lv_obj_t* contacts_close_label_ = nullptr;
   lv_obj_t* contacts_nodes_panel_ = nullptr;
   lv_obj_t* contacts_node_rows_[kMaxContactsUi]{};
   lv_obj_t* contacts_node_labels_[kMaxContactsUi]{};
@@ -159,14 +179,21 @@ class StandaloneUi {
   lv_obj_t* contacts_full_name_label_ = nullptr;
   lv_obj_t* contacts_lat_lon_label_ = nullptr;
   lv_obj_t* contacts_last_heard_label_ = nullptr;
+  lv_obj_t* contacts_telemetry_label_ = nullptr;
   lv_obj_t* dm_dialog_ = nullptr;
   lv_obj_t* dm_title_label_ = nullptr;
+  lv_obj_t* dm_new_btn_ = nullptr;
+  lv_obj_t* dm_new_label_ = nullptr;
   lv_obj_t* dm_panel_ = nullptr;
+  lv_obj_t* dm_close_btn_ = nullptr;
+  lv_obj_t* dm_close_label_ = nullptr;
   lv_obj_t* dm_rows_[kMaxChatRows]{};
   size_t dm_row_count_ = 0;
   lv_obj_t* help_dialog_ = nullptr;
   lv_obj_t* help_title_label_ = nullptr;
   lv_obj_t* help_body_label_ = nullptr;
+  lv_obj_t* help_close_btn_ = nullptr;
+  lv_obj_t* help_close_label_ = nullptr;
   lv_obj_t* advert_popup_ = nullptr;
   lv_obj_t* advert_popup_label_ = nullptr;
 
@@ -224,7 +251,7 @@ class StandaloneUi {
   uint8_t contacts_row_capacity_ = 0;
   uint32_t last_selector_action_ms_ = 0;
   uint32_t last_dropdown_open_ms_ = 0;
-  uint32_t last_contacts_sync_ms_ = 0;
+  uint32_t advert_popup_deadline_ms_ = 0;
   char cfg_action_text_[48]{};
   char cfg_status_text_[96]{};
   char contacts_status_text_[96]{};
