@@ -38,7 +38,13 @@ jobs:
       - name: Build firmware
         run: |
           set -euo pipefail
-          ENVS=(tdeck tlora-pager-tft)
+          ENVS=(
+            tdeck
+            cardputer-cap
+            tlora-pager-tft
+            heltec-v4-expansion
+            heltec-v4-expansion-vertical
+          )
           BUILT=()
 
           for env in "${ENVS[@]}"; do
