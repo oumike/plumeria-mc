@@ -14,6 +14,10 @@
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/radiolib/CustomSX1262.h>
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#include <M5Unified.h>
+#include <utility/PI4IOE5V6408_Class.hpp>
+#endif
 #if defined(ENV_INCLUDE_GPS) && (ENV_INCLUDE_GPS == 1)
 #include <helpers/sensors/EnvironmentSensorManager.h>
 #include <helpers/sensors/MicroNMEALocationProvider.h>
@@ -951,6 +955,19 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
       static_cast<unsigned>(radio_config.coding_rate), static_cast<int>(radio_config.tx_power_dbm));
 
   runtime_->lora_spi.begin(radio_config.spi_sck, radio_config.spi_miso, radio_config.spi_mosi);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  m5::PI4IOE5V6408_Class ioexp(0x43, 400000, &m5::In_I2C);
+  if (ioexp.begin()) {
+    ioexp.setDirection(0, true);
+    ioexp.setHighImpedance(0, false);
+    ioexp.digitalWrite(0, true);
+    Serial.println("[RADIO] enabled Cardputer Cap LoRa-1262 IO expander");
+  } else {
+    Serial.println("[RADIO] failed to enable Cardputer Cap LoRa-1262 IO expander");
+  }
+#endif
+
   runtime_->radio_module = new Module(radio_config.radio_cs, radio_config.radio_dio1, radio_config.radio_rst,
                                       radio_config.radio_busy, runtime_->lora_spi);
   if (!runtime_->radio_module) {

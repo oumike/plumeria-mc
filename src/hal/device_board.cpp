@@ -84,6 +84,28 @@ namespace {
 #ifndef P_LORA_BUSY
 #define P_LORA_BUSY 13
 #endif
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#ifndef P_LORA_SCLK
+#define P_LORA_SCLK 40
+#endif
+#ifndef P_LORA_MISO
+#define P_LORA_MISO 39
+#endif
+#ifndef P_LORA_MOSI
+#define P_LORA_MOSI 14
+#endif
+#ifndef P_LORA_NSS
+#define P_LORA_NSS 5
+#endif
+#ifndef P_LORA_DIO_1
+#define P_LORA_DIO_1 4
+#endif
+#ifndef P_LORA_RESET
+#define P_LORA_RESET 3
+#endif
+#ifndef P_LORA_BUSY
+#define P_LORA_BUSY 6
+#endif
 #else
 #ifndef P_LORA_SCLK
 #define P_LORA_SCLK 35

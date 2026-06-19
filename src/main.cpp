@@ -24,7 +24,7 @@ constexpr char kCfgSdPathFallback[] = "/plumeria-config.yaml";
 constexpr uint32_t kCfgSdClockHz = 800000UL;
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-constexpr bool kPagerBootDiag = true;
+constexpr bool kPagerBootDiag = false;
 #else
 constexpr bool kPagerBootDiag = false;
 #endif
@@ -536,6 +536,7 @@ void setup() {
   bool mesh_ready = false;
 
   plumeria::web::loadSettings(&g_web_settings);
+  g_display.setScreenTimeoutSeconds(g_web_settings.screen_timeout_seconds);
   plumeria::hal::RadioConfig radio_cfg = g_board.defaultRadioConfig();
   plumeria::web::applyRadioProfile(&radio_cfg, g_web_settings);
 
@@ -588,7 +589,16 @@ void setup() {
 }
 
 void loop() {
+  static bool boot_reason_reported_late = false;
+  if (!boot_reason_reported_late && millis() > 5000) {
+    boot_reason_reported_late = true;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    Serial.printf("[BOOT] late reset_reason=%d\n", static_cast<int>(esp_reset_reason()));
+#endif
+  }
+
   g_board.loop();
+  g_display.setScreenTimeoutSeconds(plumeria::web::screenTimeoutSeconds());
   g_display.loop();
   g_mesh.loop();
   sync_ui_channels_from_mesh();

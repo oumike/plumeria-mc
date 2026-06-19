@@ -3,7 +3,11 @@
 #include <helpers/ui/DisplayDriver.h>
 
 #define LGFX_USE_V1
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#include <M5GFX.h>
+#else
 #include <LovyanGFX.hpp>
+#endif
 
 #ifndef UI_ZOOM
   #define UI_ZOOM 1

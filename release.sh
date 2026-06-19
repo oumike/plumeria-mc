@@ -3,12 +3,27 @@ set -e
 
 RELEASE_ENVS=(
     tdeck
+    cardputer-cap
     tlora-pager-tft
+    heltec-v4-expansion
+    heltec-v4-expansion-vertical
 )
 
 has_env() {
     local env_name="$1"
     grep -q "^\[env:${env_name}\]" platformio.ini
+}
+
+clear_previous_builds() {
+    echo "Clearing previous build artifacts..."
+
+    rm -rf .pio/build
+
+    if [[ -d builds ]]; then
+        find builds -mindepth 1 ! -name ".gitkeep" -exec rm -rf {} +
+    fi
+
+    echo "Previous build artifacts cleared."
 }
 
 remote_tag_exists() {
@@ -74,6 +89,8 @@ echo "$TAG" > VERSION
 echo "Updated VERSION to $TAG"
 
 # Build firmware
+clear_previous_builds
+
 echo "Building firmware..."
 BUILD_ARGS=()
 for env_name in "${RELEASE_ENVS[@]}"; do

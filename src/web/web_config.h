@@ -24,6 +24,7 @@ struct WebSettings {
   uint8_t lora_sf;
   uint8_t lora_cr;
   int8_t lora_tx_power_dbm;
+  uint16_t screen_timeout_seconds;
 };
 
 void loadSettings(WebSettings* out_settings);
@@ -41,6 +42,7 @@ bool exportConfigText(String* out_text);
 bool importConfigText(const char* text, bool queue_reboot, char* err, size_t err_size);
 bool setNodeName(const char* node_name, char* err, size_t err_size);
 bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size);
+uint16_t screenTimeoutSeconds();
 
 }  // namespace web
 }  // namespace plumeria

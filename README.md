@@ -2,17 +2,17 @@
 
 Empty multi-target ESP32 firmware scaffold based on the same release/build flow used in camillia-mt.
 
-Current default target: T-Deck (`tdeck`), with multi-hardware support across listed environments.
+Current default target: Cardputer + Cap (`cardputer-cap`), with multi-hardware support across listed environments.
 
 This firmware is currently **standalone-only** (no companion transport mode).
 
 ## Targets
 
-- `tlora-pager-tft` (active/default)
+- `cardputer-cap` (active/default)
+- `tlora-pager-tft`
 - `tdeck` (board + radio + display + basic trackball input wired)
-- `cardputer-cap` (placeholder)
-- `heltec-v4` (placeholder)
-- `heltec-v4-vertical` (placeholder)
+- `heltec-v4-expansion` (temporarily disabled)
+- `heltec-v4-expansion-vertical` (temporarily disabled)
 
 ## Quick Start
 
@@ -26,7 +26,7 @@ pio run
 3. Upload + monitor with helper script:
 
 ```bash
-./build-upload-monitor.sh --pager
+./build-upload-monitor.sh --cardputer
 ```
 
 ## Scripts

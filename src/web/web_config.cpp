@@ -24,6 +24,9 @@ constexpr double kDefaultNodeLongitude = 0.0;
 constexpr bool kDefaultSendLocationInAdvert = false;
 constexpr uint16_t kDefaultAdvertIntervalMinutes = 360;
 constexpr uint16_t kMinAdvertIntervalMinutes = 60;
+constexpr uint16_t kDefaultScreenTimeoutSeconds = 30;
+constexpr uint16_t kMinScreenTimeoutSeconds = 1;
+constexpr uint16_t kMaxScreenTimeoutSeconds = 600;
 constexpr char kDefaultTimezone[] = "UTC0";
 constexpr char kDefaultRegion[] = "US";
 constexpr float kDefaultBwKhz = 62.5f;
@@ -112,6 +115,16 @@ void copyString(char* dst, size_t dst_size, const char* src) {
   dst[dst_size - 1] = '\0';
 }
 
+uint16_t clampScreenTimeoutSeconds(int timeout_seconds) {
+  if (timeout_seconds < static_cast<int>(kMinScreenTimeoutSeconds)) {
+    return kDefaultScreenTimeoutSeconds;
+  }
+  if (timeout_seconds > static_cast<int>(kMaxScreenTimeoutSeconds)) {
+    return kMaxScreenTimeoutSeconds;
+  }
+  return static_cast<uint16_t>(timeout_seconds);
+}
+
 const RegionPreset* findRegion(const char* id) {
   if (!id || id[0] == '\0') {
     return nullptr;
@@ -145,6 +158,7 @@ void saveSettings(const plumeria::web::WebSettings& settings) {
   prefs.putUChar("lora_sf", settings.lora_sf);
   prefs.putUChar("lora_cr", settings.lora_cr);
   prefs.putChar("lora_pwr", settings.lora_tx_power_dbm);
+  prefs.putUShort("screen_timeout_s", settings.screen_timeout_seconds);
   prefs.end();
 }
 
@@ -266,6 +280,9 @@ String buildConfigText() {
   out += "\n";
   out += "advert_interval_minutes: ";
   out += String(g_settings.advert_interval_minutes);
+  out += "\n";
+  out += "screen_timeout_seconds: ";
+  out += String(g_settings.screen_timeout_seconds);
   out += "\n";
 
   if (g_mesh) {
@@ -439,6 +456,14 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.advert_interval_minutes = static_cast<uint16_t>(minutes);
+    } else if (key.equals("screen_timeout_seconds")) {
+      const int timeout_seconds = value.toInt();
+      if (timeout_seconds < static_cast<int>(kMinScreenTimeoutSeconds) ||
+          timeout_seconds > static_cast<int>(kMaxScreenTimeoutSeconds)) {
+        setImportError(err, err_size, "Screen timeout out of range");
+        return false;
+      }
+      imported.screen_timeout_seconds = static_cast<uint16_t>(timeout_seconds);
     } else if (key.equals("identity_public_key")) {
       value.trim();
       if (value.length() > 0) {
@@ -662,6 +687,7 @@ small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 <label>TX Power dBm<input id='pwr' type='number' min='1' max='30'></label>
 </div>
 <label>Advert Interval Minutes<input id='adv_int_min' type='number' min='60' step='1'></label>
+<label>Screen Timeout Seconds<input id='screen_timeout_sec' type='number' min='1' max='600' step='1'></label>
 </section>
 
 <section><h3>Channels</h3>
@@ -740,7 +766,7 @@ function bindDirtyTracking(){
   const sendLoc=document.getElementById('send_loc_adv');
   if(sendLoc){sendLoc.addEventListener('change',()=>{locationDirty=true;});}
   ['wifi_ssid','wifi_pass'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{wifiDirty=true;});e.addEventListener('change',()=>{wifiDirty=true;});}});
-  ['region','freq','bw','sf','cr','pwr','adv_int_min'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{radioDirty=true;});e.addEventListener('change',()=>{radioDirty=true;});}});
+  ['region','freq','bw','sf','cr','pwr','adv_int_min','screen_timeout_sec'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{radioDirty=true;});e.addEventListener('change',()=>{radioDirty=true;});}});
   const tz=document.getElementById('timezone');
   if(tz){tz.addEventListener('input',()=>{timezoneDirty=true;});tz.addEventListener('change',()=>{timezoneDirty=true;});}
 }
@@ -790,7 +816,8 @@ async function loadStatus(force=false){
   const crEl=document.getElementById('cr');
   const pwrEl=document.getElementById('pwr');
   const advEl=document.getElementById('adv_int_min');
-  const radioFocused=(document.activeElement===regionEl||document.activeElement===freqEl||document.activeElement===bwEl||document.activeElement===sfEl||document.activeElement===crEl||document.activeElement===pwrEl||document.activeElement===advEl);
+  const timeoutEl=document.getElementById('screen_timeout_sec');
+  const radioFocused=(document.activeElement===regionEl||document.activeElement===freqEl||document.activeElement===bwEl||document.activeElement===sfEl||document.activeElement===crEl||document.activeElement===pwrEl||document.activeElement===advEl||document.activeElement===timeoutEl);
   if(force||(!radioDirty&&!radioFocused)){
     if(regionEl)regionEl.value=s.region||'US';
     if(freqEl)freqEl.value=s.freq;
@@ -799,6 +826,7 @@ async function loadStatus(force=false){
     if(crEl)crEl.value=s.cr;
     if(pwrEl)pwrEl.value=s.pwr;
     if(advEl)advEl.value=s.adv_int_min||360;
+    if(timeoutEl)timeoutEl.value=s.screen_timeout_sec||30;
   }
 
   const latEl=document.getElementById('node_lat');
@@ -832,7 +860,7 @@ async function loadContacts(){const c=await jget('/api/contacts');contactsCache=
 
 async function addChannel(){const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}const r=await jpost('/api/channels/add',{name,psk});if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}
 
-async function saveAll(){const tz=document.getElementById('timezone').value;const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,tz_offset:String(tzOffsetMinutes(tz)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value});alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
+async function saveAll(){const tz=document.getElementById('timezone').value;const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,tz_offset:String(tzOffsetMinutes(tz)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,screen_timeout_sec:document.getElementById('screen_timeout_sec').value});alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
 
 async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||((r&&r.error)||'done'));}
 async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||((r&&r.error)||'done'));}
@@ -845,7 +873,7 @@ boot();
 </div></body></html>
 )HTML";
 
-  g_server.send(200, "text/html", kRootPage);
+  g_server.send_P(200, "text/html", kRootPage);
   return;
 
   String region_options;
@@ -1111,6 +1139,8 @@ void handleStatus() {
   payload += String(g_settings.lora_tx_power_dbm);
   payload += ",\"adv_int_min\":";
   payload += String(g_settings.advert_interval_minutes);
+  payload += ",\"screen_timeout_sec\":";
+  payload += String(g_settings.screen_timeout_seconds);
   payload += ",\"rx_raw\":";
   payload += String(radio_stats.rx_raw_count);
   payload += ",\"rx_pkt\":";
@@ -1326,6 +1356,7 @@ void handleSaveAll() {
   String cr = g_server.arg("cr");
   String pwr = g_server.arg("pwr");
   String adv_int_min = g_server.arg("adv_int_min");
+  String screen_timeout_sec = g_server.arg("screen_timeout_sec");
 
   node_name.trim();
   node_lat.trim();
@@ -1350,6 +1381,7 @@ void handleSaveAll() {
   cr.trim();
   pwr.trim();
   adv_int_min.trim();
+  screen_timeout_sec.trim();
 
   if (ssid.length() == 0) {
     sendJsonError("SSID is required");
@@ -1429,6 +1461,16 @@ void handleSaveAll() {
     return;
   }
 
+  int screen_timeout_seconds = static_cast<int>(g_settings.screen_timeout_seconds);
+  if (screen_timeout_sec.length() > 0) {
+    screen_timeout_seconds = screen_timeout_sec.toInt();
+  }
+  if (screen_timeout_seconds < static_cast<int>(kMinScreenTimeoutSeconds) ||
+      screen_timeout_seconds > static_cast<int>(kMaxScreenTimeoutSeconds)) {
+    sendJsonError("Screen timeout out of range");
+    return;
+  }
+
   const bool wifi_changed =
       (strcmp(g_settings.wifi_ssid, ssid.c_str()) != 0) || (strcmp(g_settings.wifi_pass, pass.c_str()) != 0);
   const bool radio_changed =
@@ -1447,6 +1489,7 @@ void handleSaveAll() {
   g_settings.lora_cr = static_cast<uint8_t>(cr_value);
   g_settings.lora_tx_power_dbm = static_cast<int8_t>(pwr_value);
   g_settings.advert_interval_minutes = static_cast<uint16_t>(advert_interval_minutes);
+  g_settings.screen_timeout_seconds = static_cast<uint16_t>(screen_timeout_seconds);
   copyString(g_settings.wifi_ssid, sizeof(g_settings.wifi_ssid), ssid.c_str());
   copyString(g_settings.wifi_pass, sizeof(g_settings.wifi_pass), pass.c_str());
   copyString(g_settings.node_name, sizeof(g_settings.node_name), node_name.c_str());
@@ -1618,6 +1661,11 @@ void loadSettings(WebSettings* out_settings) {
     advert_interval_minutes = prefs.getUShort("adv_int_min", kDefaultAdvertIntervalMinutes);
   }
 
+  uint16_t screen_timeout_seconds = kDefaultScreenTimeoutSeconds;
+  if (prefs.isKey("screen_timeout_s")) {
+    screen_timeout_seconds = prefs.getUShort("screen_timeout_s", kDefaultScreenTimeoutSeconds);
+  }
+
   String ssid = kDefaultSsid;
   if (prefs.isKey("wifi_ssid")) {
     ssid = prefs.getString("wifi_ssid", kDefaultSsid);
@@ -1685,12 +1733,14 @@ void loadSettings(WebSettings* out_settings) {
   if (advert_interval_minutes < kMinAdvertIntervalMinutes) {
     advert_interval_minutes = kDefaultAdvertIntervalMinutes;
   }
+  screen_timeout_seconds = clampScreenTimeoutSeconds(screen_timeout_seconds);
 
   copyString(out_settings->node_name, sizeof(out_settings->node_name), node_name.c_str());
   out_settings->node_latitude = node_latitude;
   out_settings->node_longitude = node_longitude;
   out_settings->send_location_in_advert = send_location_in_advert;
   out_settings->advert_interval_minutes = advert_interval_minutes;
+  out_settings->screen_timeout_seconds = screen_timeout_seconds;
   copyString(out_settings->wifi_ssid, sizeof(out_settings->wifi_ssid), ssid.c_str());
   copyString(out_settings->wifi_pass, sizeof(out_settings->wifi_pass), pass.c_str());
   copyString(out_settings->timezone, sizeof(out_settings->timezone), timezone.c_str());
@@ -1722,6 +1772,7 @@ bool begin(mesh::MeshAdapter* mesh_adapter, const WebSettings& initial_settings)
 
   g_mesh = mesh_adapter;
   g_settings = initial_settings;
+  g_settings.screen_timeout_seconds = clampScreenTimeoutSeconds(static_cast<int>(g_settings.screen_timeout_seconds));
   if (g_mesh) {
     if (g_settings.node_name[0] != '\0') {
       g_mesh->setNodeName(g_settings.node_name);
@@ -1851,6 +1902,10 @@ bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size) {
 
   setImportError(err, err_size, "");
   return true;
+}
+
+uint16_t screenTimeoutSeconds() {
+  return clampScreenTimeoutSeconds(static_cast<int>(g_settings.screen_timeout_seconds));
 }
 
 }  // namespace web

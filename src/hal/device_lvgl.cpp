@@ -1,7 +1,11 @@
 #include "hal/device_lvgl.h"
 
 #include <Arduino.h>
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#include <M5Cardputer.h>
+#else
 #include <LovyanGFX.hpp>
+#endif
 #include <Wire.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -118,37 +122,36 @@ constexpr uint32_t kKeyboardIdleProbeMs = 120;
 constexpr uint32_t kKeyboardRecoveryProbeMs = 1000;
 constexpr uint32_t kKeyboardBusRecoverDelayMs = 2;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-// Placeholder profile for future Cardputer-specific display/input tuning.
-constexpr int kTftSpiHost = SPI2_HOST;
-constexpr bool kTftSpi3Wire = false;
-constexpr int kTftSck = 35;
-constexpr int kTftMiso = 33;
-constexpr int kTftMosi = 34;
-constexpr int kTftCs = 38;
-constexpr int kTftDc = 37;
-constexpr int kTftRst = -1;
-constexpr int kTftBacklight = 42;
+constexpr int kTftSpiHost = SPI3_HOST;
+constexpr bool kTftSpi3Wire = true;
+constexpr int kTftSck = 36;
+constexpr int kTftMiso = -1;
+constexpr int kTftMosi = 35;
+constexpr int kTftCs = 37;
+constexpr int kTftDc = 34;
+constexpr int kTftRst = 33;
+constexpr int kTftBacklight = 38;
 constexpr bool kBacklightInvert = false;
 
-constexpr int kPanelWidth = 222;
-constexpr int kPanelHeight = 480;
-constexpr int kPanelOffsetX = 49;
-constexpr int kPanelOffsetY = 0;
+constexpr int kPanelWidth = 135;
+constexpr int kPanelHeight = 240;
+constexpr int kPanelOffsetX = 53;
+constexpr int kPanelOffsetY = 40;
 
-constexpr int kScrollWheelUpPin = 40;
-constexpr int kScrollWheelDownPin = 41;
-constexpr int kScrollWheelPressPin = 7;
-constexpr bool kHasPhysicalWheel = true;
-constexpr uint16_t kLvglMaxHorRes = 480;
-constexpr uint16_t kLvglFallbackHorRes = 480;
-constexpr uint16_t kLvglFallbackVerRes = 222;
-constexpr int kDisplayRotation = 3;
-constexpr int kDisplayBrightness = 130;
+constexpr int kScrollWheelUpPin = -1;
+constexpr int kScrollWheelDownPin = -1;
+constexpr int kScrollWheelPressPin = -1;
+constexpr bool kHasPhysicalWheel = false;
+constexpr uint16_t kLvglMaxHorRes = 240;
+constexpr uint16_t kLvglFallbackHorRes = 240;
+constexpr uint16_t kLvglFallbackVerRes = 135;
+constexpr int kDisplayRotation = 1;
+constexpr int kDisplayBrightness = 180;
 constexpr int kBacklightPwmChannel = 7;
-constexpr int kBacklightPwmFreq = 12000;
+constexpr int kBacklightPwmFreq = 256;
 constexpr bool kUsePwmBacklight = true;
 constexpr uint32_t kTftWriteHz = 40000000;
-constexpr uint32_t kTftReadHz = 16000000;
+constexpr uint32_t kTftReadHz = 1000000;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 // Heltec V4 TFT expansion wiring (camillia-mt known-good profile).
 constexpr int kTftSpiHost = SPI3_HOST;
@@ -229,13 +232,13 @@ constexpr uint32_t kTftReadHz = 16000000;
 
 constexpr int kInputActiveLevel = LOW;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-constexpr uint32_t kInputDebounceMs = 24;
+constexpr uint32_t kInputDebounceMs = 8;
 constexpr uint32_t kClickDebounceMs = 220;
 constexpr uint32_t kClickAfterScrollGuardMs = 80;
 constexpr uint32_t kWheelReleaseGuardMs = 10;
 constexpr uint32_t kWheelPollIntervalMs = 2;
 constexpr uint32_t kWheelButtonDebounceMs = 20;
-constexpr uint8_t kWheelQueueDepth = 12;
+constexpr uint8_t kWheelQueueDepth = 32;
 constexpr bool kWheelInvertDirection = false;
 #else
 constexpr uint32_t kInputDebounceMs = 70;
@@ -246,6 +249,11 @@ constexpr uint32_t kWheelReleaseGuardMs = 0;
 constexpr bool kWheelInvertDirection = false;
 #endif
 constexpr uint16_t kLvglBufferLines = 20;
+constexpr uint16_t kDefaultScreenTimeoutSeconds = 30;
+constexpr uint16_t kMaxScreenTimeoutSeconds = 600;
+#if defined(DEVICE_TDECK)
+constexpr uint32_t kTdeckTrackballHoldOffMs = 3000;
+#endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
 class Panel_HeltecV4Tft : public lgfx::Panel_ST7789 {
@@ -318,17 +326,17 @@ class Touch_Heltec_CHSC6X : public lgfx::ITouch {
 };
 #endif
 
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+// Cardputer uses M5Cardputer.Display directly; no local panel alias is needed here.
+#elif defined(DEVICE_TDECK)
 using DisplayPanel = lgfx::Panel_ST7789;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
-// Placeholder until Cardputer panel profile is implemented.
-using DisplayPanel = lgfx::Panel_ST7796;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 using DisplayPanel = Panel_HeltecV4Tft;
 #else
 using DisplayPanel = lgfx::Panel_ST7796;
 #endif
 
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
 class LGFX_DeviceDisplay : public lgfx::LGFX_Device {
  public:
   LGFX_DeviceDisplay() {
@@ -408,6 +416,17 @@ class LGFX_DeviceDisplay : public lgfx::LGFX_Device {
 };
 
 LGFX_DeviceDisplay g_lcd;
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+lgfx::LGFX_Device& activeDisplay() {
+  return M5Cardputer.Display;
+}
+#else
+lgfx::LGFX_Device& activeDisplay() {
+  return g_lcd;
+}
+#endif
 
 lv_disp_draw_buf_t g_draw_buf;
 lv_color_t g_draw_pixels[kLvglMaxHorRes * kLvglBufferLines];
@@ -501,10 +520,13 @@ uint32_t g_pager_mod_set_ms = 0;
 struct PagerWheelEvent {
   int8_t dir;
   bool click;
+  uint32_t at_ms;
 };
 
 QueueHandle_t g_pager_wheel_queue = nullptr;
 TaskHandle_t g_pager_wheel_task = nullptr;
+bool g_pager_sleep_wait_release = false;
+uint32_t g_pager_sleep_guard_until_ms = 0;
 
 constexpr uint8_t kPagerRegIntStat = 0x02;
 constexpr uint8_t kPagerRegKeyLckEc = 0x03;
@@ -530,6 +552,11 @@ constexpr uint8_t kPagerRegDebounceDis3 = 0x2B;
 constexpr uint8_t kPagerModShift = 0x01;
 constexpr uint8_t kPagerModSym = 0x02;
 constexpr uint32_t kPagerModTimeoutMs = 1500;
+constexpr uint8_t kPagerBottomCenterKeyNum = 31;
+constexpr uint32_t kPagerSleepCommandKey = 0x10001UL;
+constexpr uint32_t kPagerSleepWakeGuardMs = 1500;
+constexpr int kPagerDisplayTogglePin = 0;
+constexpr uint32_t kPagerDisplayToggleDebounceMs = 30;
 
 // Ben Buxton full-step rotary state table, same decoding model used by LilyGo.
 constexpr uint8_t kRotaryDirCw = 0x10;
@@ -634,6 +661,11 @@ void pagerResetKeyboardController() {
   pagerWriteReg(kPagerRegIntStat, 0x03);
 }
 
+void setPagerKeyboardBacklightState(bool on) {
+  pinMode(kKeyboardBacklightPin, OUTPUT);
+  digitalWrite(kKeyboardBacklightPin, on ? HIGH : LOW);
+}
+
 uint32_t pagerTranslateKey(uint8_t key_num) {
   const uint32_t now = millis();
   if (g_pager_mod_state != 0 && (now - g_pager_mod_set_ms) > kPagerModTimeoutMs) {
@@ -688,10 +720,18 @@ uint32_t pagerReadMappedKey() {
     return 0;
   }
 
+  const uint32_t now = millis();
+
   for (uint8_t i = 0; i < count; i++) {
     const uint8_t ev = pagerReadReg(static_cast<uint8_t>(kPagerRegKeyEventA + i));
     const bool pressed = (ev & 0x80) != 0;
     const uint8_t key_num = static_cast<uint8_t>(ev & 0x7F);
+
+    // Bottom-center key: dedicated display sleep command.
+    if (key_num == kPagerBottomCenterKeyNum) {
+      return kPagerSleepCommandKey;
+    }
+
     if (!pressed) {
       continue;
     }
@@ -705,7 +745,7 @@ uint32_t pagerReadMappedKey() {
   return 0;
 }
 
-void initKeyboardInterface() {
+void initKeyboardInterface(bool screen_on = true) {
   recoverKeyboardBus();
   delay(kKeyboardStartupDelayMs);
 
@@ -716,8 +756,7 @@ void initKeyboardInterface() {
   g_pager_mod_set_ms = 0;
 
   if (g_keyboard_available) {
-    pinMode(kKeyboardBacklightPin, OUTPUT);
-    digitalWrite(kKeyboardBacklightPin, HIGH);
+    setPagerKeyboardBacklightState(screen_on);
     pagerResetKeyboardController();
   }
 }
@@ -756,7 +795,7 @@ bool pagerClickPressedEdge() {
 
 void pagerWheelTask(void* /*arg*/) {
   while (true) {
-    PagerWheelEvent ev{0, false};
+    PagerWheelEvent ev{0, false, millis()};
     const uint8_t rotary_result = pagerProcessRotaryStep();
     if (rotary_result == kRotaryDirCw) {
       ev.dir = 1;
@@ -767,7 +806,12 @@ void pagerWheelTask(void* /*arg*/) {
     ev.click = pagerClickPressedEdge();
 
     if ((ev.dir != 0 || ev.click) && g_pager_wheel_queue != nullptr) {
-      xQueueSend(g_pager_wheel_queue, &ev, 0);
+      if (xQueueSend(g_pager_wheel_queue, &ev, 0) != pdPASS) {
+        // Keep newest wheel events flowing instead of stalling on a full queue.
+        PagerWheelEvent dropped{0, false, 0};
+        xQueueReceive(g_pager_wheel_queue, &dropped, 0);
+        xQueueSend(g_pager_wheel_queue, &ev, 0);
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(kWheelPollIntervalMs));
@@ -870,12 +914,190 @@ uint32_t mapKeyboardRaw(uint8_t raw) {
 }
 #endif
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+constexpr uint8_t kCardputerQueueSize = 16;
+constexpr uint8_t kCardputerHidEnter = 0x28;
+constexpr uint8_t kCardputerHidEscape = 0x29;
+constexpr uint8_t kCardputerHidBackspace = 0x2A;
+constexpr uint8_t kCardputerHidDelete = 0x4C;
+constexpr uint8_t kCardputerHidArrowRight = 0x4F;
+constexpr uint8_t kCardputerHidArrowLeft = 0x50;
+constexpr uint8_t kCardputerHidArrowDown = 0x51;
+constexpr uint8_t kCardputerHidArrowUp = 0x52;
+
+uint32_t g_cardputer_queue[kCardputerQueueSize]{};
+uint8_t g_cardputer_head = 0;
+uint8_t g_cardputer_tail = 0;
+uint8_t g_cardputer_count = 0;
+bool g_cardputer_enter_down = false;
+
+void enqueueCardputerKey(uint32_t key) {
+  if (key == 0) {
+    return;
+  }
+  if (g_cardputer_count >= kCardputerQueueSize) {
+    g_cardputer_tail = static_cast<uint8_t>((g_cardputer_tail + 1) % kCardputerQueueSize);
+    g_cardputer_count--;
+  }
+  g_cardputer_queue[g_cardputer_head] = key;
+  g_cardputer_head = static_cast<uint8_t>((g_cardputer_head + 1) % kCardputerQueueSize);
+  g_cardputer_count++;
+}
+
+uint32_t dequeueCardputerKey() {
+  if (g_cardputer_count == 0) {
+    return 0;
+  }
+
+  const uint32_t key = g_cardputer_queue[g_cardputer_tail];
+  g_cardputer_tail = static_cast<uint8_t>((g_cardputer_tail + 1) % kCardputerQueueSize);
+  g_cardputer_count--;
+  return key;
+}
+
+void pumpCardputerKeys() {
+  M5Cardputer.update();
+  auto& status = M5Cardputer.Keyboard.keysState();
+  const bool changed = M5Cardputer.Keyboard.isChange();
+  const bool pressed = M5Cardputer.Keyboard.isPressed();
+
+  bool enter_pressed = M5Cardputer.BtnA.isPressed() || status.enter;
+  for (uint8_t hid_key : status.hid_keys) {
+    if (hid_key == kCardputerHidEnter) {
+      enter_pressed = true;
+      break;
+    }
+  }
+  if (!enter_pressed) {
+    for (char key : status.word) {
+      if (key == '\r' || key == '\n') {
+        enter_pressed = true;
+        break;
+      }
+    }
+  }
+
+  if (enter_pressed && !g_cardputer_enter_down) {
+    enqueueCardputerKey(LV_KEY_ENTER);
+    g_cardputer_enter_down = true;
+    return;
+  }
+  g_cardputer_enter_down = enter_pressed;
+
+  if (!changed || !pressed) {
+    return;
+  }
+
+  bool backspace_queued = false;
+  for (uint8_t hid_key : status.hid_keys) {
+    switch (hid_key) {
+      case kCardputerHidEscape:
+        enqueueCardputerKey(LV_KEY_ESC);
+        break;
+      case kCardputerHidBackspace:
+      case kCardputerHidDelete:
+        enqueueCardputerKey(LV_KEY_BACKSPACE);
+        backspace_queued = true;
+        break;
+      case kCardputerHidArrowUp:
+        enqueueCardputerKey(LV_KEY_UP);
+        break;
+      case kCardputerHidArrowDown:
+        enqueueCardputerKey(LV_KEY_DOWN);
+        break;
+      case kCardputerHidArrowLeft:
+        enqueueCardputerKey(LV_KEY_LEFT);
+        break;
+      case kCardputerHidArrowRight:
+        enqueueCardputerKey(LV_KEY_RIGHT);
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (status.del && !backspace_queued) {
+    enqueueCardputerKey(LV_KEY_BACKSPACE);
+  }
+
+  for (char key : status.word) {
+    if (key == '\r' || key == '\n') {
+      continue;
+    }
+    enqueueCardputerKey(static_cast<uint8_t>(key));
+  }
+}
+#endif
+
+uint16_t g_screen_timeout_seconds = kDefaultScreenTimeoutSeconds;
+uint32_t g_last_user_activity_ms = 0;
+bool g_screen_on = true;
+
+uint16_t normalizeScreenTimeoutSeconds(uint16_t timeout_seconds) {
+  if (timeout_seconds > kMaxScreenTimeoutSeconds) {
+    return kMaxScreenTimeoutSeconds;
+  }
+  return timeout_seconds;
+}
+
+void setPagerBacklightState(bool on) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+  if (kUsePwmBacklight) {
+    const uint8_t duty = on ? 255 : 0;
+    const uint8_t applied = kBacklightInvert ? static_cast<uint8_t>(255 - duty) : duty;
+    ledcWrite(kBacklightPwmChannel, applied);
+  } else {
+    const uint8_t active_level = kBacklightInvert ? LOW : HIGH;
+    const uint8_t inactive_level = kBacklightInvert ? HIGH : LOW;
+    digitalWrite(kTftBacklight, on ? active_level : inactive_level);
+  }
+#else
+  (void)on;
+#endif
+}
+
+void setScreenPowerState(bool on) {
+  if (g_screen_on == on) {
+    return;
+  }
+
+  if (on) {
+    activeDisplay().wakeup();
+    activeDisplay().setBrightness(kDisplayBrightness);
+    setPagerBacklightState(true);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    setPagerKeyboardBacklightState(true);
+#endif
+  } else {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    setPagerKeyboardBacklightState(false);
+#endif
+    setPagerBacklightState(false);
+    activeDisplay().setBrightness(0);
+    activeDisplay().sleep();
+  }
+  g_screen_on = on;
+}
+
+void recordUserActivity() {
+  g_last_user_activity_ms = millis();
+  if (!g_screen_on) {
+    setScreenPowerState(true);
+  }
+}
+
+bool wakeDisplayForActivityAndConsumeEvent() {
+  const bool was_off = !g_screen_on;
+  recordUserActivity();
+  return was_off;
+}
+
 void flush_lcd(lv_disp_drv_t* disp_drv, const lv_area_t* area, lv_color_t* color_p) {
   int32_t width = area->x2 - area->x1 + 1;
   int32_t height = area->y2 - area->y1 + 1;
 
-  g_lcd.pushImage(area->x1, area->y1, width, height,
-                  reinterpret_cast<lgfx::rgb565_t*>(&color_p->full));
+  activeDisplay().pushImage(area->x1, area->y1, width, height,
+                            reinterpret_cast<lgfx::rgb565_t*>(&color_p->full));
 
   lv_disp_flush_ready(disp_drv);
 }
@@ -886,6 +1108,7 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   static uint32_t last_scroll_event_ms = 0;
   static uint32_t last_click_event_ms = 0;
 #if defined(DEVICE_TLORA_PAGER_TFT)
+  static bool pager_press_prev = false;
 #else
   static bool prev_click_pressed = false;
   static bool prev_up_pressed = false;
@@ -904,9 +1127,24 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 
   data->state = LV_INDEV_STATE_RELEASED;
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  pumpCardputerKeys();
+  const uint32_t key = dequeueCardputerKey();
+  if (key != 0) {
+    if (wakeDisplayForActivityAndConsumeEvent()) {
+      return;
+    }
+    data->state = LV_INDEV_STATE_PRESSED;
+    data->key = key;
+    return;
+  }
+#endif
+
   if (!kHasPhysicalWheel || kScrollWheelUpPin < 0 || kScrollWheelDownPin < 0 || kScrollWheelPressPin < 0) {
     return;
   }
+
+  uint32_t now_ms = millis();
 
 #if defined(DEVICE_TDECK)
   // Prioritize keyboard keys so Enter/backspace/text are delivered independently
@@ -993,6 +1231,10 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
                 static_cast<unsigned long>(mapped), irq_active ? 1 : 0);
       #endif
 
+        if (wakeDisplayForActivityAndConsumeEvent()) {
+          return;
+        }
+
         data->state = LV_INDEV_STATE_PRESSED;
         data->key = mapped;
         g_last_keyboard_press_code = raw_code;
@@ -1039,12 +1281,48 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
+  if (g_pager_sleep_guard_until_ms != 0 && now_ms < g_pager_sleep_guard_until_ms) {
+    pager_press_prev = (digitalRead(kScrollWheelPressPin) == kInputActiveLevel);
+    return;
+  }
+
+  if (g_pager_sleep_wait_release) {
+    if (digitalRead(kScrollWheelPressPin) == kInputActiveLevel) {
+      pager_press_prev = true;
+      return;
+    }
+    g_pager_sleep_wait_release = false;
+    pager_press_prev = false;
+    PagerWheelEvent drain_ev{0, false, 0};
+    while (pagerPopWheelEvent(&drain_ev)) {
+    }
+  }
+
+  // Fallback path: handle direct button edge immediately even if wheel task queue
+  // misses the click event.
+  const bool pager_press_now = (digitalRead(kScrollWheelPressPin) == kInputActiveLevel);
+  if (pager_press_now && !pager_press_prev) {
+    if (wakeDisplayForActivityAndConsumeEvent()) {
+      pager_press_prev = pager_press_now;
+      return;
+    }
+    g_pager_sleep_wait_release = true;
+    g_pager_sleep_guard_until_ms = now_ms + kPagerSleepWakeGuardMs;
+    PagerWheelEvent drain_ev{0, false, 0};
+    while (pagerPopWheelEvent(&drain_ev)) {
+    }
+    setScreenPowerState(false);
+    pager_press_prev = pager_press_now;
+    return;
+  }
+  pager_press_prev = pager_press_now;
+
   const uint32_t kb_now_ms = millis();
 
   if (!g_keyboard_available) {
     if (kb_now_ms - last_keyboard_probe_ms >= kKeyboardRecoveryProbeMs) {
       last_keyboard_probe_ms = kb_now_ms;
-      initKeyboardInterface();
+      initKeyboardInterface(g_screen_on);
     }
   } else {
     bool irq_active = (digitalRead(kKeyboardInt) == LOW);
@@ -1057,6 +1335,18 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
       last_keyboard_probe_ms = kb_now_ms;
       const uint32_t mapped = pagerReadMappedKey();
       if (mapped != 0) {
+        if (mapped == kPagerSleepCommandKey) {
+          if (wakeDisplayForActivityAndConsumeEvent()) {
+            return;
+          }
+          g_pager_sleep_guard_until_ms = kb_now_ms + kPagerSleepWakeGuardMs;
+          setScreenPowerState(false);
+          return;
+        }
+
+        if (wakeDisplayForActivityAndConsumeEvent()) {
+          return;
+        }
         data->state = LV_INDEV_STATE_PRESSED;
         data->key = mapped;
         return;
@@ -1065,14 +1355,14 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   }
 #endif
 
-  uint32_t now_ms = millis();
-
 #if defined(DEVICE_TLORA_PAGER_TFT)
-  PagerWheelEvent ev{0, false};
+  PagerWheelEvent ev{0, false, 0};
   if (pagerPopWheelEvent(&ev)) {
+    const uint32_t event_ms = ev.at_ms != 0 ? ev.at_ms : now_ms;
+
     if (ev.dir != 0) {
-      if ((now_ms - last_scroll_event_ms) < kInputDebounceMs ||
-          (now_ms - last_click_event_ms) < kWheelReleaseGuardMs) {
+      if ((event_ms - last_scroll_event_ms) < kInputDebounceMs ||
+          (event_ms - last_click_event_ms) < kWheelReleaseGuardMs) {
         return;
       }
 
@@ -1080,23 +1370,30 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
       if (kWheelInvertDirection) {
         emit_dir = static_cast<int8_t>(-emit_dir);
       }
+      if (wakeDisplayForActivityAndConsumeEvent()) {
+        return;
+      }
       data->state = LV_INDEV_STATE_PRESSED;
       data->key = emit_dir > 0 ? LV_KEY_DOWN : LV_KEY_UP;
-      last_scroll_event_ms = now_ms;
+      last_scroll_event_ms = event_ms;
       return;
     }
 
     if (ev.click) {
-      if ((now_ms - last_click_event_ms) < kClickDebounceMs) {
-        return;
-      }
-      if ((now_ms - last_scroll_event_ms) < kClickAfterScrollGuardMs) {
+      if ((event_ms - last_click_event_ms) < kClickDebounceMs) {
         return;
       }
 
-      last_click_event_ms = now_ms;
-      data->state = LV_INDEV_STATE_PRESSED;
-      data->key = LV_KEY_ENTER;
+      last_click_event_ms = event_ms;
+      if (wakeDisplayForActivityAndConsumeEvent()) {
+        return;
+      }
+      g_pager_sleep_wait_release = true;
+      g_pager_sleep_guard_until_ms = event_ms + kPagerSleepWakeGuardMs;
+      PagerWheelEvent drain_ev{0, false, 0};
+      while (pagerPopWheelEvent(&drain_ev)) {
+      }
+      setScreenPowerState(false);
       return;
     }
   }
@@ -1107,6 +1404,37 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   bool click_pressed = digitalRead(kScrollWheelPressPin) == kInputActiveLevel;
 
   bool click_edge = click_pressed && !prev_click_pressed;
+#if defined(DEVICE_TDECK)
+  static uint32_t trackball_press_start_ms = 0;
+  static bool trackball_long_press_fired = false;
+
+  if (click_edge) {
+    trackball_press_start_ms = now_ms;
+    trackball_long_press_fired = false;
+    if (wakeDisplayForActivityAndConsumeEvent()) {
+      trackball_press_start_ms = 0;
+      trackball_long_press_fired = true;
+      prev_click_pressed = click_pressed;
+      return;
+    }
+  }
+
+  if (!click_pressed) {
+    trackball_press_start_ms = 0;
+    trackball_long_press_fired = false;
+  } else if (!trackball_long_press_fired && trackball_press_start_ms != 0 &&
+             (now_ms - trackball_press_start_ms) >= kTdeckTrackballHoldOffMs) {
+    setScreenPowerState(false);
+    trackball_long_press_fired = true;
+    prev_click_pressed = click_pressed;
+    return;
+  }
+#else
+  if (click_edge && wakeDisplayForActivityAndConsumeEvent()) {
+    prev_click_pressed = click_pressed;
+    return;
+  }
+#endif
 
   prev_click_pressed = click_pressed;
 
@@ -1141,6 +1469,9 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     if (last_wheel_dir < 0 && (now_ms - last_wheel_dir_ms) < kWheelDirectionHoldMs) {
       return;
     }
+    if (wakeDisplayForActivityAndConsumeEvent()) {
+      return;
+    }
     data->state = LV_INDEV_STATE_PRESSED;
     data->key = LV_KEY_UP;
     last_scroll_event_ms = now_ms;
@@ -1155,6 +1486,9 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
       return;
     }
     if (last_wheel_dir > 0 && (now_ms - last_wheel_dir_ms) < kWheelDirectionHoldMs) {
+      return;
+    }
+    if (wakeDisplayForActivityAndConsumeEvent()) {
       return;
     }
     data->state = LV_INDEV_STATE_PRESSED;
@@ -1172,7 +1506,11 @@ void read_touch(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 
   int32_t tx = 0;
   int32_t ty = 0;
-  if (g_lcd.getTouch(&tx, &ty)) {
+  if (activeDisplay().getTouch(&tx, &ty)) {
+    if (wakeDisplayForActivityAndConsumeEvent()) {
+      data->state = LV_INDEV_STATE_RELEASED;
+      return;
+    }
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = tx;
     data->point.y = ty;
@@ -1201,6 +1539,12 @@ bool DeviceLvgl::begin() {
     pinMode(kScrollWheelPressPin, INPUT_PULLUP);
   }
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
+  if (kPagerDisplayTogglePin >= 0) {
+    pinMode(kPagerDisplayTogglePin, INPUT_PULLUP);
+  }
+#endif
+
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
   pinMode(kKeyboardInt, INPUT_PULLUP);
 #endif
@@ -1208,14 +1552,22 @@ bool DeviceLvgl::begin() {
   Serial.printf("[HAL] display pins sck=%d miso=%d mosi=%d cs=%d dc=%d rst=%d bl=%d\n",
                 kTftSck, kTftMiso, kTftMosi, kTftCs, kTftDc, kTftRst, kTftBacklight);
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  M5Cardputer.begin(true);
+#else
   g_lcd.init();
+#endif
   Serial.println("[HAL] display init done");
 
-  g_lcd.setRotation(kDisplayRotation);
+  activeDisplay().setRotation(kDisplayRotation);
   Serial.printf("[HAL] display rotation=%d\n", kDisplayRotation);
-  g_lcd.setBrightness(kDisplayBrightness);
+  activeDisplay().setBrightness(kDisplayBrightness);
+  setPagerBacklightState(true);
+  g_screen_on = true;
+  g_last_user_activity_ms = millis();
+  g_screen_timeout_seconds = normalizeScreenTimeoutSeconds(kDefaultScreenTimeoutSeconds);
   Serial.printf("[HAL] display brightness=%d\n", kDisplayBrightness);
-  g_lcd.fillScreen(TFT_BLACK);
+  activeDisplay().fillScreen(TFT_BLACK);
   Serial.println("[HAL] display clear done");
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
@@ -1239,8 +1591,8 @@ bool DeviceLvgl::begin() {
 
   lv_disp_draw_buf_init(&g_draw_buf, g_draw_pixels, nullptr, kLvglMaxHorRes * kLvglBufferLines);
 
-  int32_t panel_w = g_lcd.width();
-  int32_t panel_h = g_lcd.height();
+  int32_t panel_w = activeDisplay().width();
+  int32_t panel_h = activeDisplay().height();
   if (panel_w <= 0 || panel_h <= 0) {
     panel_w = kLvglFallbackHorRes;
     panel_h = kLvglFallbackVerRes;
@@ -1277,7 +1629,77 @@ bool DeviceLvgl::begin() {
 }
 
 void DeviceLvgl::loop() {
-  // Reserved for display-side periodic hooks.
+  if (!g_started) {
+    return;
+  }
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+  static bool display_btn_raw_prev = false;
+  static bool display_btn_stable = false;
+  static uint32_t display_btn_debounce_ms = 0;
+  static bool loop_press_prev = false;
+
+  const uint32_t now_ms = millis();
+
+  if (kPagerDisplayTogglePin >= 0) {
+    const bool display_btn_pressed = (digitalRead(kPagerDisplayTogglePin) == kInputActiveLevel);
+    if (display_btn_pressed != display_btn_raw_prev) {
+      display_btn_raw_prev = display_btn_pressed;
+      display_btn_debounce_ms = now_ms;
+    }
+
+    if ((now_ms - display_btn_debounce_ms) >= kPagerDisplayToggleDebounceMs &&
+        display_btn_pressed != display_btn_stable) {
+      display_btn_stable = display_btn_pressed;
+      if (display_btn_stable) {
+        if (g_screen_on) {
+          g_pager_sleep_wait_release = true;
+          g_pager_sleep_guard_until_ms = now_ms + kPagerSleepWakeGuardMs;
+          setScreenPowerState(false);
+        } else {
+          recordUserActivity();
+        }
+      }
+    }
+  }
+
+  const bool loop_press_now = (digitalRead(kScrollWheelPressPin) == kInputActiveLevel);
+  if (loop_press_now && !loop_press_prev && g_screen_on) {
+    g_pager_sleep_wait_release = true;
+    g_pager_sleep_guard_until_ms = millis() + kPagerSleepWakeGuardMs;
+    setScreenPowerState(false);
+  }
+  loop_press_prev = loop_press_now;
+#endif
+
+  if (!g_screen_on || g_screen_timeout_seconds == 0) {
+    return;
+  }
+
+  const uint32_t timeout_ms = static_cast<uint32_t>(g_screen_timeout_seconds) * 1000UL;
+  if (timeout_ms == 0) {
+    return;
+  }
+
+  if (static_cast<uint32_t>(millis() - g_last_user_activity_ms) >= timeout_ms) {
+    setScreenPowerState(false);
+  }
+}
+
+void DeviceLvgl::setScreenTimeoutSeconds(uint16_t timeout_seconds) {
+  g_screen_timeout_seconds = normalizeScreenTimeoutSeconds(timeout_seconds);
+}
+
+void DeviceLvgl::setScreenOn(bool on) {
+  if (on) {
+    recordUserActivity();
+    return;
+  }
+  setScreenPowerState(false);
+}
+
+bool DeviceLvgl::screenOn() const {
+  return g_screen_on;
 }
 
 }  // namespace hal

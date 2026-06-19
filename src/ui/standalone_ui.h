@@ -41,7 +41,11 @@ class StandaloneUi {
 #else
   static constexpr uint8_t kCfgRowCount = 7;
 #endif
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  static constexpr uint8_t kContactActionCount = 3;
+#else
   static constexpr uint8_t kContactActionCount = 2;
+#endif
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
   static constexpr size_t kMaxStoredChatRows = 128;
@@ -75,8 +79,10 @@ class StandaloneUi {
   bool ensureContactsDialogBuilt();
   void closeContactsDialog(bool focus_chat = false);
   void refreshContactsDialog(bool reload_from_mesh = true);
+  void rebuildContactsDmPanel();
   void moveContactsSelection(int delta);
   void activateContactsAction(uint8_t action_idx);
+  void startComposeForSelectedContact();
   void openDmDialog(const char* contact_name, const char* contact_key);
   void closeDmDialog(bool focus_chat = false);
   void appendDmLine(const char* contact_name, const char* contact_key, const char* text, ChatLineKind kind);
@@ -123,7 +129,18 @@ class StandaloneUi {
   void hideComposeKeyboard();
 
   static void onFocusableEvent(lv_event_t* event);
+  static void onContactsEvent(lv_event_t* event);
+  static void onDmEvent(lv_event_t* event);
+  static void onComposeActionEvent(lv_event_t* event);
   static void onComposeKeyboardEvent(lv_event_t* event);
+  static void onOpenContactsDialogAsync(void* user_data);
+  static void onContactsPostOpenAsync(void* user_data);
+  static void onOpenComposeDialogAsync(void* user_data);
+  static void onComposePostOpenAsync(void* user_data);
+  bool pending_contacts_open_ = false;
+  bool pending_contacts_show_ = false;
+  bool pending_contacts_post_open_ = false;
+  bool pending_compose_post_open_ = false;
 
   lv_obj_t* root_ = nullptr;
   lv_obj_t* main_panel_ = nullptr;
@@ -156,6 +173,11 @@ class StandaloneUi {
   lv_obj_t* compose_title_label_ = nullptr;
   lv_obj_t* compose_hint_label_ = nullptr;
   lv_obj_t* compose_input_ = nullptr;
+  lv_obj_t* compose_action_row_ = nullptr;
+  lv_obj_t* compose_cancel_btn_ = nullptr;
+  lv_obj_t* compose_cancel_label_ = nullptr;
+  lv_obj_t* compose_send_btn_ = nullptr;
+  lv_obj_t* compose_send_label_ = nullptr;
   lv_obj_t* compose_keyboard_ = nullptr;
   lv_obj_t* cfg_dialog_ = nullptr;
   lv_obj_t* cfg_title_label_ = nullptr;
@@ -166,20 +188,18 @@ class StandaloneUi {
   lv_obj_t* cfg_rows_[kCfgRowCount]{};
   lv_obj_t* cfg_row_labels_[kCfgRowCount]{};
   lv_obj_t* contacts_dialog_ = nullptr;
-  lv_obj_t* contacts_title_label_ = nullptr;
   lv_obj_t* contacts_status_label_ = nullptr;
-  lv_obj_t* contacts_close_btn_ = nullptr;
-  lv_obj_t* contacts_close_label_ = nullptr;
-  lv_obj_t* contacts_nodes_panel_ = nullptr;
-  lv_obj_t* contacts_node_rows_[kMaxContactsUi]{};
-  lv_obj_t* contacts_node_labels_[kMaxContactsUi]{};
   lv_obj_t* contacts_detail_panel_ = nullptr;
+  lv_obj_t* contacts_detail_info_panel_ = nullptr;
   lv_obj_t* contacts_action_rows_[kContactActionCount]{};
   lv_obj_t* contacts_action_labels_[kContactActionCount]{};
   lv_obj_t* contacts_full_name_label_ = nullptr;
   lv_obj_t* contacts_lat_lon_label_ = nullptr;
   lv_obj_t* contacts_last_heard_label_ = nullptr;
   lv_obj_t* contacts_telemetry_label_ = nullptr;
+  lv_obj_t* contacts_dm_panel_ = nullptr;
+  lv_obj_t* contacts_dm_new_btn_ = nullptr;
+  lv_obj_t* contacts_dm_new_label_ = nullptr;
   lv_obj_t* dm_dialog_ = nullptr;
   lv_obj_t* dm_title_label_ = nullptr;
   lv_obj_t* dm_new_btn_ = nullptr;
@@ -190,6 +210,7 @@ class StandaloneUi {
   lv_obj_t* dm_rows_[kMaxChatRows]{};
   size_t dm_row_count_ = 0;
   lv_obj_t* help_dialog_ = nullptr;
+  lv_obj_t* help_body_panel_ = nullptr;
   lv_obj_t* help_title_label_ = nullptr;
   lv_obj_t* help_body_label_ = nullptr;
   lv_obj_t* help_close_btn_ = nullptr;
@@ -236,7 +257,8 @@ class StandaloneUi {
   bool help_open_ = false;
   bool advert_popup_open_ = false;
   bool has_unread_dm_ = false;
-  bool contacts_actions_focused_ = false;
+  bool contacts_nav_focused_ = false;
+  bool contacts_dm_open_ = false;
   bool cfg_import_confirm_armed_ = false;
   bool cfg_delete_confirm_armed_ = false;
   bool first_install_identity_prompt_ = false;
@@ -248,9 +270,10 @@ class StandaloneUi {
   uint8_t contacts_selected_index_ = 0;
   uint8_t contacts_action_index_ = 0;
   uint8_t contacts_count_ = 0;
-  uint8_t contacts_row_capacity_ = 0;
+  uint32_t compose_opened_ms_ = 0;
   uint32_t last_selector_action_ms_ = 0;
   uint32_t last_dropdown_open_ms_ = 0;
+  uint32_t contacts_dropdown_guard_until_ms_ = 0;
   uint32_t advert_popup_deadline_ms_ = 0;
   char cfg_action_text_[48]{};
   char cfg_status_text_[96]{};

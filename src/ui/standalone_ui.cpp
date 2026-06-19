@@ -17,6 +17,22 @@
 #define PLUMERIA_KEY_DEBUG 0
 #endif
 
+#ifndef PLUMERIA_CONTACTS_TRACE
+#define PLUMERIA_CONTACTS_TRACE 0
+#endif
+
+#if PLUMERIA_CONTACTS_TRACE
+#define CTS_TRACE(...)                   \
+  do {                                   \
+    Serial.printf("[CTS] " __VA_ARGS__); \
+    Serial.print("\\n");               \
+  } while (0)
+#else
+#define CTS_TRACE(...) \
+  do {                 \
+  } while (0)
+#endif
+
 #ifndef LV_SYMBOL_GPS
 #define LV_SYMBOL_GPS LV_SYMBOL_DRIVE
 #endif
@@ -43,15 +59,25 @@ const lv_color_t kColorWifiOn = lv_color_hex(0x59D88E);
 const lv_color_t kColorWifiOff = lv_color_hex(0xF56767);
 const lv_color_t kColorWifiApBadge = lv_color_hex(0xD8E7F2);
 
-constexpr lv_coord_t kOuterPad = 2;
+constexpr lv_coord_t kOuterPad = 0;
 constexpr lv_coord_t kGap = 2;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+constexpr lv_coord_t kMainBottomInset = 0;
+#else
 constexpr lv_coord_t kMainBottomInset = 4;
+#endif
 constexpr lv_coord_t kHeaderH = 30;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
 constexpr lv_coord_t kShortcutH = 22;
 constexpr lv_coord_t kShortcutMinH = 20;
 constexpr lv_coord_t kShortcutMaxH = 26;
 constexpr bool kTouchDirectActivate = true;
+constexpr lv_coord_t kHeltecMainButtonBottomInset = 6;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+constexpr lv_coord_t kShortcutH = 14;
+constexpr lv_coord_t kShortcutMinH = 12;
+constexpr lv_coord_t kShortcutMaxH = 16;
+constexpr bool kTouchDirectActivate = false;
 #else
 constexpr lv_coord_t kShortcutH = 18;
 constexpr lv_coord_t kShortcutMinH = 16;
@@ -73,7 +99,11 @@ constexpr lv_coord_t kShortcutButtonRadius = 4;
 constexpr lv_coord_t kHeaderTimeGap = 8;
 constexpr lv_coord_t kHeaderBatteryTextX = -34;
 constexpr lv_coord_t kHeaderBatteryBarX = -2;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+constexpr lv_coord_t kHeaderIconsToBatteryGap = 10;
+#else
 constexpr lv_coord_t kHeaderIconsToBatteryGap = 18;
+#endif
 constexpr lv_coord_t kHeaderIconsGap = 10;
 constexpr lv_coord_t kComposeDialogMinW = 160;
 constexpr lv_coord_t kComposeDialogMaxW = 236;
@@ -85,7 +115,18 @@ constexpr size_t kComposeMessageMaxChars = 90;
 constexpr lv_coord_t kContactsDialogMinW = 220;
 constexpr lv_coord_t kContactsDialogMinH = 170;
 constexpr lv_coord_t kContactsDialogMaxH = 230;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+constexpr lv_coord_t kModalVerticalNudgeY = 4;
+#else
+constexpr lv_coord_t kModalVerticalNudgeY = 0;
+#endif
 constexpr uint32_t kNavDebounceMs = 120;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+constexpr uint32_t kContactsDropdownEnterGuardMs = 800;
+#else
+constexpr uint32_t kContactsDropdownEnterGuardMs = 260;
+#endif
+constexpr uint32_t kComposeOpenTapIgnoreMs = 180;
 constexpr uint32_t kLocalEchoSuppressMs = 3000;
 constexpr uint32_t kChatPersistFlushMs = 2000;
 constexpr uint32_t kDmPersistFlushMs = 1000;
@@ -117,6 +158,14 @@ constexpr bool kUseOnscreenKeyboard = true;
 constexpr bool kUseOnscreenKeyboard = false;
 #endif
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || (defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL))
+constexpr bool kCompactFavoriteActionLabels = true;
+#else
+constexpr bool kCompactFavoriteActionLabels = false;
+#endif
+
+constexpr bool kEnableContactsDialog = true;
+
 lv_coord_t dialogMaxW(lv_coord_t regular_max, lv_coord_t pager_max) {
   return kPagerWideDialogLayout ? pager_max : regular_max;
 }
@@ -141,17 +190,68 @@ lv_coord_t contactsLeftPanePercent() {
   return kPagerWideDialogLayout ? 37 : 44;
 }
 
+const char* addFavoriteActionLabel() {
+  return kCompactFavoriteActionLabels ? "Add Fav" : "Add (F)avorite";
+}
+
+const char* favoriteActionLabel(bool currently_favorite) {
+  if (kCompactFavoriteActionLabels) {
+    return currently_favorite ? "Rem Fav" : "Add Fav";
+  }
+  return currently_favorite ? "Remove (F)avorite" : "Add (F)avorite";
+}
+
+uint8_t clampOptionCount(uint8_t count, uint8_t limit) {
+  return count > limit ? limit : count;
+}
+
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
 constexpr bool kKeyboardNavEnabled = false;
 #else
 constexpr bool kKeyboardNavEnabled = true;
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+uint32_t remapCardputerNavKey(uint32_t key, bool allow_nav_remap) {
+  if (key == '`' || key == '~') {
+    return LV_KEY_ESC;
+  }
+  if (!allow_nav_remap) {
+    return key;
+  }
+
+  switch (key) {
+    case ';':
+      return LV_KEY_UP;
+    case '.':
+      return LV_KEY_DOWN;
+    case ',':
+      return LV_KEY_LEFT;
+    case '/':
+      return LV_KEY_RIGHT;
+    default:
+      return key;
+  }
+}
+#endif
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(HELTEC_COMPACT_SELECTOR)
+const char* kShortcutNames[] = {
+  "CFG",
+  "CONT",
+  "HELP",
+};
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
 const char* kShortcutNames[] = {
   "CFG",
   "CONTACTS",
   "HELP",
+};
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+const char* kShortcutNames[] = {
+  "(C)FG",
+  "C(O)NT",
+  "(H)ELP",
 };
 #else
 const char* kShortcutNames[] = {
@@ -167,11 +267,10 @@ const char* kHelpBodyText =
   "CFG: Device settings and web config\n"
   "CONTACTS: Favorites and direct messages\n"
   "HELP: Open this screen\n"
-  "ADV(Z): Send one-hop presence advert\n"
-  "ADV(F): Send flood advert across mesh\n"
+  "ADVZ: Send one-hop presence advert\n"
+  "ADVF: Send flood advert across mesh\n"
   "NEW: Start a room message or DM\n"
-  "CLOSE: Return to chat\n"
-  "Tap a row to select, then tap action buttons";
+  "CLOSE: Return to chat";
 #else
 const char* kHelpBodyText =
   "Keyboard shortcuts:\n"
@@ -397,6 +496,71 @@ void abbreviateContactName(const char* name, char* out, size_t out_size) {
   }
 
   out[write] = '\0';
+}
+
+void formatEpochClockHhMm(uint32_t epoch_seconds, char* out, size_t out_size) {
+  if (!out || out_size == 0) {
+    return;
+  }
+
+  out[0] = '\0';
+  if (epoch_seconds != 0) {
+    const time_t event_time = static_cast<time_t>(epoch_seconds);
+    struct tm tm_event{};
+    if (localtime_r(&event_time, &tm_event)) {
+      snprintf(out, out_size, "%02u:%02u", static_cast<unsigned>(tm_event.tm_hour),
+               static_cast<unsigned>(tm_event.tm_min));
+      return;
+    }
+  }
+
+  uint8_t hh = 0;
+  uint8_t mm = 0;
+  const time_t now_time = time(nullptr);
+  if (now_time >= kTimeValidEpoch) {
+    struct tm tm_now{};
+    localtime_r(&now_time, &tm_now);
+    hh = static_cast<uint8_t>(tm_now.tm_hour);
+    mm = static_cast<uint8_t>(tm_now.tm_min);
+  } else {
+    const uint32_t now_min = millis() / 60000UL;
+    hh = static_cast<uint8_t>((now_min / 60UL) % 24UL);
+    mm = static_cast<uint8_t>(now_min % 60UL);
+  }
+  snprintf(out, out_size, "%02u:%02u", static_cast<unsigned>(hh), static_cast<unsigned>(mm));
+}
+
+bool dmLineHasTimestampPrefix(const char* text) {
+  if (!text || text[0] != '[') {
+    return false;
+  }
+  for (size_t i = 1; i < 8 && text[i] != '\0'; i++) {
+    if (text[i] == ']') {
+      return true;
+    }
+  }
+  return false;
+}
+
+void formatDmDisplayLine(const char* line_text, uint32_t timestamp_epoch, char* out_text, size_t out_size) {
+  if (!out_text || out_size == 0) {
+    return;
+  }
+
+  out_text[0] = '\0';
+  if (!line_text || line_text[0] == '\0') {
+    return;
+  }
+
+  if (dmLineHasTimestampPrefix(line_text)) {
+    strncpy(out_text, line_text, out_size - 1);
+    out_text[out_size - 1] = '\0';
+    return;
+  }
+
+  char hhmm[8] = {};
+  formatEpochClockHhMm(timestamp_epoch, hhmm, sizeof(hhmm));
+  snprintf(out_text, out_size, "[%s] %s", hhmm, line_text);
 }
 
 void formatContactLastHeard(uint32_t lastmod, char* out, size_t out_size) {
@@ -928,6 +1092,14 @@ bool hasAncestor(lv_obj_t* node, lv_obj_t* ancestor) {
   return false;
 }
 
+void resetPointerInputState() {
+  for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev; indev = lv_indev_get_next(indev)) {
+    if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+      lv_indev_reset(indev, nullptr);
+    }
+  }
+}
+
 const lv_font_t* headerBarFont() {
 #if defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
   return &lv_font_montserrat_12;
@@ -943,6 +1115,16 @@ const lv_font_t* chatPanelFont() {
   return &lv_font_montserrat_12;
 #else
   return LV_FONT_DEFAULT;
+#endif
+}
+
+const lv_font_t* compactUiFont() {
+#if defined(LV_FONT_MONTSERRAT_8) && LV_FONT_MONTSERRAT_8
+  return &lv_font_montserrat_8;
+#elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  return &lv_font_montserrat_10;
+#else
+  return chatPanelFont();
 #endif
 }
 
@@ -1092,51 +1274,42 @@ void StandaloneUi::setFirstInstallIdentityPrompt(bool enabled) {
 }
 
 bool StandaloneUi::ensureContactsDialogBuilt() {
-  if (contacts_dialog_) {
-    return true;
-  }
-  if (!root_ || !main_panel_) {
+  if (!kEnableContactsDialog) {
     return false;
   }
 
-  const lv_coord_t screen_w = lv_disp_get_hor_res(nullptr);
-  const lv_coord_t screen_h = lv_disp_get_ver_res(nullptr);
-  lv_coord_t main_w = lv_obj_get_width(main_panel_);
-  lv_coord_t main_h = lv_obj_get_height(main_panel_);
-  if (main_w <= 0) {
-    main_w = static_cast<lv_coord_t>(screen_w - (kOuterPad * 2));
+  if (contacts_dialog_) {
+    return true;
   }
-  if (main_h <= 0) {
-    main_h = static_cast<lv_coord_t>(screen_h - (kOuterPad * 2));
+  if (!main_panel_ || !header_bar_) {
+    return false;
+  }
+
+  CTS_TRACE("ensureContactsDialogBuilt begin");
+
+  const lv_coord_t header_h = lv_obj_get_height(header_bar_);
+  lv_coord_t main_h = lv_obj_get_height(main_panel_);
+  const lv_coord_t body_y = static_cast<lv_coord_t>(header_h + kGap);
+  lv_coord_t body_h = static_cast<lv_coord_t>(main_h - body_y - kMainBottomInset);
+  if (body_h < 64) {
+    body_h = 64;
   }
 
   bool contacts_init_failed = false;
-  uint8_t built_rows = 0;
   do {
-    contacts_dialog_ = lv_obj_create(root_);
+    contacts_dialog_ = lv_obj_create(main_panel_);
     if (!contacts_dialog_) {
       contacts_init_failed = true;
       break;
     }
-    lv_obj_add_style(contacts_dialog_, &style_panel_, 0);
-    const lv_coord_t dialog_w =
-      clampCoord(main_w - dialogInsetW(6, 2), kContactsDialogMinW, dialogMaxW(300, 348));
-    const lv_coord_t dialog_h = clampCoord(main_h - 10, kContactsDialogMinH, kContactsDialogMaxH);
-    lv_obj_set_size(contacts_dialog_, dialog_w, dialog_h);
-    lv_obj_center(contacts_dialog_);
+    lv_obj_add_style(contacts_dialog_, &style_chat_, 0);
+    lv_obj_set_pos(contacts_dialog_, 0, body_y);
+    lv_obj_set_size(contacts_dialog_, LV_PCT(100), body_h);
     lv_obj_add_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(contacts_dialog_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(contacts_dialog_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(contacts_dialog_, onFocusableEvent, LV_EVENT_PRESSED, this);
-
-    contacts_title_label_ = lv_label_create(contacts_dialog_);
-    if (!contacts_title_label_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_add_style(contacts_title_label_, &style_text_main_, 0);
-    lv_label_set_text(contacts_title_label_, "Contacts");
-    lv_obj_align(contacts_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
+    lv_obj_clear_flag(contacts_dialog_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(contacts_dialog_, onContactsEvent, LV_EVENT_CLICKED, this);
 
     contacts_status_label_ = lv_label_create(contacts_dialog_);
     if (!contacts_status_label_) {
@@ -1147,135 +1320,159 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
 #if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
     lv_obj_set_style_text_font(contacts_status_label_, &lv_font_montserrat_10, 0);
 #endif
-  lv_label_set_text(contacts_status_label_, "D - Open currently selected contact DMs");
-    lv_obj_set_width(contacts_status_label_, LV_PCT(kPagerWideDialogLayout ? 98 : 100));
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_obj_align(contacts_status_label_, LV_ALIGN_BOTTOM_LEFT, kPagerWideDialogLayout ? 2 : 4, -26);
-  lv_obj_add_flag(contacts_status_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(contacts_status_label_, LV_PCT(100));
+    lv_obj_align(contacts_status_label_, LV_ALIGN_TOP_LEFT, 2, 2);
+    lv_label_set_text(contacts_status_label_, "");
 
-    contacts_close_btn_ = lv_btn_create(contacts_dialog_);
-    if (!contacts_close_btn_) {
+    contacts_detail_info_panel_ = lv_obj_create(contacts_dialog_);
+    if (!contacts_detail_info_panel_) {
       contacts_init_failed = true;
       break;
     }
-    lv_obj_set_size(contacts_close_btn_, LV_PCT(100), 22);
-    lv_obj_align(contacts_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
-    lv_obj_add_style(contacts_close_btn_, &style_button_, 0);
-    lv_obj_add_style(contacts_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-    lv_obj_add_event_cb(contacts_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-    lv_obj_add_event_cb(contacts_close_btn_, onFocusableEvent, LV_EVENT_PRESSED, this);
-    lv_obj_add_event_cb(contacts_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_set_pos(contacts_detail_info_panel_, 0, 2);
+    lv_obj_set_size(contacts_detail_info_panel_, LV_PCT(100), static_cast<lv_coord_t>(body_h - 48));
+    lv_obj_set_style_bg_opa(contacts_detail_info_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(contacts_detail_info_panel_, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(contacts_detail_info_panel_, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(contacts_detail_info_panel_, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(contacts_detail_info_panel_, 2, LV_PART_MAIN);
+    lv_obj_set_layout(contacts_detail_info_panel_, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(contacts_detail_info_panel_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(contacts_detail_info_panel_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(contacts_detail_info_panel_, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(contacts_detail_info_panel_, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(contacts_detail_info_panel_, onContactsEvent, LV_EVENT_CLICKED, this);
 
-    contacts_close_label_ = lv_label_create(contacts_close_btn_);
-    if (!contacts_close_label_) {
+    contacts_full_name_label_ = lv_label_create(contacts_detail_info_panel_);
+    if (!contacts_full_name_label_) {
       contacts_init_failed = true;
       break;
     }
-    lv_obj_add_style(contacts_close_label_, &style_text_main_, 0);
-    lv_label_set_text(contacts_close_label_, "CLOSE");
-    lv_obj_center(contacts_close_label_);
-#else
-    lv_obj_align(contacts_status_label_, LV_ALIGN_BOTTOM_LEFT, kPagerWideDialogLayout ? 2 : 4, -2);
-    contacts_close_btn_ = nullptr;
-    contacts_close_label_ = nullptr;
-#endif
+    lv_obj_add_style(contacts_full_name_label_, &style_text_main_, 0);
+    lv_obj_set_style_text_font(contacts_full_name_label_, compactUiFont(), 0);
+    lv_obj_set_width(contacts_full_name_label_, LV_PCT(100));
+    lv_label_set_long_mode(contacts_full_name_label_, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(contacts_full_name_label_, "Node: -");
 
-    const lv_coord_t dlg_w = dialog_w;
-    const lv_coord_t dlg_h = dialog_h;
-    const lv_coord_t body_y = 18;
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    const lv_coord_t body_h = dlg_h > 56 ? static_cast<lv_coord_t>(dlg_h - 42) : static_cast<lv_coord_t>(40);
-  #else
-    const lv_coord_t body_h = dlg_h > 40 ? static_cast<lv_coord_t>(dlg_h - 36) : static_cast<lv_coord_t>(40);
-  #endif
-    lv_coord_t left_w = static_cast<lv_coord_t>((dlg_w * contactsLeftPanePercent()) / 100);
-    if (left_w < 92) {
-      left_w = 92;
-    }
-  const lv_coord_t pane_gap = 0;
-    const lv_coord_t left_x = kPagerWideDialogLayout ? 1 : 2;
-    const lv_coord_t right_x = static_cast<lv_coord_t>(left_x + left_w + pane_gap);
-    lv_coord_t right_w = static_cast<lv_coord_t>(dlg_w - right_x - 4);
-    if (right_w < 60) {
-      right_w = 60;
-      left_w = static_cast<lv_coord_t>(dlg_w - right_w - left_x - pane_gap - 4);
-    }
-
-    contacts_nodes_panel_ = lv_obj_create(contacts_dialog_);
-    if (!contacts_nodes_panel_) {
+    contacts_lat_lon_label_ = lv_label_create(contacts_detail_info_panel_);
+    if (!contacts_lat_lon_label_) {
       contacts_init_failed = true;
       break;
     }
-    lv_obj_set_pos(contacts_nodes_panel_, left_x, body_y);
-    lv_obj_set_size(contacts_nodes_panel_, left_w, body_h);
-    lv_obj_add_style(contacts_nodes_panel_, &style_chat_, 0);
-    lv_obj_set_scroll_dir(contacts_nodes_panel_, LV_DIR_NONE);
-    lv_obj_set_scrollbar_mode(contacts_nodes_panel_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_clear_flag(contacts_nodes_panel_, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(contacts_nodes_panel_, LV_OBJ_FLAG_SCROLL_ELASTIC);
-    lv_obj_clear_flag(contacts_nodes_panel_, LV_OBJ_FLAG_SCROLL_MOMENTUM);
-    lv_obj_add_flag(contacts_nodes_panel_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(contacts_nodes_panel_, onFocusableEvent, LV_EVENT_PRESSED, this);
-    lv_obj_set_style_pad_row(contacts_nodes_panel_, 2, LV_PART_MAIN);
+    lv_obj_add_style(contacts_lat_lon_label_, &style_text_dim_, 0);
+    lv_obj_set_style_text_font(contacts_lat_lon_label_, compactUiFont(), 0);
+    lv_obj_set_width(contacts_lat_lon_label_, LV_PCT(100));
+    lv_label_set_long_mode(contacts_lat_lon_label_, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(contacts_lat_lon_label_, "Lat/Lon: -");
 
-    for (uint8_t i = 0; i < kMaxContactsUi; i++) {
-      contacts_node_rows_[i] = lv_btn_create(contacts_nodes_panel_);
-      if (!contacts_node_rows_[i]) {
-        if (i == 0) {
-          contacts_init_failed = true;
-        }
-        break;
-      }
-      lv_obj_set_size(contacts_node_rows_[i], LV_PCT(100), 20);
-      lv_obj_set_pos(contacts_node_rows_[i], 0, static_cast<lv_coord_t>(i * 20));
-      lv_obj_add_style(contacts_node_rows_[i], &style_button_, 0);
-      lv_obj_add_style(contacts_node_rows_[i], &style_button_focused_, LV_STATE_FOCUSED);
-      lv_obj_add_event_cb(contacts_node_rows_[i], onFocusableEvent, LV_EVENT_KEY, this);
-      lv_obj_add_event_cb(contacts_node_rows_[i], onFocusableEvent, LV_EVENT_PRESSED, this);
-      lv_obj_add_event_cb(contacts_node_rows_[i], onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-      contacts_node_labels_[i] = lv_label_create(contacts_node_rows_[i]);
-      if (!contacts_node_labels_[i]) {
-        if (i == 0) {
-          contacts_init_failed = true;
-        }
-        break;
-      }
-      lv_obj_add_style(contacts_node_labels_[i], &style_text_main_, 0);
-    #if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
-      lv_obj_set_style_text_font(contacts_node_labels_[i], &lv_font_montserrat_10, 0);
-    #endif
-      lv_obj_set_width(contacts_node_labels_[i], LV_PCT(100));
-      lv_label_set_long_mode(contacts_node_labels_[i], LV_LABEL_LONG_DOT);
-      lv_label_set_text(contacts_node_labels_[i], "-");
-      lv_obj_align(contacts_node_labels_[i], LV_ALIGN_LEFT_MID, 1, 0);
-      lv_obj_add_flag(contacts_node_rows_[i], LV_OBJ_FLAG_HIDDEN);
-      built_rows++;
-    }
-
-    lv_obj_update_layout(contacts_dialog_);
-    lv_obj_update_layout(root_);
-
-    if (built_rows == 0) {
+    contacts_last_heard_label_ = lv_label_create(contacts_detail_info_panel_);
+    if (!contacts_last_heard_label_) {
       contacts_init_failed = true;
       break;
     }
+    lv_obj_add_style(contacts_last_heard_label_, &style_text_dim_, 0);
+    lv_obj_set_style_text_font(contacts_last_heard_label_, compactUiFont(), 0);
+    lv_obj_set_width(contacts_last_heard_label_, LV_PCT(100));
+    lv_label_set_long_mode(contacts_last_heard_label_, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(contacts_last_heard_label_, "Last: -");
+
+    contacts_telemetry_label_ = lv_label_create(contacts_detail_info_panel_);
+    if (!contacts_telemetry_label_) {
+      contacts_init_failed = true;
+      break;
+    }
+    lv_obj_add_style(contacts_telemetry_label_, &style_text_dim_, 0);
+    lv_obj_set_style_text_font(contacts_telemetry_label_, compactUiFont(), 0);
+    lv_obj_set_width(contacts_telemetry_label_, LV_PCT(100));
+    lv_label_set_long_mode(contacts_telemetry_label_, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(contacts_telemetry_label_, "Telemetry: -");
+
+    contacts_dm_new_btn_ = lv_btn_create(contacts_dialog_);
+    if (!contacts_dm_new_btn_) {
+      contacts_init_failed = true;
+      break;
+    }
+    lv_obj_set_size(contacts_dm_new_btn_, 56, 18);
+    lv_obj_align(contacts_dm_new_btn_, LV_ALIGN_TOP_RIGHT, -2, 18);
+    lv_obj_add_style(contacts_dm_new_btn_, &style_button_, 0);
+    lv_obj_add_style(contacts_dm_new_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(contacts_dm_new_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(contacts_dm_new_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(contacts_dm_new_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+
+    contacts_dm_new_label_ = lv_label_create(contacts_dm_new_btn_);
+    if (!contacts_dm_new_label_) {
+      contacts_init_failed = true;
+      break;
+    }
+    lv_obj_add_style(contacts_dm_new_label_, &style_text_main_, 0);
+    lv_label_set_text(contacts_dm_new_label_, "NEW");
+    lv_obj_center(contacts_dm_new_label_);
+
+    contacts_dm_panel_ = lv_obj_create(contacts_dialog_);
+    if (!contacts_dm_panel_) {
+      contacts_init_failed = true;
+      break;
+    }
+    lv_obj_set_pos(contacts_dm_panel_, 0, 42);
+    lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(body_h - 66));
+    lv_obj_add_style(contacts_dm_panel_, &style_chat_, 0);
+    lv_obj_set_scroll_dir(contacts_dm_panel_, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(contacts_dm_panel_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_layout(contacts_dm_panel_, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(contacts_dm_panel_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(contacts_dm_panel_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(contacts_dm_panel_, 1, LV_PART_MAIN);
+    lv_obj_add_event_cb(contacts_dm_panel_, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(contacts_dm_panel_, onContactsEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(contacts_dm_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_add_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
 
     contacts_detail_panel_ = lv_obj_create(contacts_dialog_);
     if (!contacts_detail_panel_) {
       contacts_init_failed = true;
       break;
     }
-    lv_obj_set_pos(contacts_detail_panel_, right_x, body_y);
-    lv_obj_set_size(contacts_detail_panel_, right_w, body_h);
-    lv_obj_add_style(contacts_detail_panel_, &style_chat_, 0);
-    lv_obj_clear_flag(contacts_detail_panel_, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(contacts_detail_panel_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(contacts_detail_panel_, onFocusableEvent, LV_EVENT_PRESSED, this);
+    lv_obj_set_size(contacts_detail_panel_, LV_PCT(100),
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+            46
+  #else
+            22
+  #endif
+    );
+    lv_obj_align(contacts_detail_panel_, LV_ALIGN_BOTTOM_MID, 0, -1);
+    lv_obj_set_style_bg_opa(contacts_detail_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(contacts_detail_panel_, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(contacts_detail_panel_, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(contacts_detail_panel_, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(contacts_detail_panel_, 2, LV_PART_MAIN);
+    lv_obj_set_layout(contacts_detail_panel_, LV_LAYOUT_FLEX);
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_flex_flow(contacts_detail_panel_, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(contacts_detail_panel_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER);
+  #else
+    lv_obj_set_flex_flow(contacts_detail_panel_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(contacts_detail_panel_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                LV_FLEX_ALIGN_CENTER);
+  #endif
 
     static const char* kContactActionInitLabels[kContactActionCount] = {
-      "Add Favorite",
+      addFavoriteActionLabel(),
+    #if defined(DEVICE_HELTEC_V4_EXPANSION)
       "DM",
+    #else
+      "(D)M",
+    #endif
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+      "CLOSE",
+#endif
     };
     for (uint8_t i = 0; i < kContactActionCount; i++) {
       contacts_action_rows_[i] = lv_btn_create(contacts_detail_panel_);
@@ -1283,10 +1480,18 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
         contacts_init_failed = true;
         break;
       }
-      lv_obj_set_size(contacts_action_rows_[i], LV_PCT(100), 20);
-      lv_obj_set_pos(contacts_action_rows_[i], 0, static_cast<lv_coord_t>(i * 20));
+      if (i < 2) {
+        lv_obj_set_width(contacts_action_rows_[i], LV_PCT(49));
+      } else {
+        lv_obj_set_width(contacts_action_rows_[i], LV_PCT(100));
+      }
+      lv_obj_set_height(contacts_action_rows_[i], 22);
       lv_obj_add_style(contacts_action_rows_[i], &style_button_, 0);
-      lv_obj_add_event_cb(contacts_action_rows_[i], onFocusableEvent, LV_EVENT_PRESSED, this);
+      lv_obj_add_style(contacts_action_rows_[i], &style_button_focused_, LV_STATE_FOCUSED);
+      lv_obj_clear_flag(contacts_action_rows_[i], LV_OBJ_FLAG_EVENT_BUBBLE);
+      lv_obj_add_event_cb(contacts_action_rows_[i], onFocusableEvent, LV_EVENT_KEY, this);
+      lv_obj_add_event_cb(contacts_action_rows_[i], onContactsEvent, LV_EVENT_CLICKED, this);
+      lv_obj_add_event_cb(contacts_action_rows_[i], onFocusableEvent, LV_EVENT_FOCUSED, this);
 
       contacts_action_labels_[i] = lv_label_create(contacts_action_rows_[i]);
       if (!contacts_action_labels_[i]) {
@@ -1295,111 +1500,34 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
       }
       lv_obj_add_style(contacts_action_labels_[i], &style_text_main_, 0);
       lv_label_set_text(contacts_action_labels_[i], kContactActionInitLabels[i]);
-      lv_obj_align(contacts_action_labels_[i], LV_ALIGN_LEFT_MID, 1, 0);
+      lv_obj_center(contacts_action_labels_[i]);
     }
     if (contacts_init_failed) {
       break;
     }
-
-    lv_obj_t* contacts_divider = lv_obj_create(contacts_detail_panel_);
-    if (!contacts_divider) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_set_size(contacts_divider, LV_PCT(100), 2);
-    lv_obj_set_pos(contacts_divider, 0, 42);
-    lv_obj_set_style_bg_opa(contacts_divider, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(contacts_divider, lv_color_hex(0x2B4A63), 0);
-    lv_obj_set_style_border_width(contacts_divider, 0, 0);
-    lv_obj_set_style_radius(contacts_divider, 0, 0);
-    lv_obj_clear_flag(contacts_divider, LV_OBJ_FLAG_CLICKABLE);
-
-    contacts_full_name_label_ = lv_label_create(contacts_detail_panel_);
-    if (!contacts_full_name_label_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_add_style(contacts_full_name_label_, &style_text_main_, 0);
-  #if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
-    lv_obj_set_style_text_font(contacts_full_name_label_, &lv_font_montserrat_10, 0);
-  #endif
-    lv_obj_set_width(contacts_full_name_label_, LV_PCT(100));
-    lv_label_set_long_mode(contacts_full_name_label_, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(contacts_full_name_label_, 0, 48);
-    lv_label_set_text(contacts_full_name_label_, "Node: -");
-
-    contacts_lat_lon_label_ = lv_label_create(contacts_detail_panel_);
-    if (!contacts_lat_lon_label_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_add_style(contacts_lat_lon_label_, &style_text_dim_, 0);
-  #if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
-    lv_obj_set_style_text_font(contacts_lat_lon_label_, &lv_font_montserrat_10, 0);
-  #endif
-    lv_obj_set_width(contacts_lat_lon_label_, LV_PCT(100));
-    lv_label_set_long_mode(contacts_lat_lon_label_, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(contacts_lat_lon_label_, 0, 64);
-    lv_label_set_text(contacts_lat_lon_label_, "Lat/Lon: -");
-
-    contacts_last_heard_label_ = lv_label_create(contacts_detail_panel_);
-    if (!contacts_last_heard_label_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_add_style(contacts_last_heard_label_, &style_text_dim_, 0);
-  #if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
-    lv_obj_set_style_text_font(contacts_last_heard_label_, &lv_font_montserrat_10, 0);
-  #endif
-    lv_obj_set_width(contacts_last_heard_label_, LV_PCT(100));
-    lv_label_set_long_mode(contacts_last_heard_label_, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(contacts_last_heard_label_, 0, 80);
-    lv_label_set_text(contacts_last_heard_label_, "Last: -");
-
-    contacts_telemetry_label_ = lv_label_create(contacts_detail_panel_);
-    if (!contacts_telemetry_label_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_add_style(contacts_telemetry_label_, &style_text_dim_, 0);
-#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
-    lv_obj_set_style_text_font(contacts_telemetry_label_, &lv_font_montserrat_10, 0);
-#endif
-    lv_obj_set_width(contacts_telemetry_label_, LV_PCT(100));
-    lv_label_set_long_mode(contacts_telemetry_label_, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(contacts_telemetry_label_, 0, 96);
-    lv_label_set_text(contacts_telemetry_label_, "Telemetry: -");
-
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (contacts_close_btn_) {
-      lv_obj_move_foreground(contacts_close_btn_);
-    }
-#endif
+    CTS_TRACE("ensureContactsDialogBuilt done");
   } while (false);
 
   if (!contacts_init_failed) {
-    contacts_row_capacity_ = built_rows;
     return true;
   }
 
+  CTS_TRACE("ensureContactsDialogBuilt failed");
   if (false) Serial.println("[UI] Contacts dialog disabled: allocation failed");
   if (contacts_dialog_) {
     lv_obj_del(contacts_dialog_);
   }
   contacts_dialog_ = nullptr;
-  contacts_title_label_ = nullptr;
   contacts_status_label_ = nullptr;
-  contacts_close_btn_ = nullptr;
-  contacts_close_label_ = nullptr;
-  contacts_nodes_panel_ = nullptr;
   contacts_detail_panel_ = nullptr;
+  contacts_detail_info_panel_ = nullptr;
   contacts_full_name_label_ = nullptr;
   contacts_lat_lon_label_ = nullptr;
   contacts_last_heard_label_ = nullptr;
   contacts_telemetry_label_ = nullptr;
-  contacts_row_capacity_ = 0;
-  memset(contacts_node_rows_, 0, sizeof(contacts_node_rows_));
-  memset(contacts_node_labels_, 0, sizeof(contacts_node_labels_));
+  contacts_dm_panel_ = nullptr;
+  contacts_dm_new_btn_ = nullptr;
+  contacts_dm_new_label_ = nullptr;
   memset(contacts_action_rows_, 0, sizeof(contacts_action_rows_));
   memset(contacts_action_labels_, 0, sizeof(contacts_action_labels_));
   return false;
@@ -1430,6 +1558,9 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_pos(main_panel_, kOuterPad, kOuterPad);
   lv_obj_set_size(main_panel_, main_w, main_h);
   lv_obj_add_style(main_panel_, &style_panel_, 0);
+  lv_obj_set_style_border_width(main_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(main_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(main_panel_, 0, LV_PART_MAIN);
   lv_obj_clear_flag(main_panel_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(main_panel_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(main_panel_, onFocusableEvent, LV_EVENT_CLICKED, this);
@@ -1513,12 +1644,12 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_style(battery_pct_label_, &style_text_main_, 0);
   lv_obj_set_style_text_font(battery_pct_label_, header_font, 0);
   lv_obj_align(battery_pct_label_, LV_ALIGN_RIGHT_MID, kHeaderBatteryTextX, 0);
+  lv_obj_add_flag(battery_pct_label_, LV_OBJ_FLAG_HIDDEN);
 
   gps_label_ = lv_label_create(header_bar_);
   lv_obj_add_style(gps_label_, &style_text_dim_, 0);
   lv_obj_set_style_text_font(gps_label_, header_font, 0);
-  lv_obj_align_to(gps_label_, battery_pct_label_, LV_ALIGN_OUT_LEFT_MID,
-                  -(kHeaderIconsToBatteryGap + kHeaderIconsGap), 0);
+  lv_obj_align_to(gps_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
 
   wifi_label_ = lv_label_create(header_bar_);
   lv_obj_add_style(wifi_label_, &style_text_dim_, 0);
@@ -1531,11 +1662,6 @@ void StandaloneUi::buildLayout() {
   lv_label_set_text(wifi_ap_badge_label_, "AP");
   lv_obj_add_flag(wifi_ap_badge_label_, LV_OBJ_FLAG_HIDDEN);
 
-  time_label_ = lv_label_create(header_bar_);
-  lv_obj_add_style(time_label_, &style_text_main_, 0);
-  lv_obj_set_style_text_font(time_label_, header_font, 0);
-  lv_obj_align_to(time_label_, battery_pct_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
-
   battery_bar_ = lv_bar_create(header_bar_);
   lv_obj_set_size(battery_bar_, 26, 6);
   lv_obj_align(battery_bar_, LV_ALIGN_RIGHT_MID, kHeaderBatteryBarX, 0);
@@ -1545,6 +1671,11 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_style_border_width(battery_bar_, 1, LV_PART_MAIN);
   lv_obj_set_style_bg_color(battery_bar_, lv_color_hex(0x59D8A0), LV_PART_INDICATOR);
   lv_obj_set_style_pad_all(battery_bar_, 0, LV_PART_MAIN);
+
+  time_label_ = lv_label_create(header_bar_);
+  lv_obj_add_style(time_label_, &style_text_main_, 0);
+  lv_obj_set_style_text_font(time_label_, header_font, 0);
+  lv_obj_align_to(time_label_, battery_bar_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
 
   chat_panel_ = lv_obj_create(main_panel_);
   lv_obj_set_pos(chat_panel_, 0, chat_y);
@@ -1569,7 +1700,7 @@ void StandaloneUi::buildLayout() {
   chat_advz_btn_ = lv_btn_create(main_panel_);
   lv_obj_set_size(chat_advz_btn_, 56, 18);
   lv_obj_align(chat_advz_btn_, LV_ALIGN_BOTTOM_RIGHT, -122,
-               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + 2)));
+               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + kHeltecMainButtonBottomInset)));
   lv_obj_add_style(chat_advz_btn_, &style_button_, 0);
   lv_obj_add_style(chat_advz_btn_, &style_button_focused_, LV_STATE_FOCUSED);
   lv_obj_add_event_cb(chat_advz_btn_, onFocusableEvent, LV_EVENT_KEY, this);
@@ -1578,13 +1709,13 @@ void StandaloneUi::buildLayout() {
 
   chat_advz_label_ = lv_label_create(chat_advz_btn_);
   lv_obj_add_style(chat_advz_label_, &style_text_main_, 0);
-  lv_label_set_text(chat_advz_label_, "ADV(Z)");
+  lv_label_set_text(chat_advz_label_, "ADVZ");
   lv_obj_center(chat_advz_label_);
 
   chat_advf_btn_ = lv_btn_create(main_panel_);
   lv_obj_set_size(chat_advf_btn_, 56, 18);
   lv_obj_align(chat_advf_btn_, LV_ALIGN_BOTTOM_RIGHT, -62,
-               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + 2)));
+               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + kHeltecMainButtonBottomInset)));
   lv_obj_add_style(chat_advf_btn_, &style_button_, 0);
   lv_obj_add_style(chat_advf_btn_, &style_button_focused_, LV_STATE_FOCUSED);
   lv_obj_add_event_cb(chat_advf_btn_, onFocusableEvent, LV_EVENT_KEY, this);
@@ -1593,13 +1724,13 @@ void StandaloneUi::buildLayout() {
 
   chat_advf_label_ = lv_label_create(chat_advf_btn_);
   lv_obj_add_style(chat_advf_label_, &style_text_main_, 0);
-  lv_label_set_text(chat_advf_label_, "ADV(F)");
+  lv_label_set_text(chat_advf_label_, "ADVF");
   lv_obj_center(chat_advf_label_);
 
   chat_new_btn_ = lv_btn_create(main_panel_);
   lv_obj_set_size(chat_new_btn_, 56, 18);
   lv_obj_align(chat_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2,
-               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + 2)));
+               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + kHeltecMainButtonBottomInset)));
   lv_obj_add_style(chat_new_btn_, &style_button_, 0);
   lv_obj_add_style(chat_new_btn_, &style_button_focused_, LV_STATE_FOCUSED);
   lv_obj_add_event_cb(chat_new_btn_, onFocusableEvent, LV_EVENT_KEY, this);
@@ -1621,22 +1752,40 @@ void StandaloneUi::buildLayout() {
 
   compose_dialog_ = lv_obj_create(root_);
   lv_obj_add_style(compose_dialog_, &style_panel_, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  lv_obj_set_size(compose_dialog_, clampCoord(static_cast<lv_coord_t>(main_w - 8), 180, main_w),
+                  clampCoord(static_cast<lv_coord_t>(screen_h - 8), 120, screen_h));
+  lv_obj_align(compose_dialog_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_pad_all(compose_dialog_, 4, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(compose_dialog_, 2, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(compose_dialog_, 1, LV_PART_MAIN);
+  lv_obj_set_flex_flow(compose_dialog_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(compose_dialog_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+#else
   lv_obj_set_size(compose_dialog_,
                   clampCoord(main_w - dialogInsetW(8, 2), kComposeDialogMinW,
                              dialogMaxW(kComposeDialogMaxW, 338)),
                   kComposeDialogH);
   lv_obj_center(compose_dialog_);
+#endif
   lv_obj_add_flag(compose_dialog_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(compose_dialog_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(compose_dialog_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(compose_dialog_, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_set_style_border_width(compose_dialog_, 1, LV_PART_MAIN);
   lv_obj_set_style_border_color(compose_dialog_, kColorBorder, LV_PART_MAIN);
   lv_obj_set_style_border_opa(compose_dialog_, LV_OPA_40, LV_PART_MAIN);
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
   lv_obj_add_event_cb(compose_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+#endif
 
   compose_title_label_ = lv_label_create(compose_dialog_);
   lv_obj_add_style(compose_title_label_, &style_text_main_, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  lv_obj_set_width(compose_title_label_, LV_PCT(100));
+#else
   lv_obj_align(compose_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
+#endif
 
   compose_hint_label_ = lv_label_create(compose_dialog_);
   lv_obj_add_style(compose_hint_label_, &style_text_dim_, 0);
@@ -1652,26 +1801,95 @@ void StandaloneUi::buildLayout() {
 #endif
 
   compose_input_ = lv_textarea_create(compose_dialog_);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  lv_obj_set_width(compose_input_, LV_PCT(100));
+  lv_obj_set_height(compose_input_, 38);
+  lv_obj_set_style_text_color(compose_input_, lv_color_hex(0xE8F1FF), 0);
+  lv_obj_set_style_bg_color(compose_input_, lv_color_hex(0x102B61), 0);
+  lv_obj_set_style_bg_opa(compose_input_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(compose_input_, 1, 0);
+  lv_obj_set_style_border_color(compose_input_, lv_color_hex(0x4C76BA), 0);
+  lv_obj_set_style_pad_top(compose_input_, 1, 0);
+  lv_obj_set_style_pad_bottom(compose_input_, 1, 0);
+  lv_obj_set_style_pad_left(compose_input_, 3, 0);
+  lv_obj_set_style_pad_right(compose_input_, 3, 0);
+  lv_textarea_set_one_line(compose_input_, true);
+#else
   lv_obj_set_size(compose_input_, LV_PCT(composeInputWidthPct()), kComposeInputH);
   lv_obj_align(compose_input_, LV_ALIGN_BOTTOM_MID, 0, composeInputBottomInset());
   lv_textarea_set_one_line(compose_input_, false);
+#endif
 #if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
   lv_obj_set_style_text_font(compose_input_, &lv_font_montserrat_10, 0);
 #endif
   lv_textarea_set_max_length(compose_input_, static_cast<uint16_t>(kComposeMessageMaxChars));
   lv_textarea_set_placeholder_text(compose_input_, "Type and press Enter");
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_KEY, this);
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_CLICKED, this);
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+#endif
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  compose_action_row_ = lv_obj_create(compose_dialog_);
+  lv_obj_set_width(compose_action_row_, LV_PCT(100));
+  lv_obj_set_height(compose_action_row_, 28);
+  lv_obj_clear_flag(compose_action_row_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_opa(compose_action_row_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(compose_action_row_, 0, 0);
+  lv_obj_set_style_pad_all(compose_action_row_, 0, 0);
+  lv_obj_set_style_pad_column(compose_action_row_, 4, 0);
+  lv_obj_set_flex_flow(compose_action_row_, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(compose_action_row_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  compose_cancel_btn_ = lv_btn_create(compose_action_row_);
+  lv_obj_set_flex_grow(compose_cancel_btn_, 1);
+  lv_obj_set_height(compose_cancel_btn_, LV_PCT(100));
+  lv_obj_add_style(compose_cancel_btn_, &style_button_, 0);
+  lv_obj_add_style(compose_cancel_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_add_event_cb(compose_cancel_btn_, onComposeActionEvent, LV_EVENT_CLICKED, this);
+  compose_cancel_label_ = lv_label_create(compose_cancel_btn_);
+  lv_obj_add_style(compose_cancel_label_, &style_text_main_, 0);
+  lv_label_set_text(compose_cancel_label_, "Cancel");
+  lv_obj_center(compose_cancel_label_);
+
+  compose_send_btn_ = lv_btn_create(compose_action_row_);
+  lv_obj_set_flex_grow(compose_send_btn_, 1);
+  lv_obj_set_height(compose_send_btn_, LV_PCT(100));
+  lv_obj_add_style(compose_send_btn_, &style_button_, 0);
+  lv_obj_add_style(compose_send_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_add_event_cb(compose_send_btn_, onComposeActionEvent, LV_EVENT_CLICKED, this);
+  compose_send_label_ = lv_label_create(compose_send_btn_);
+  lv_obj_add_style(compose_send_label_, &style_text_main_, 0);
+  lv_label_set_text(compose_send_label_, "Send");
+  lv_obj_center(compose_send_label_);
+#else
+  compose_action_row_ = nullptr;
+  compose_cancel_btn_ = nullptr;
+  compose_cancel_label_ = nullptr;
+  compose_send_btn_ = nullptr;
+  compose_send_label_ = nullptr;
+#endif
 
 #if defined(LV_USE_KEYBOARD) && LV_USE_KEYBOARD
-  compose_keyboard_ = lv_keyboard_create(root_);
-  lv_obj_set_size(compose_keyboard_, LV_PCT(100), clampCoord(static_cast<lv_coord_t>(screen_h / 2), 74, 118));
-  lv_obj_align(compose_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_obj_add_style(compose_keyboard_, &style_panel_, LV_PART_MAIN);
-  lv_keyboard_set_textarea(compose_keyboard_, compose_input_);
-  lv_obj_add_event_cb(compose_keyboard_, onComposeKeyboardEvent, LV_EVENT_ALL, this);
-  lv_obj_add_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN);
+  compose_keyboard_ = lv_keyboard_create(compose_dialog_);
+  if (compose_keyboard_) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_width(compose_keyboard_, LV_PCT(100));
+    lv_obj_set_flex_grow(compose_keyboard_, 1);
+#else
+    lv_obj_set_size(compose_keyboard_, LV_PCT(100), clampCoord(static_cast<lv_coord_t>(screen_h / 2), 74, 118));
+    lv_obj_align(compose_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
+#endif
+    lv_obj_add_style(compose_keyboard_, &style_panel_, LV_PART_MAIN);
+    lv_obj_clear_flag(compose_keyboard_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_keyboard_set_textarea(compose_keyboard_, compose_input_);
+    lv_obj_add_event_cb(compose_keyboard_, onComposeKeyboardEvent, LV_EVENT_READY, this);
+    lv_obj_add_event_cb(compose_keyboard_, onComposeKeyboardEvent, LV_EVENT_CANCEL, this);
+    lv_obj_add_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(compose_keyboard_, LV_OBJ_FLAG_CLICKABLE);
+  }
 #else
   compose_keyboard_ = nullptr;
 #endif
@@ -1680,7 +1898,7 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_style(cfg_dialog_, &style_panel_, 0);
   lv_obj_set_size(cfg_dialog_, clampCoord(main_w - dialogInsetW(6, 2), 220, dialogMaxW(280, 340)),
                   clampCoord(main_h - 10, 188, 230));
-  lv_obj_center(cfg_dialog_);
+  lv_obj_align(cfg_dialog_, LV_ALIGN_CENTER, 0, kModalVerticalNudgeY);
   lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(cfg_dialog_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_CLICKABLE);
@@ -1760,19 +1978,18 @@ void StandaloneUi::buildLayout() {
   lv_obj_clear_flag(cfg_divider, LV_OBJ_FLAG_CLICKABLE);
 
   contacts_dialog_ = nullptr;
-  contacts_title_label_ = nullptr;
   contacts_status_label_ = nullptr;
-  contacts_close_btn_ = nullptr;
-  contacts_close_label_ = nullptr;
-  contacts_nodes_panel_ = nullptr;
   contacts_detail_panel_ = nullptr;
+  contacts_detail_info_panel_ = nullptr;
   contacts_full_name_label_ = nullptr;
   contacts_lat_lon_label_ = nullptr;
   contacts_last_heard_label_ = nullptr;
   contacts_telemetry_label_ = nullptr;
-  contacts_row_capacity_ = 0;
-  memset(contacts_node_rows_, 0, sizeof(contacts_node_rows_));
-  memset(contacts_node_labels_, 0, sizeof(contacts_node_labels_));
+  contacts_dm_panel_ = nullptr;
+  contacts_dm_new_btn_ = nullptr;
+  contacts_dm_new_label_ = nullptr;
+  contacts_nav_focused_ = false;
+  contacts_dm_open_ = false;
   memset(contacts_action_rows_, 0, sizeof(contacts_action_rows_));
   memset(contacts_action_labels_, 0, sizeof(contacts_action_labels_));
 
@@ -1784,8 +2001,7 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(dm_dialog_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(dm_dialog_, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(dm_dialog_, onFocusableEvent, LV_EVENT_PRESSED, this);
-  lv_obj_add_event_cb(dm_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(dm_dialog_, onDmEvent, LV_EVENT_PRESSED, this);
 
   dm_title_label_ = lv_label_create(dm_dialog_);
   lv_obj_add_style(dm_title_label_, &style_text_main_, 0);
@@ -1798,9 +2014,9 @@ void StandaloneUi::buildLayout() {
   lv_obj_align(dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -30);
   lv_obj_add_style(dm_new_btn_, &style_button_, 0);
   lv_obj_add_style(dm_new_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_add_event_cb(dm_new_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(dm_new_btn_, onFocusableEvent, LV_EVENT_PRESSED, this);
-  lv_obj_add_event_cb(dm_new_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(dm_new_btn_, onDmEvent, LV_EVENT_PRESSED, this);
   lv_obj_add_event_cb(dm_new_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
 
   dm_new_label_ = lv_label_create(dm_new_btn_);
@@ -1827,8 +2043,7 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_flex_align(dm_panel_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
   lv_obj_set_style_pad_row(dm_panel_, 1, LV_PART_MAIN);
   lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_PRESSED, this);
-  lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(dm_panel_, onDmEvent, LV_EVENT_PRESSED, this);
   lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -1837,9 +2052,9 @@ void StandaloneUi::buildLayout() {
   lv_obj_align(dm_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
   lv_obj_add_style(dm_close_btn_, &style_button_, 0);
   lv_obj_add_style(dm_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_PRESSED, this);
-  lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(dm_close_btn_, onDmEvent, LV_EVENT_PRESSED, this);
   lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
 
   dm_close_label_ = lv_label_create(dm_close_btn_);
@@ -1865,11 +2080,13 @@ void StandaloneUi::buildLayout() {
   dm_active_name_[0] = '\0';
   dm_active_key_[0] = '\0';
 
+  const lv_coord_t help_dialog_w = clampCoord(main_w - dialogInsetW(10, 2), 210, dialogMaxW(300, 340));
+  const lv_coord_t help_dialog_h = clampCoord(main_h - 16, 150, 220);
+
   help_dialog_ = lv_obj_create(root_);
   lv_obj_add_style(help_dialog_, &style_panel_, 0);
-  lv_obj_set_size(help_dialog_, clampCoord(main_w - dialogInsetW(10, 2), 210, dialogMaxW(300, 340)),
-                  clampCoord(main_h - 16, 150, 220));
-  lv_obj_center(help_dialog_);
+  lv_obj_set_size(help_dialog_, help_dialog_w, help_dialog_h);
+  lv_obj_align(help_dialog_, LV_ALIGN_CENTER, 0, kModalVerticalNudgeY);
   lv_obj_add_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(help_dialog_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(help_dialog_, LV_OBJ_FLAG_CLICKABLE);
@@ -1885,17 +2102,43 @@ void StandaloneUi::buildLayout() {
   lv_label_set_text(help_title_label_, "Help");
   lv_obj_align(help_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
 
-  help_body_label_ = lv_label_create(help_dialog_);
+  const lv_coord_t help_body_y = 18;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  const lv_coord_t help_body_h = static_cast<lv_coord_t>(help_dialog_h - 44);
+#else
+  const lv_coord_t help_body_h = static_cast<lv_coord_t>(help_dialog_h - 24);
+#endif
+
+  help_body_panel_ = lv_obj_create(help_dialog_);
+  lv_obj_set_pos(help_body_panel_, 2, help_body_y);
+  lv_obj_set_size(help_body_panel_, static_cast<lv_coord_t>(help_dialog_w - 4), help_body_h);
+  lv_obj_set_style_bg_opa(help_body_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(help_body_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(help_body_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_scroll_dir(help_body_panel_, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(help_body_panel_, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_add_flag(help_body_panel_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(help_body_panel_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(help_body_panel_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(help_body_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+  help_body_label_ = lv_label_create(help_body_panel_);
   lv_obj_add_style(help_body_label_, &style_text_dim_, 0);
-  lv_obj_set_width(help_body_label_, LV_PCT(100));
+  lv_coord_t help_body_label_w = static_cast<lv_coord_t>(help_dialog_w - (kPagerWideDialogLayout ? 8 : 12));
+  if (help_body_label_w < 40) {
+    help_body_label_w = 40;
+  }
+  lv_obj_set_width(help_body_label_, help_body_label_w);
   lv_label_set_long_mode(help_body_label_, LV_LABEL_LONG_WRAP);
-#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  lv_obj_set_style_text_font(help_body_label_, compactUiFont(), 0);
+#elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
   if (!kPagerWideDialogLayout) {
     lv_obj_set_style_text_font(help_body_label_, &lv_font_montserrat_10, 0);
   }
 #endif
   lv_label_set_text(help_body_label_, kHelpBodyText);
-  lv_obj_align(help_body_label_, LV_ALIGN_TOP_LEFT, kPagerWideDialogLayout ? 1 : 4, 20);
+  lv_obj_align(help_body_label_, LV_ALIGN_TOP_LEFT, kPagerWideDialogLayout ? 1 : 4, 0);
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
   help_close_btn_ = lv_btn_create(help_dialog_);
@@ -1911,6 +2154,9 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_style(help_close_label_, &style_text_main_, 0);
   lv_label_set_text(help_close_label_, "CLOSE");
   lv_obj_center(help_close_label_);
+
+  // Keep the footer control fixed over the scrollable body panel.
+  lv_obj_move_foreground(help_close_btn_);
 #else
   help_close_btn_ = nullptr;
   help_close_label_ = nullptr;
@@ -1944,28 +2190,53 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_style(shortcut_strip_, &style_header_, 0);
   lv_obj_clear_flag(shortcut_strip_, LV_OBJ_FLAG_SCROLLABLE);
 
-  const lv_coord_t sc_side_pad = 2;
-  const lv_coord_t sc_gap = 3;
-  const lv_coord_t sc_btn_h = clampCoord(static_cast<lv_coord_t>(shortcut_h - 6), 12, shortcut_h);
-  const lv_coord_t sc_total_w = static_cast<lv_coord_t>(main_w - (sc_side_pad * 2));
+    const lv_coord_t sc_side_pad =
+  #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    0;
+  #else
+    2;
+  #endif
+    const lv_coord_t sc_gap =
+  #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    1;
+  #else
+    3;
+  #endif
+    const lv_coord_t sc_btn_h =
+  #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    shortcut_h;
+  #else
+    clampCoord(static_cast<lv_coord_t>(shortcut_h - 6), 12, shortcut_h);
+  #endif
+    lv_obj_update_layout(shortcut_strip_);
+    const lv_coord_t sc_content_w = lv_obj_get_content_width(shortcut_strip_);
+    const lv_coord_t sc_total_w =
+      static_cast<lv_coord_t>((sc_content_w > 0 ? sc_content_w : main_w) - (sc_side_pad * 2));
   const lv_coord_t sc_btn_w =
       static_cast<lv_coord_t>((sc_total_w - ((kShortcutCount - 1) * sc_gap)) / kShortcutCount);
   const lv_coord_t sc_row_w = static_cast<lv_coord_t>(sc_btn_w * kShortcutCount + ((kShortcutCount - 1) * sc_gap));
-  const lv_coord_t sc_start_x = static_cast<lv_coord_t>((main_w - sc_row_w) / 2);
+    const lv_coord_t sc_start_x = static_cast<lv_coord_t>((sc_total_w - sc_row_w) / 2 + sc_side_pad);
   for (uint8_t i = 0; i < kShortcutCount; i++) {
     shortcut_btns_[i] = lv_btn_create(shortcut_strip_);
     lv_obj_set_size(shortcut_btns_[i], sc_btn_w, sc_btn_h);
     lv_obj_align(shortcut_btns_[i], LV_ALIGN_LEFT_MID, sc_start_x + i * (sc_btn_w + sc_gap), 0);
     lv_obj_set_style_radius(shortcut_btns_[i], kShortcutButtonRadius, LV_PART_MAIN);
+  #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_obj_set_style_bg_opa(shortcut_btns_[i], LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(shortcut_btns_[i], 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(shortcut_btns_[i], 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(shortcut_btns_[i], 0, LV_PART_MAIN);
+  #else
     lv_obj_add_style(shortcut_btns_[i], &style_button_, 0);
     lv_obj_add_style(shortcut_btns_[i], &style_button_focused_, LV_STATE_FOCUSED);
+  #endif
     lv_obj_add_event_cb(shortcut_btns_[i], onFocusableEvent, LV_EVENT_KEY, this);
     lv_obj_add_event_cb(shortcut_btns_[i], onFocusableEvent, LV_EVENT_CLICKED, this);
     lv_obj_add_event_cb(shortcut_btns_[i], onFocusableEvent, LV_EVENT_FOCUSED, this);
 
     shortcut_labels_[i] = lv_label_create(shortcut_btns_[i]);
     lv_obj_add_style(shortcut_labels_[i], &style_text_dim_, 0);
-    lv_obj_set_style_text_font(shortcut_labels_[i], chatPanelFont(), 0);
+    lv_obj_set_style_text_font(shortcut_labels_[i], compactUiFont(), 0);
     lv_label_set_text(shortcut_labels_[i], kShortcutNames[i]);
     lv_obj_center(shortcut_labels_[i]);
   }
@@ -1987,7 +2258,7 @@ void StandaloneUi::bindInputGroup() {
   }
 
   lv_group_add_obj(key_group_, channel_selector_btn_);
-  for (uint8_t i = 0; i < configured_channel_count_; i++) {
+  for (uint8_t i = 0; i < kChannelCount; i++) {
     lv_group_add_obj(key_group_, channel_dropdown_rows_[i]);
   }
   lv_group_add_obj(key_group_, chat_panel_);
@@ -2000,7 +2271,7 @@ void StandaloneUi::bindInputGroup() {
   if (chat_new_btn_) {
     lv_group_add_obj(key_group_, chat_new_btn_);
   }
-  if (compose_input_) {
+  if (compose_input_ && !kUseOnscreenKeyboard) {
     lv_group_add_obj(key_group_, compose_input_);
   }
   for (uint8_t i = 0; i < kCfgRowCount; i++) {
@@ -2014,13 +2285,10 @@ void StandaloneUi::bindInputGroup() {
   for (uint8_t i = 0; i < kShortcutCount; i++) {
     lv_group_add_obj(key_group_, shortcut_btns_[i]);
   }
-  for (uint8_t i = 0; i < kMaxContactsUi; i++) {
-    if (contacts_node_rows_[i]) {
-      lv_group_add_obj(key_group_, contacts_node_rows_[i]);
+  for (uint8_t i = 0; i < kContactActionCount; i++) {
+    if (contacts_action_rows_[i]) {
+      lv_group_add_obj(key_group_, contacts_action_rows_[i]);
     }
-  }
-  if (contacts_close_btn_) {
-    lv_group_add_obj(key_group_, contacts_close_btn_);
   }
   if (dm_new_btn_) {
     lv_group_add_obj(key_group_, dm_new_btn_);
@@ -2033,6 +2301,9 @@ void StandaloneUi::bindInputGroup() {
   }
   if (help_dialog_) {
     lv_group_add_obj(key_group_, help_dialog_);
+  }
+  if (help_body_panel_) {
+    lv_group_add_obj(key_group_, help_body_panel_);
   }
   if (help_close_btn_) {
     lv_group_add_obj(key_group_, help_close_btn_);
@@ -2143,12 +2414,16 @@ void StandaloneUi::refreshComposeDialog() {
   }
   lv_label_set_text(compose_title_label_, title);
 
+  if (compose_send_label_) {
+    lv_label_set_text(compose_send_label_, identity_prompt_open_ ? "Save" : "Send");
+  }
+
   if (compose_hint_label_) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_label_set_text(compose_hint_label_, "");
     lv_obj_add_flag(compose_hint_label_, LV_OBJ_FLAG_HIDDEN);
 #else
-    if (kUseOnscreenKeyboard && compose_keyboard_) {
+    if (kUseOnscreenKeyboard) {
       lv_label_set_text(compose_hint_label_, identity_prompt_open_ ? "Tap OK to save name." : "Tap OK to send.");
     } else {
       lv_label_set_text(compose_hint_label_, identity_prompt_open_ ? "Press enter to commit identity name." : "");
@@ -2159,17 +2434,28 @@ void StandaloneUi::refreshComposeDialog() {
 
 void StandaloneUi::showComposeKeyboard() {
 #if defined(LV_USE_KEYBOARD) && LV_USE_KEYBOARD
-  if (!kUseOnscreenKeyboard || !compose_keyboard_ || !compose_input_) {
+  if (!kUseOnscreenKeyboard || !compose_input_ || !compose_dialog_) {
+    return;
+  }
+
+  CTS_TRACE("showComposeKeyboard begin");
+  if (!compose_keyboard_ || !lv_obj_is_valid(compose_keyboard_)) {
+    CTS_TRACE("showComposeKeyboard missing");
     return;
   }
 
   const lv_coord_t screen_h = lv_disp_get_ver_res(nullptr);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  lv_obj_set_width(compose_keyboard_, LV_PCT(100));
+  lv_obj_set_flex_grow(compose_keyboard_, 1);
+#else
   const lv_coord_t kb_h = clampCoord(static_cast<lv_coord_t>(screen_h / 2), 74, 118);
   lv_obj_set_size(compose_keyboard_, LV_PCT(100), kb_h);
   lv_obj_align(compose_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_keyboard_set_textarea(compose_keyboard_, compose_input_);
+#endif
   lv_obj_clear_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_move_foreground(compose_keyboard_);
+  lv_obj_add_flag(compose_keyboard_, LV_OBJ_FLAG_CLICKABLE);
+  CTS_TRACE("showComposeKeyboard done hidden=%d", lv_obj_has_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN) ? 1 : 0);
 #endif
 }
 
@@ -2178,8 +2464,10 @@ void StandaloneUi::hideComposeKeyboard() {
   if (!compose_keyboard_) {
     return;
   }
-  lv_obj_add_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN);
-  lv_keyboard_set_textarea(compose_keyboard_, nullptr);
+  if (lv_obj_is_valid(compose_keyboard_)) {
+    lv_obj_add_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(compose_keyboard_, LV_OBJ_FLAG_CLICKABLE);
+  }
 #endif
 }
 
@@ -2193,16 +2481,35 @@ void StandaloneUi::refreshSelectorVisuals() {
     return;
   }
 
-  const char* first_name = (configured_channel_count_ > 0) ? configured_channel_names_[0] : "-";
-  const char* active_name = (configured_channel_count_ > 0) ? configured_channel_names_[active_channel_] : "-";
-  const size_t first_name_len = strlen(first_name);
-  size_t selector_char_cap = first_name_len;
-  if (channel_dropdown_open_) {
-    selector_char_cap = 1;
-    for (uint8_t i = 0; i < configured_channel_count_; i++) {
-      const size_t display_len = channelDisplayLenForDropdown(configured_channel_names_[i]);
-      if (display_len > selector_char_cap) {
-        selector_char_cap = display_len;
+  const bool contacts_mode = contacts_open_;
+  const char* active_name = "-";
+  size_t selector_char_cap = 1;
+
+  if (contacts_mode) {
+    if (contacts_count_ > 0) {
+      const uint8_t selected = contacts_selected_index_ < contacts_count_ ? contacts_selected_index_ : 0;
+      active_name = contacts_cache_[selected].name;
+      selector_char_cap = channelDisplayLenForDropdown(active_name);
+      if (channel_dropdown_open_) {
+        selector_char_cap = 1;
+        for (uint8_t i = 0; i < contacts_count_; i++) {
+          const size_t display_len = channelDisplayLenForDropdown(contacts_cache_[i].name);
+          if (display_len > selector_char_cap) {
+            selector_char_cap = display_len;
+          }
+        }
+      }
+    }
+  } else {
+    active_name = (configured_channel_count_ > 0) ? configured_channel_names_[active_channel_] : "-";
+    selector_char_cap = channelDisplayLenForDropdown(active_name);
+    if (channel_dropdown_open_) {
+      selector_char_cap = 1;
+      for (uint8_t i = 0; i < configured_channel_count_; i++) {
+        const size_t display_len = channelDisplayLenForDropdown(configured_channel_names_[i]);
+        if (display_len > selector_char_cap) {
+          selector_char_cap = display_len;
+        }
       }
     }
   }
@@ -2212,14 +2519,30 @@ void StandaloneUi::refreshSelectorVisuals() {
   lv_label_set_text(channel_selector_label_, selector_text);
   lv_label_set_text(channel_selector_caret_, "");
 
-  const size_t name_len = selector_char_cap;
-  const lv_coord_t selector_w =
-      clampCoord(static_cast<lv_coord_t>(name_len * 7 + 16), kSelectorMinW, kSelectorMaxW);
+  lv_coord_t selector_max_w = kSelectorMaxW;
+  if (contacts_mode && header_bar_) {
+    const lv_coord_t header_w = lv_obj_get_width(header_bar_);
+    const lv_coord_t contacts_cap_w = static_cast<lv_coord_t>((header_w * 3) / 4);
+    if (contacts_cap_w > kSelectorMinW) {
+      selector_max_w = contacts_cap_w;
+    }
+  }
+
+  const size_t max_chars_for_width =
+      selector_max_w > 16 ? static_cast<size_t>((selector_max_w - 16) / 7) : static_cast<size_t>(1);
+  if (selector_char_cap > max_chars_for_width) {
+    selector_char_cap = max_chars_for_width;
+    formatChannelLabelForSelector(active_name, selector_char_cap, selector_text, sizeof(selector_text));
+    lv_label_set_text(channel_selector_label_, selector_text);
+  }
+
+  const lv_coord_t selector_w = clampCoord(static_cast<lv_coord_t>(selector_char_cap * 7 + 18),
+                                           kSelectorMinW, selector_max_w);
   const lv_coord_t dropdown_min_w =
       static_cast<lv_coord_t>((kDropdownNameMaxChars + 3) * 7 + 16);
   lv_obj_set_width(channel_selector_btn_, selector_w);
   lv_obj_align(channel_selector_btn_, LV_ALIGN_LEFT_MID, 2, 0);
-  lv_obj_set_width(channel_dropdown_panel_, clampCoord(dropdown_min_w, selector_w, kSelectorMaxW) + 12);
+  lv_obj_set_width(channel_dropdown_panel_, clampCoord(dropdown_min_w, selector_w, selector_max_w) + 12);
 
   bool has_unread_channel = false;
   for (uint8_t i = 0; i < configured_channel_count_; i++) {
@@ -2233,7 +2556,7 @@ void StandaloneUi::refreshSelectorVisuals() {
   lv_obj_remove_style(channel_selector_btn_, &style_unread_edge_, 0);
   if (channel_dropdown_open_) {
     lv_obj_add_style(channel_selector_btn_, &style_button_active_, 0);
-  } else if (has_unread_channel) {
+  } else if (!contacts_mode && has_unread_channel) {
     lv_obj_add_style(channel_selector_btn_, &style_unread_edge_, 0);
   }
 }
@@ -2243,11 +2566,13 @@ void StandaloneUi::refreshDropdownVisuals() {
     return;
   }
 
+  const bool contacts_mode = contacts_open_;
+  const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
+  const uint8_t option_count = contacts_mode ? contacts_option_count : configured_channel_count_;
   const uint8_t visible_rows =
-      configured_channel_count_ == 0 ? 1
-                                     : (configured_channel_count_ > kDropdownVisibleRows ? kDropdownVisibleRows
-                                                                                           : configured_channel_count_);
-  const bool needs_scroll = configured_channel_count_ > kDropdownVisibleRows;
+      option_count == 0 ? 1
+                        : (option_count > kDropdownVisibleRows ? kDropdownVisibleRows : option_count);
+  const bool needs_scroll = option_count > kDropdownVisibleRows;
   const lv_coord_t panel_pad_top = lv_obj_get_style_pad_top(channel_dropdown_panel_, LV_PART_MAIN);
   const lv_coord_t panel_pad_bottom = lv_obj_get_style_pad_bottom(channel_dropdown_panel_, LV_PART_MAIN);
   const lv_coord_t panel_border = lv_obj_get_style_border_width(channel_dropdown_panel_, LV_PART_MAIN);
@@ -2280,7 +2605,7 @@ void StandaloneUi::refreshDropdownVisuals() {
   }
 
   for (uint8_t i = 0; i < kChannelCount; i++) {
-    if (i >= configured_channel_count_) {
+    if (i >= option_count) {
       lv_obj_add_flag(channel_dropdown_rows_[i], LV_OBJ_FLAG_HIDDEN);
       continue;
     }
@@ -2288,19 +2613,31 @@ void StandaloneUi::refreshDropdownVisuals() {
     lv_obj_clear_flag(channel_dropdown_rows_[i], LV_OBJ_FLAG_HIDDEN);
 
     char display_name[48] = {};
-    formatChannelLabelForDropdown(configured_channel_names_[i], display_name, sizeof(display_name));
-
     char row_text[48];
-    snprintf(row_text, sizeof(row_text), "%s%s", display_name, unread_channels_[i] ? " !" : "");
+    if (contacts_mode) {
+      const mesh::MeshContactSummary& contact = contacts_cache_[i];
+      formatChannelLabelForDropdown(contact.name, display_name, sizeof(display_name));
+      const bool unread_contact =
+          has_unread_dm_ &&
+          ((last_dm_sender_key_[0] != '\0' && contact.public_key_hex[0] != '\0' &&
+            strcmp(last_dm_sender_key_, contact.public_key_hex) == 0) ||
+           dmNameLikelyMatch(last_dm_sender_name_, contact.name));
+      snprintf(row_text, sizeof(row_text), "%s%s%s", contact.favorite ? "* " : "", display_name,
+               unread_contact ? " !" : "");
+    } else {
+      formatChannelLabelForDropdown(configured_channel_names_[i], display_name, sizeof(display_name));
+      snprintf(row_text, sizeof(row_text), "%s%s", display_name, unread_channels_[i] ? " !" : "");
+    }
     lv_label_set_text(channel_dropdown_labels_[i], row_text);
 
     lv_obj_remove_style(channel_dropdown_rows_[i], &style_dropdown_active_, 0);
     lv_obj_remove_style(channel_dropdown_rows_[i], &style_dropdown_highlight_, 0);
 
-    if (i == active_channel_) {
+    const bool active_row = contacts_mode ? (i == contacts_selected_index_) : (i == active_channel_);
+    if (active_row) {
       lv_obj_add_style(channel_dropdown_rows_[i], &style_dropdown_active_, 0);
     }
-    if (channel_dropdown_open_ && unread_channels_[i]) {
+    if (!contacts_mode && channel_dropdown_open_ && unread_channels_[i]) {
       lv_obj_add_style(channel_dropdown_rows_[i], &style_dropdown_highlight_, 0);
     }
     if (channel_dropdown_open_ && i == dropdown_highlight_channel_) {
@@ -2317,13 +2654,21 @@ void StandaloneUi::refreshDropdownVisuals() {
 }
 
 void StandaloneUi::openChannelDropdown() {
-  if (channel_dropdown_open_ || configured_channel_count_ == 0) {
+  const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
+  const uint8_t option_count = contacts_open_ ? contacts_option_count : configured_channel_count_;
+  if (channel_dropdown_open_ || option_count == 0) {
     return;
   }
 
   channel_dropdown_open_ = true;
   last_dropdown_open_ms_ = millis();
-  dropdown_highlight_channel_ = selected_channel_;
+  if (contacts_open_) {
+    dropdown_highlight_channel_ =
+        contacts_selected_index_ < option_count ? contacts_selected_index_ : static_cast<uint8_t>(option_count - 1);
+  } else {
+    dropdown_highlight_channel_ =
+        selected_channel_ < option_count ? selected_channel_ : static_cast<uint8_t>(option_count - 1);
+  }
   refreshDropdownVisuals();
   refreshChannelVisuals();
   focusCurrentZoneObject();
@@ -2336,20 +2681,22 @@ void StandaloneUi::closeChannelDropdown(bool keep_highlight) {
 
   channel_dropdown_open_ = false;
   if (!keep_highlight) {
-    dropdown_highlight_channel_ = selected_channel_;
+    dropdown_highlight_channel_ = contacts_open_ ? contacts_selected_index_ : selected_channel_;
   }
   refreshChannelVisuals();
 }
 
 void StandaloneUi::moveDropdownHighlight(int delta) {
-  if (configured_channel_count_ == 0) {
+  const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
+  const uint8_t option_count = contacts_open_ ? contacts_option_count : configured_channel_count_;
+  if (option_count == 0) {
     return;
   }
 
   int next = static_cast<int>(dropdown_highlight_channel_) + delta;
   if (next < 0) {
-    next = configured_channel_count_ - 1;
-  } else if (next >= configured_channel_count_) {
+    next = option_count - 1;
+  } else if (next >= option_count) {
     next = 0;
   }
 
@@ -2358,8 +2705,12 @@ void StandaloneUi::moveDropdownHighlight(int delta) {
 }
 
 void StandaloneUi::openComposeDialog() {
+  CTS_TRACE("openComposeDialog enter open=%d dm_mode=%d return_dm=%d", compose_open_ ? 1 : 0,
+            compose_dm_mode_ ? 1 : 0, compose_return_to_dm_ ? 1 : 0);
   if (compose_open_ || !compose_dialog_ || !compose_input_ ||
       (!compose_dm_mode_ && (configured_channel_count_ == 0 || active_channel_ >= configured_channel_count_))) {
+    CTS_TRACE("openComposeDialog blocked dialog=%p input=%p", static_cast<void*>(compose_dialog_),
+              static_cast<void*>(compose_input_));
     return;
   }
 
@@ -2369,15 +2720,15 @@ void StandaloneUi::openComposeDialog() {
   }
 
   // Restore regular multi-line compose geometry when not in first-install prompt mode.
-  if (kUseOnscreenKeyboard && compose_keyboard_) {
+  if (kUseOnscreenKeyboard) {
+    const lv_coord_t screen_w = lv_disp_get_hor_res(nullptr);
     const lv_coord_t screen_h = lv_disp_get_ver_res(nullptr);
-    const lv_coord_t kb_h = clampCoord(static_cast<lv_coord_t>(screen_h / 2), 74, 118);
-    const lv_coord_t compose_h = clampCoord(static_cast<lv_coord_t>(screen_h - kb_h - 8), 56, kComposeDialogH);
-    lv_obj_set_size(compose_dialog_, lv_obj_get_width(compose_dialog_), compose_h);
-    lv_obj_align(compose_dialog_, LV_ALIGN_TOP_MID, 0, 2);
-    lv_obj_set_size(compose_input_, LV_PCT(98), clampCoord(static_cast<lv_coord_t>(compose_h - 20), 28, 50));
-    lv_obj_align(compose_input_, LV_ALIGN_BOTTOM_MID, 0, -4);
-    lv_textarea_set_one_line(compose_input_, false);
+    lv_obj_set_size(compose_dialog_, clampCoord(static_cast<lv_coord_t>(screen_w - 8), 180, screen_w),
+                    clampCoord(static_cast<lv_coord_t>(screen_h - 8), 120, screen_h));
+    lv_obj_align(compose_dialog_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_width(compose_input_, LV_PCT(100));
+    lv_obj_set_height(compose_input_, 38);
+    lv_textarea_set_one_line(compose_input_, true);
   } else {
     lv_obj_set_size(compose_dialog_, lv_obj_get_width(compose_dialog_), kComposeDialogH);
     lv_obj_set_size(compose_input_, LV_PCT(composeInputWidthPct()), kComposeInputH);
@@ -2392,12 +2743,32 @@ void StandaloneUi::openComposeDialog() {
   refreshComposeDialog();
 
   compose_open_ = true;
-  lv_obj_clear_flag(compose_dialog_, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_move_foreground(compose_dialog_);
-  showComposeKeyboard();
-  if (key_group_) {
-    lv_group_focus_obj(compose_input_);
+  compose_opened_ms_ = millis();
+  if (dm_open_) {
+    if (dm_dialog_) {
+      lv_obj_clear_flag(dm_dialog_, LV_OBJ_FLAG_CLICKABLE);
+      if (compose_return_to_dm_ && !kUseOnscreenKeyboard) {
+        lv_obj_add_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN);
+      }
+    }
+    if (dm_panel_) {
+      lv_obj_clear_flag(dm_panel_, LV_OBJ_FLAG_CLICKABLE);
+    }
+    if (dm_close_btn_) {
+      lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
+    if (dm_new_btn_) {
+      lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
   }
+  lv_obj_clear_flag(compose_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(compose_dialog_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_move_foreground(compose_dialog_);
+  if (!pending_compose_post_open_) {
+    pending_compose_post_open_ = true;
+    lv_async_call(onComposePostOpenAsync, this);
+  }
+  CTS_TRACE("openComposeDialog done dm_mode=%d", compose_dm_mode_ ? 1 : 0);
 }
 
 void StandaloneUi::openIdentityNamePrompt() {
@@ -2411,15 +2782,14 @@ void StandaloneUi::openIdentityNamePrompt() {
   compose_target_dm_pubkey_[0] = '\0';
 
   // Single-line first-install prompt with compact dialog height.
-  if (kUseOnscreenKeyboard && compose_keyboard_) {
+  if (kUseOnscreenKeyboard) {
+    const lv_coord_t screen_w = lv_disp_get_hor_res(nullptr);
     const lv_coord_t screen_h = lv_disp_get_ver_res(nullptr);
-    const lv_coord_t kb_h = clampCoord(static_cast<lv_coord_t>(screen_h / 2), 74, 118);
-    const lv_coord_t compose_h = clampCoord(static_cast<lv_coord_t>(screen_h - kb_h - 8), 52,
-                                            kComposeDialogSingleLineH);
-    lv_obj_set_size(compose_dialog_, lv_obj_get_width(compose_dialog_), compose_h);
-    lv_obj_align(compose_dialog_, LV_ALIGN_TOP_MID, 0, 2);
-    lv_obj_set_size(compose_input_, LV_PCT(98), clampCoord(static_cast<lv_coord_t>(compose_h - 20), 24, 34));
-    lv_obj_align(compose_input_, LV_ALIGN_BOTTOM_MID, 0, -4);
+    lv_obj_set_size(compose_dialog_, clampCoord(static_cast<lv_coord_t>(screen_w - 8), 180, screen_w),
+                    clampCoord(static_cast<lv_coord_t>(screen_h - 8), 120, screen_h));
+    lv_obj_align(compose_dialog_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_width(compose_input_, LV_PCT(100));
+    lv_obj_set_height(compose_input_, 38);
   } else {
     lv_obj_set_size(compose_dialog_, lv_obj_get_width(compose_dialog_), kComposeDialogSingleLineH);
     lv_obj_set_size(compose_input_, LV_PCT(composeInputWidthPct()), kComposeInputSingleLineH);
@@ -2434,11 +2804,32 @@ void StandaloneUi::openIdentityNamePrompt() {
   refreshComposeDialog();
 
   compose_open_ = true;
+  compose_opened_ms_ = millis();
+  if (dm_open_) {
+    if (dm_dialog_) {
+      lv_obj_clear_flag(dm_dialog_, LV_OBJ_FLAG_CLICKABLE);
+      if (compose_return_to_dm_ && !kUseOnscreenKeyboard) {
+        lv_obj_add_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN);
+      }
+    }
+    if (dm_panel_) {
+      lv_obj_clear_flag(dm_panel_, LV_OBJ_FLAG_CLICKABLE);
+    }
+    if (dm_close_btn_) {
+      lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
+    if (dm_new_btn_) {
+      lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
+  }
   lv_obj_clear_flag(compose_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(compose_dialog_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(compose_input_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(compose_input_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_move_foreground(compose_dialog_);
-  showComposeKeyboard();
-  if (key_group_) {
-    lv_group_focus_obj(compose_input_);
+  if (!pending_compose_post_open_) {
+    pending_compose_post_open_ = true;
+    lv_async_call(onComposePostOpenAsync, this);
   }
 }
 
@@ -2480,15 +2871,43 @@ void StandaloneUi::closeComposeDialog(bool restore_chat_focus) {
   }
 
   compose_open_ = false;
+  compose_opened_ms_ = 0;
+  pending_compose_post_open_ = false;
   lv_obj_add_flag(compose_dialog_, LV_OBJ_FLAG_HIDDEN);
   hideComposeKeyboard();
+  if (dm_open_) {
+    if (dm_dialog_) {
+      if (compose_return_to_dm_) {
+        lv_obj_clear_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN);
+      }
+      lv_obj_add_flag(dm_dialog_, LV_OBJ_FLAG_CLICKABLE);
+    }
+    if (dm_panel_) {
+      lv_obj_add_flag(dm_panel_, LV_OBJ_FLAG_CLICKABLE);
+    }
+    if (dm_close_btn_) {
+      lv_obj_add_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
+    if (dm_new_btn_) {
+      lv_obj_add_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
+  }
   lv_textarea_set_text(compose_input_, "");
   compose_dm_mode_ = false;
   compose_target_dm_pubkey_[0] = '\0';
+  resetPointerInputState();
 
   if (restore_chat_focus && compose_return_to_dm_ && dm_open_ && dm_panel_) {
     compose_return_to_dm_ = false;
     lv_obj_move_foreground(dm_dialog_);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (dm_close_btn_) {
+      lv_obj_move_foreground(dm_close_btn_);
+    }
+    if (dm_new_btn_) {
+      lv_obj_move_foreground(dm_new_btn_);
+    }
+#endif
     lv_group_focus_obj(dm_panel_);
     return;
   }
@@ -2523,6 +2942,152 @@ void StandaloneUi::onComposeKeyboardEvent(lv_event_t* event) {
   if (code == LV_EVENT_CANCEL) {
     ui->closeComposeDialog(true);
   }
+}
+
+void StandaloneUi::onComposeActionEvent(lv_event_t* event) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(event));
+  if (!ui || lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    return;
+  }
+
+  lv_obj_t* target = lv_event_get_target(event);
+  if (target == ui->compose_cancel_btn_) {
+    ui->closeComposeDialog(true);
+    return;
+  }
+
+  if (target != ui->compose_send_btn_) {
+    return;
+  }
+
+  if (ui->identity_prompt_open_) {
+    if (ui->applyIdentityNameFromPrompt()) {
+      ui->identity_prompt_open_ = false;
+      ui->closeComposeDialog(true);
+    }
+    return;
+  }
+
+  if (ui->sendComposeMessage()) {
+    ui->closeComposeDialog(true);
+  }
+}
+
+void StandaloneUi::onOpenContactsDialogAsync(void* user_data) {
+  auto* ui = static_cast<StandaloneUi*>(user_data);
+  if (!ui) {
+    return;
+  }
+
+  ui->pending_contacts_open_ = false;
+  CTS_TRACE("openContactsDialog async begin");
+  if (ui->openContactsDialog()) {
+    CTS_TRACE("openContactsDialog async done");
+    return;
+  }
+
+  ui->appendChatLine("[INFO] Contacts panel unavailable; listing heard nodes:", ChatLineKind::Normal);
+  if (!ui->mesh_adapter_) {
+    ui->appendChatLine("[INFO] Mesh adapter unavailable", ChatLineKind::Error);
+    return;
+  }
+
+  mesh::MeshContactSummary contacts[8]{};
+  const int count = ui->mesh_adapter_->exportContacts(contacts, 8);
+  if (count <= 0) {
+    ui->appendChatLine("[INFO] No heard nodes yet", ChatLineKind::Normal);
+    return;
+  }
+
+  for (int i = 1; i < count; i++) {
+    mesh::MeshContactSummary key = contacts[i];
+    int j = i - 1;
+    while (j >= 0 && contactSortBefore(key, contacts[j])) {
+      contacts[j + 1] = contacts[j];
+      j--;
+    }
+    contacts[j + 1] = key;
+  }
+
+  char line[96] = {};
+  for (int i = 0; i < count; i++) {
+    snprintf(line, sizeof(line), "[CT] %s%s", contacts[i].favorite ? "* " : "", contacts[i].name);
+    ui->appendChatLine(line, ChatLineKind::Normal);
+  }
+}
+
+void StandaloneUi::onContactsPostOpenAsync(void* user_data) {
+  auto* ui = static_cast<StandaloneUi*>(user_data);
+  if (!ui) {
+    return;
+  }
+
+  ui->pending_contacts_post_open_ = false;
+  if (!ui->contacts_open_ || !ui->contacts_dialog_) {
+    CTS_TRACE("openContactsDialog post skip open=%d dialog=%p", ui->contacts_open_ ? 1 : 0,
+              static_cast<void*>(ui->contacts_dialog_));
+    return;
+  }
+
+  CTS_TRACE("openContactsDialog post activate begin");
+  lv_obj_add_flag(ui->contacts_dialog_, LV_OBJ_FLAG_CLICKABLE);
+  if (ui->contacts_detail_panel_) {
+    lv_obj_add_flag(ui->contacts_detail_panel_, LV_OBJ_FLAG_CLICKABLE);
+  }
+  if (ui->contacts_detail_info_panel_) {
+    lv_obj_add_flag(ui->contacts_detail_info_panel_, LV_OBJ_FLAG_CLICKABLE);
+  }
+  if (ui->contacts_dm_panel_) {
+    lv_obj_add_flag(ui->contacts_dm_panel_, LV_OBJ_FLAG_CLICKABLE);
+  }
+  if (ui->contacts_dm_new_btn_) {
+    lv_obj_add_flag(ui->contacts_dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
+  }
+  for (uint8_t i = 0; i < kContactActionCount; i++) {
+    if (ui->contacts_action_rows_[i]) {
+      lv_obj_add_flag(ui->contacts_action_rows_[i], LV_OBJ_FLAG_CLICKABLE);
+    }
+  }
+  resetPointerInputState();
+  CTS_TRACE("openContactsDialog post activate done");
+}
+
+void StandaloneUi::onOpenComposeDialogAsync(void* user_data) {
+  auto* ui = static_cast<StandaloneUi*>(user_data);
+  if (!ui) {
+    return;
+  }
+  ui->openComposeDialog();
+}
+
+void StandaloneUi::onComposePostOpenAsync(void* user_data) {
+  auto* ui = static_cast<StandaloneUi*>(user_data);
+  if (!ui) {
+    return;
+  }
+  ui->pending_compose_post_open_ = false;
+  if (!ui->compose_open_ || !ui->compose_dialog_ || !ui->compose_input_) {
+    CTS_TRACE("openComposeDialog post skip open=%d dialog=%p input=%p", ui->compose_open_ ? 1 : 0,
+              static_cast<void*>(ui->compose_dialog_), static_cast<void*>(ui->compose_input_));
+    return;
+  }
+  CTS_TRACE("openComposeDialog post show_kb begin dm_mode=%d", ui->compose_dm_mode_ ? 1 : 0);
+  ui->showComposeKeyboard();
+  CTS_TRACE("openComposeDialog post show_kb done");
+  if (kUseOnscreenKeyboard) {
+    CTS_TRACE("openComposeDialog post reset_ptr begin");
+    resetPointerInputState();
+    CTS_TRACE("openComposeDialog post reset_ptr done");
+    CTS_TRACE("openComposeDialog post layout begin");
+    lv_obj_update_layout(ui->compose_dialog_);
+    CTS_TRACE("openComposeDialog post layout done");
+  }
+  if (!kUseOnscreenKeyboard && ui->key_group_) {
+    CTS_TRACE("openComposeDialog post focus begin");
+    lv_group_focus_obj(ui->compose_input_);
+    CTS_TRACE("openComposeDialog post focus done");
+  }
+  CTS_TRACE("openComposeDialog post dm_mode=%d", ui->compose_dm_mode_ ? 1 : 0);
 }
 
 bool StandaloneUi::sendComposeMessage() {
@@ -2561,9 +3126,7 @@ bool StandaloneUi::sendComposeMessage() {
     sent_any = true;
 
     char display_text[96] = {};
-    if (compose_dm_mode_) {
-      snprintf(display_text, sizeof(display_text), "DM->%s: %s", compose_target_channel_, send_text);
-    } else {
+    if (!compose_dm_mode_) {
       char hhmm[8] = {};
       formatUiClockHhMm(hhmm, sizeof(hhmm));
       snprintf(display_text, sizeof(display_text), "[%s] Me: %s", hhmm, send_text);
@@ -2581,14 +3144,13 @@ bool StandaloneUi::sendComposeMessage() {
     if (!compose_dm_mode_ && strcmp(compose_target_channel_, configured_channel_names_[active_channel_]) == 0) {
       appendChatLine(display_text, ChatLineKind::Tx);
     } else if (compose_dm_mode_) {
-      if (!compose_return_to_dm_) {
-        appendChatLine(display_text, ChatLineKind::Tx);
-      }
       char hhmm[8] = {};
       formatUiClockHhMm(hhmm, sizeof(hhmm));
       char dm_line[96] = {};
       snprintf(dm_line, sizeof(dm_line), "[%s] Me: %s", hhmm, send_text);
-      appendDmLine(dm_active_name_, dm_active_key_, dm_line, ChatLineKind::Tx);
+      const char* dm_contact_name = compose_target_channel_[0] != '\0' ? compose_target_channel_ : dm_active_name_;
+      const char* dm_contact_key = compose_target_dm_pubkey_[0] != '\0' ? compose_target_dm_pubkey_ : dm_active_key_;
+      appendDmLine(dm_contact_name, dm_contact_key, dm_line, ChatLineKind::Tx);
     }
   };
 
@@ -2676,8 +3238,9 @@ bool StandaloneUi::handleComposeKey(uint32_t key) {
 }
 
 void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
-  if (!contacts_dialog_ || !contacts_status_label_ || !contacts_full_name_label_ || !contacts_lat_lon_label_ ||
-      !contacts_last_heard_label_ || !contacts_telemetry_label_) {
+  if (!contacts_dialog_ || !contacts_status_label_ || !contacts_detail_info_panel_ || !contacts_full_name_label_ ||
+      !contacts_lat_lon_label_ || !contacts_last_heard_label_ || !contacts_telemetry_label_ ||
+      !contacts_dm_panel_ || !contacts_dm_new_btn_) {
     return;
   }
   for (uint8_t i = 0; i < kContactActionCount; i++) {
@@ -2704,9 +3267,6 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
       memset(contacts_cache_, 0, sizeof(contacts_cache_));
       const int exported = mesh_adapter_->exportContacts(contacts_cache_, kMaxContactsUi);
       contacts_count_ = exported > 0 ? static_cast<uint8_t>(exported) : static_cast<uint8_t>(0);
-      if (contacts_row_capacity_ < contacts_count_) {
-        contacts_count_ = contacts_row_capacity_;
-      }
 
       for (uint8_t i = 1; i < contacts_count_; i++) {
         mesh::MeshContactSummary key = contacts_cache_[i];
@@ -2731,65 +3291,32 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
   }
 
   if (contacts_count_ == 0) {
+    contacts_dm_open_ = false;
     contacts_selected_index_ = 0;
   } else if (contacts_selected_index_ >= contacts_count_) {
     contacts_selected_index_ = static_cast<uint8_t>(contacts_count_ - 1);
   }
-
-  lv_coord_t nodes_w = contacts_nodes_panel_ ? lv_obj_get_content_width(contacts_nodes_panel_) : 0;
-  if (nodes_w <= 0 && contacts_nodes_panel_) {
-    nodes_w = lv_obj_get_width(contacts_nodes_panel_);
-  }
-  if (nodes_w <= 0 && contacts_dialog_) {
-    nodes_w = static_cast<lv_coord_t>((lv_obj_get_width(contacts_dialog_) * contactsLeftPanePercent()) / 100);
-  }
-  const lv_coord_t row_w = nodes_w > 4 ? static_cast<lv_coord_t>(nodes_w - 2) : nodes_w;
-
-  for (uint8_t i = 0; i < kMaxContactsUi; i++) {
-    if (!contacts_node_rows_[i] || !contacts_node_labels_[i]) {
-      continue;
-    }
-
-    lv_obj_set_size(contacts_node_rows_[i], row_w > 0 ? row_w : lv_obj_get_width(contacts_node_rows_[i]), 20);
-    lv_obj_set_pos(contacts_node_rows_[i], 0, static_cast<lv_coord_t>(i * 20));
-
-    if (i >= contacts_count_) {
-      lv_obj_add_flag(contacts_node_rows_[i], LV_OBJ_FLAG_HIDDEN);
-      continue;
-    }
-
-    lv_obj_clear_flag(contacts_node_rows_[i], LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_style(contacts_node_rows_[i], &style_button_active_, 0);
-    if (i == contacts_selected_index_) {
-      lv_obj_add_style(contacts_node_rows_[i], &style_button_active_, 0);
-      lv_obj_set_style_bg_color(contacts_node_rows_[i], lv_color_hex(0x1E9ED1), LV_PART_MAIN);
-      lv_obj_set_style_border_color(contacts_node_rows_[i], lv_color_hex(0x8DEBFF), LV_PART_MAIN);
-      lv_obj_set_style_text_color(contacts_node_rows_[i], lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-      lv_obj_set_style_text_color(contacts_node_labels_[i], lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-      lv_obj_scroll_to_view(contacts_node_rows_[i], LV_ANIM_OFF);
-    } else {
-      lv_obj_set_style_bg_color(contacts_node_rows_[i], lv_color_hex(0x14344B), LV_PART_MAIN);
-      lv_obj_set_style_border_color(contacts_node_rows_[i], lv_color_hex(0x3F7292), LV_PART_MAIN);
-      lv_obj_set_style_text_color(contacts_node_rows_[i], lv_color_hex(0xD8E7F2), LV_PART_MAIN);
-      lv_obj_set_style_text_color(contacts_node_labels_[i], lv_color_hex(0xD8E7F2), LV_PART_MAIN);
-    }
-
-    char row_text[48] = {};
-    snprintf(row_text, sizeof(row_text), "%s%s", contacts_cache_[i].favorite ? "* " : "", contacts_cache_[i].name);
-    lv_label_set_text(contacts_node_labels_[i], row_text);
-    lv_obj_invalidate(contacts_node_rows_[i]);
-  }
-
-  lv_obj_invalidate(contacts_nodes_panel_);
 
   if (contacts_count_ == 0) {
     lv_label_set_text(contacts_full_name_label_, "Node: -");
     lv_label_set_text(contacts_lat_lon_label_, "Lat/Lon: -");
     lv_label_set_text(contacts_last_heard_label_, "Last: -");
     lv_label_set_text(contacts_telemetry_label_, "Telemetry: -");
-    lv_label_set_text(contacts_action_labels_[0], "Add Favorite");
+    lv_label_set_text(contacts_action_labels_[0], addFavoriteActionLabel());
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_label_set_text(contacts_action_labels_[1], "DM");
-    lv_label_set_text(contacts_status_label_, "No heard nodes yet\nD - Open currently selected contact DMs");
+  #else
+    lv_label_set_text(contacts_action_labels_[1], "(D)M");
+  #endif
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text(contacts_action_labels_[2], "CLOSE");
+#endif
+    lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(contacts_status_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(contacts_status_label_, "No heard nodes yet");
+    refreshChannelVisuals();
     return;
   }
 
@@ -2813,16 +3340,21 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
   formatContactTelemetry(selected, detail, sizeof(detail));
   lv_label_set_text(contacts_telemetry_label_, detail);
 
-  lv_label_set_text(contacts_action_labels_[0], selected.favorite ? "Remove Favorite" : "Add Favorite");
+  lv_label_set_text(contacts_action_labels_[0], favoriteActionLabel(selected.favorite));
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
   lv_label_set_text(contacts_action_labels_[1], "DM");
+#else
+  lv_label_set_text(contacts_action_labels_[1], "(D)M");
+#endif
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  lv_label_set_text(contacts_action_labels_[2], "CLOSE");
+#endif
   for (uint8_t i = 0; i < kContactActionCount; i++) {
     if (!contacts_action_rows_[i] || !contacts_action_labels_[i]) {
       continue;
     }
 
-    lv_obj_remove_style(contacts_action_rows_[i], &style_button_active_, 0);
-    if (contacts_actions_focused_ && i == contacts_action_index_) {
-      lv_obj_add_style(contacts_action_rows_[i], &style_button_active_, 0);
+    if (!contacts_nav_focused_ && !contacts_dm_open_ && i == contacts_action_index_) {
       lv_obj_set_style_bg_color(contacts_action_rows_[i], lv_color_hex(0x1E9ED1), LV_PART_MAIN);
       lv_obj_set_style_border_color(contacts_action_rows_[i], lv_color_hex(0x8DEBFF), LV_PART_MAIN);
       lv_obj_set_style_text_color(contacts_action_rows_[i], lv_color_hex(0xFFFFFF), LV_PART_MAIN);
@@ -2835,45 +3367,205 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     }
     lv_obj_invalidate(contacts_action_rows_[i]);
   }
-  if (contacts_status_text_[0] != '\0') {
-    char status_line[160] = {};
-    snprintf(status_line, sizeof(status_line), "%s\nD - Open currently selected contact DMs", contacts_status_text_);
-    lv_label_set_text(contacts_status_label_, status_line);
+
+  const lv_coord_t dialog_h = lv_obj_get_height(contacts_dialog_);
+  const lv_coord_t dm_panel_collapsed_h = dialog_h > 66 ? static_cast<lv_coord_t>(dialog_h - 66) : 24;
+
+  if (contacts_dm_open_) {
+    lv_obj_add_flag(contacts_status_label_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_detail_panel_) {
+      lv_obj_add_flag(contacts_detail_panel_, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(contacts_dm_panel_, 0, 0);
+    lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), LV_PCT(100));
+    lv_obj_clear_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(contacts_dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
+    lv_obj_move_foreground(contacts_dm_new_btn_);
+    lv_obj_add_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
+    rebuildContactsDmPanel();
   } else {
-    lv_label_set_text(contacts_status_label_, "D - Open currently selected contact DMs");
+    lv_obj_add_flag(contacts_status_label_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_detail_panel_) {
+      lv_obj_clear_flag(contacts_detail_panel_, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_add_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(contacts_dm_panel_, 0, 42);
+    lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), dm_panel_collapsed_h);
+    lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
   }
+
+  char status_line[160] = {};
+  if (contacts_dm_open_) {
+    status_line[0] = '\0';
+  } else if (contacts_status_text_[0] != '\0') {
+    snprintf(status_line, sizeof(status_line), "%s", contacts_status_text_);
+  } else {
+    status_line[0] = '\0';
+  }
+  lv_label_set_text(contacts_status_label_, status_line);
+  refreshChannelVisuals();
+}
+
+void StandaloneUi::rebuildContactsDmPanel() {
+  if (!contacts_dm_panel_) {
+    return;
+  }
+
+  lv_obj_clean(contacts_dm_panel_);
+
+  if (!contacts_dm_open_ || contacts_count_ == 0 || contacts_selected_index_ >= contacts_count_) {
+    return;
+  }
+
+  const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+  const char* selected_name = selected.name;
+  const char* selected_key = selected.public_key_hex;
+  const lv_coord_t row_w = lv_obj_get_content_width(contacts_dm_panel_);
+
+  size_t recent_indices[kDmDialogRecentLimit] = {};
+  size_t recent_count = 0;
+  for (size_t i = 0; i < stored_dm_count_ && recent_count < kDmDialogRecentLimit; i++) {
+    const size_t rev = stored_dm_count_ - 1 - i;
+    const size_t idx = (stored_dm_head_ + rev) % kMaxStoredChatRows;
+    const StoredDmLine& line = stored_dm_[idx];
+    if (line.contact_name[0] == '\0' || line.text[0] == '\0') {
+      continue;
+    }
+
+    const bool selected_has_key = selected_key && selected_key[0] != '\0';
+    const bool line_has_key = line.contact_key[0] != '\0';
+    const bool key_match = selected_has_key && line_has_key && strcmp(selected_key, line.contact_key) == 0;
+    const bool name_match = dmNameLikelyMatch(selected_name, line.contact_name);
+    if (!key_match && !name_match) {
+      continue;
+    }
+
+    recent_indices[recent_count++] = idx;
+  }
+
+  for (size_t i = recent_count; i > 0; i--) {
+    const StoredDmLine& line = stored_dm_[recent_indices[i - 1]];
+    char display_line[112] = {};
+    formatDmDisplayLine(line.text, line.timestamp_epoch, display_line, sizeof(display_line));
+    lv_obj_t* row = lv_label_create(contacts_dm_panel_);
+    lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
+    lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(row, &style_text_main_, 0);
+    lv_obj_set_style_text_font(row, chatPanelFont(), 0);
+
+    switch (line.kind) {
+      case ChatLineKind::Rx:
+        lv_obj_add_style(row, &style_msg_rx_, 0);
+        break;
+      case ChatLineKind::Tx:
+        lv_obj_add_style(row, &style_msg_tx_, 0);
+        break;
+      case ChatLineKind::Ack:
+        lv_obj_add_style(row, &style_msg_ack_, 0);
+        break;
+      case ChatLineKind::Error:
+        lv_obj_add_style(row, &style_msg_err_, 0);
+        break;
+      case ChatLineKind::Normal:
+      default:
+        break;
+    }
+
+    lv_label_set_text(row, display_line);
+  }
+
+  if (recent_count == 0) {
+    lv_obj_t* row = lv_label_create(contacts_dm_panel_);
+    lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
+    lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(row, &style_text_dim_, 0);
+    lv_obj_set_style_text_font(row, chatPanelFont(), 0);
+    lv_label_set_text(row, "No messages yet");
+  }
+
+  lv_obj_scroll_to_y(contacts_dm_panel_, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+void StandaloneUi::startComposeForSelectedContact() {
+  if (!contacts_open_ || contacts_count_ == 0 || contacts_selected_index_ >= contacts_count_) {
+    return;
+  }
+
+  const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+  compose_dm_mode_ = true;
+  compose_return_to_dm_ = false;
+  strncpy(compose_target_dm_pubkey_, selected.public_key_hex, sizeof(compose_target_dm_pubkey_) - 1);
+  compose_target_dm_pubkey_[sizeof(compose_target_dm_pubkey_) - 1] = '\0';
+  strncpy(compose_target_channel_, selected.name, sizeof(compose_target_channel_) - 1);
+  compose_target_channel_[sizeof(compose_target_channel_) - 1] = '\0';
+  openComposeDialog();
 }
 
 bool StandaloneUi::openContactsDialog() {
-  if (!ensureContactsDialogBuilt()) {
+  if (!kEnableContactsDialog) {
     return false;
   }
-  if (contacts_open_ || !contacts_dialog_ || !contacts_nodes_panel_ || !contacts_detail_panel_) {
+
+  CTS_TRACE("openContactsDialog enter open=%d dialog=%p", contacts_open_ ? 1 : 0, static_cast<void*>(contacts_dialog_));
+  if (!ensureContactsDialogBuilt()) {
+    CTS_TRACE("openContactsDialog ensure failed");
+    return false;
+  }
+  if (contacts_open_ || !contacts_dialog_ || !contacts_detail_panel_ || !contacts_detail_info_panel_) {
+    CTS_TRACE("openContactsDialog blocked open=%d dialog=%p detail=%p info=%p", contacts_open_ ? 1 : 0,
+              static_cast<void*>(contacts_dialog_), static_cast<void*>(contacts_detail_panel_),
+              static_cast<void*>(contacts_detail_info_panel_));
     return false;
   }
 
   contacts_open_ = true;
-  contacts_actions_focused_ = false;
+  contacts_nav_focused_ = false;
+  contacts_dm_open_ = false;
   contacts_selected_index_ = 0;
   contacts_action_index_ = 0;
   contacts_status_text_[0] = '\0';
+  refreshHeaderVisuals();
+  closeChannelDropdown(false);
 
-  lv_obj_clear_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(contacts_dialog_, LV_OBJ_FLAG_CLICKABLE);
-  if (contacts_nodes_panel_) {
-    lv_obj_add_flag(contacts_nodes_panel_, LV_OBJ_FLAG_CLICKABLE);
+  if (chat_panel_) {
+    lv_obj_add_flag(chat_panel_, LV_OBJ_FLAG_HIDDEN);
   }
-  if (contacts_detail_panel_) {
-    lv_obj_add_flag(contacts_detail_panel_, LV_OBJ_FLAG_CLICKABLE);
+  if (chat_advz_btn_) {
+    lv_obj_add_flag(chat_advz_btn_, LV_OBJ_FLAG_HIDDEN);
   }
-  if (contacts_close_btn_) {
-    lv_obj_add_flag(contacts_close_btn_, LV_OBJ_FLAG_CLICKABLE);
+  if (chat_advf_btn_) {
+    lv_obj_add_flag(chat_advf_btn_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (chat_new_btn_) {
+    lv_obj_add_flag(chat_new_btn_, LV_OBJ_FLAG_HIDDEN);
   }
   if (shortcut_strip_) {
     lv_obj_add_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
   }
 
+  lv_obj_clear_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(contacts_dialog_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_move_foreground(contacts_dialog_);
+
+  if (key_group_ && !kUseOnscreenKeyboard) {
+    for (uint8_t i = 0; i < kContactActionCount; i++) {
+      if (contacts_action_rows_[i] && lv_obj_get_group(contacts_action_rows_[i]) != key_group_) {
+        lv_group_add_obj(key_group_, contacts_action_rows_[i]);
+      }
+    }
+    if (contacts_dm_panel_ && lv_obj_get_group(contacts_dm_panel_) != key_group_) {
+      lv_group_add_obj(key_group_, contacts_dm_panel_);
+    }
+    if (contacts_dm_new_btn_ && lv_obj_get_group(contacts_dm_new_btn_) != key_group_) {
+      lv_group_add_obj(key_group_, contacts_dm_new_btn_);
+    }
+    if (contacts_detail_info_panel_ && lv_obj_get_group(contacts_detail_info_panel_) != key_group_) {
+      lv_group_add_obj(key_group_, contacts_detail_info_panel_);
+    }
+  }
+
   refreshContactsDialog(true);
 
   if (has_unread_dm_ && contacts_count_ > 0) {
@@ -2881,55 +3573,69 @@ bool StandaloneUi::openContactsDialog() {
         findContactIndexByIdentity(contacts_cache_, contacts_count_, last_dm_sender_key_, last_dm_sender_name_);
     if (dm_contact_idx >= 0) {
       contacts_selected_index_ = static_cast<uint8_t>(dm_contact_idx);
-      if (false) Serial.printf("[UI][DM] contacts preselect idx=%d name=%s key=%d\n", dm_contact_idx,
-                    contacts_cache_[contacts_selected_index_].name,
-                    contacts_cache_[contacts_selected_index_].public_key_hex[0] != '\0' ? 1 : 0);
+      contacts_nav_focused_ = false;
+      contacts_dm_open_ = true;
+      has_unread_dm_ = false;
+      refreshShortcutVisuals();
       refreshContactsDialog(false);
     }
   }
 
-  if (key_group_ && contacts_count_ > 0 && contacts_node_rows_[contacts_selected_index_]) {
-    lv_group_focus_obj(contacts_node_rows_[contacts_selected_index_]);
-  }
+  pending_contacts_open_ = false;
+  pending_contacts_show_ = false;
+  pending_contacts_post_open_ = false;
+  focus_zone_ = FocusZone::Selector;
+  resetPointerInputState();
+  focusCurrentZoneObject();
+
+  CTS_TRACE("openContactsDialog done count=%u sel=%u nav=%d dm=%d", static_cast<unsigned>(contacts_count_),
+            static_cast<unsigned>(contacts_selected_index_), contacts_nav_focused_ ? 1 : 0,
+            contacts_dm_open_ ? 1 : 0);
 
   return true;
 }
 
 void StandaloneUi::closeContactsDialog(bool focus_chat) {
+  CTS_TRACE("closeContactsDialog enter focus_chat=%d open=%d", focus_chat ? 1 : 0, contacts_open_ ? 1 : 0);
   if (!contacts_open_) {
     return;
   }
 
   contacts_open_ = false;
-  contacts_actions_focused_ = false;
+  contacts_nav_focused_ = false;
+  contacts_dm_open_ = false;
+  pending_contacts_show_ = false;
+  pending_contacts_post_open_ = false;
+  refreshHeaderVisuals();
+  closeChannelDropdown(false);
   if (contacts_dialog_) {
-    lv_obj_del(contacts_dialog_);
+    lv_obj_add_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(contacts_dialog_, LV_OBJ_FLAG_CLICKABLE);
   }
-  contacts_dialog_ = nullptr;
-  contacts_title_label_ = nullptr;
-  contacts_status_label_ = nullptr;
-  contacts_close_btn_ = nullptr;
-  contacts_close_label_ = nullptr;
-  contacts_nodes_panel_ = nullptr;
-  contacts_detail_panel_ = nullptr;
-  contacts_full_name_label_ = nullptr;
-  contacts_lat_lon_label_ = nullptr;
-  contacts_last_heard_label_ = nullptr;
-  contacts_telemetry_label_ = nullptr;
-  contacts_row_capacity_ = 0;
-  contacts_count_ = 0;
-  contacts_selected_index_ = 0;
-  contacts_action_index_ = 0;
-  memset(contacts_node_rows_, 0, sizeof(contacts_node_rows_));
-  memset(contacts_node_labels_, 0, sizeof(contacts_node_labels_));
-  memset(contacts_action_rows_, 0, sizeof(contacts_action_rows_));
-  memset(contacts_action_labels_, 0, sizeof(contacts_action_labels_));
+  if (chat_panel_) {
+    lv_obj_clear_flag(chat_panel_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (chat_advz_btn_) {
+    lv_obj_clear_flag(chat_advz_btn_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (chat_advf_btn_) {
+    lv_obj_clear_flag(chat_advf_btn_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (chat_new_btn_) {
+    lv_obj_clear_flag(chat_new_btn_, LV_OBJ_FLAG_HIDDEN);
+  }
   if (shortcut_strip_) {
     lv_obj_clear_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
   }
 
+  refreshChannelVisuals();
+  refreshHeaderVisuals();
+
+  resetPointerInputState();
+
   if (focus_chat) {
     setFocusZone(FocusZone::Chat);
+    CTS_TRACE("closeContactsDialog exit -> chat");
     return;
   }
 
@@ -2937,6 +3643,7 @@ void StandaloneUi::closeContactsDialog(bool focus_chat) {
   selected_shortcut_ = 1;
   refreshShortcutVisuals();
   focusCurrentZoneObject();
+  CTS_TRACE("closeContactsDialog exit -> shortcuts");
 }
 
 void StandaloneUi::moveContactsSelection(int delta) {
@@ -2951,36 +3658,79 @@ void StandaloneUi::moveContactsSelection(int delta) {
     next = 0;
   }
   contacts_selected_index_ = static_cast<uint8_t>(next);
+  contacts_dm_open_ = false;
   refreshContactsDialog(false);
-  if (key_group_ && contacts_node_rows_[contacts_selected_index_]) {
-    lv_group_focus_obj(contacts_node_rows_[contacts_selected_index_]);
-  }
+  focusCurrentZoneObject();
 }
 
 void StandaloneUi::activateContactsAction(uint8_t action_idx) {
-  if (!contacts_open_ || contacts_count_ == 0 || !mesh_adapter_ || action_idx >= kContactActionCount) {
+  if (!contacts_open_ || action_idx >= kContactActionCount) {
+    return;
+  }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (action_idx == 2) {
+    closeContactsDialog(true);
+    return;
+  }
+#endif
+
+  if (contacts_count_ == 0) {
     return;
   }
 
   contacts_action_index_ = action_idx;
+  contacts_nav_focused_ = false;
   mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
 
   if (action_idx == 0) {
+    if (!mesh_adapter_) {
+      strncpy(contacts_status_text_, "Favorite update failed", sizeof(contacts_status_text_) - 1);
+      contacts_status_text_[sizeof(contacts_status_text_) - 1] = '\0';
+      refreshContactsDialog(false);
+      return;
+    }
+
+    char selected_key[65] = {};
+    char selected_name[32] = {};
+    strncpy(selected_key, selected.public_key_hex, sizeof(selected_key) - 1);
+    selected_key[sizeof(selected_key) - 1] = '\0';
+    strncpy(selected_name, selected.name, sizeof(selected_name) - 1);
+    selected_name[sizeof(selected_name) - 1] = '\0';
+
     const bool next_fav = !selected.favorite;
     if (mesh_adapter_->setContactFavoriteByPublicKeyHex(selected.public_key_hex, next_fav)) {
       selected.favorite = next_fav;
-      snprintf(contacts_status_text_, sizeof(contacts_status_text_), "%s favorite: %s", selected.name,
+      for (uint8_t i = 1; i < contacts_count_; i++) {
+        mesh::MeshContactSummary key = contacts_cache_[i];
+        int j = static_cast<int>(i) - 1;
+        while (j >= 0 && contactSortBefore(key, contacts_cache_[j])) {
+          contacts_cache_[j + 1] = contacts_cache_[j];
+          j--;
+        }
+        contacts_cache_[j + 1] = key;
+      }
+      const int idx = findContactIndexByIdentity(contacts_cache_, contacts_count_, selected_key, selected_name);
+      if (idx >= 0) {
+        contacts_selected_index_ = static_cast<uint8_t>(idx);
+      }
+      snprintf(contacts_status_text_, sizeof(contacts_status_text_), "%s favorite: %s", selected_name,
                next_fav ? "ON" : "OFF");
     } else {
       strncpy(contacts_status_text_, "Favorite update failed", sizeof(contacts_status_text_) - 1);
       contacts_status_text_[sizeof(contacts_status_text_) - 1] = '\0';
     }
+    contacts_dm_open_ = false;
     refreshContactsDialog(false);
     return;
   }
 
   if (action_idx == 1) {
-    openDmDialog(selected.name, selected.public_key_hex);
+    contacts_dm_open_ = true;
+    has_unread_dm_ = false;
+    refreshShortcutVisuals();
+    refreshContactsDialog(false);
+    focusCurrentZoneObject();
     return;
   }
 
@@ -3417,18 +4167,32 @@ void StandaloneUi::refreshShortcutVisuals() {
     lv_obj_remove_style(shortcut_btns_[i], &style_unread_edge_, 0);
 
     if (shortcut_labels_[i]) {
-      lv_obj_set_style_text_color(shortcut_labels_[i], kColorTextDim, 0);
+      const bool unread_dm = (i == 1 && has_unread_dm_);
+      const bool selected = (focus_zone_ == FocusZone::Shortcuts && i == selected_shortcut_);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+      char label_text[20] = {};
+      snprintf(label_text, sizeof(label_text), "%s%s", kShortcutNames[i], unread_dm ? "*" : "");
+      lv_label_set_text(shortcut_labels_[i], label_text);
+      lv_obj_set_style_text_color(shortcut_labels_[i],
+                                  selected ? kColorFocus : (unread_dm ? kColorUnread : kColorTextDim),
+                                  0);
+#else
+      lv_label_set_text(shortcut_labels_[i], kShortcutNames[i]);
+      lv_obj_set_style_text_color(shortcut_labels_[i], unread_dm ? kColorUnread : kColorTextDim, 0);
+#endif
     }
 
     if (i == 1 && has_unread_dm_) {
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
       lv_obj_add_style(shortcut_btns_[i], &style_unread_edge_, 0);
-      if (shortcut_labels_[i]) {
-        lv_obj_set_style_text_color(shortcut_labels_[i], kColorUnread, 0);
-      }
+#endif
     }
 
     if (focus_zone_ == FocusZone::Shortcuts && i == selected_shortcut_) {
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
       lv_obj_add_style(shortcut_btns_[i], &style_shortcut_active_, 0);
+#endif
     }
   }
 }
@@ -3492,25 +4256,58 @@ void StandaloneUi::refreshHeaderVisuals() {
   }
   lv_label_set_text(gps_label_, gps_text);
   lv_label_set_text(wifi_label_, LV_SYMBOL_WIFI);
-
-  char batt_text[8];
+  char batt_text[8] = {};
   snprintf(batt_text, sizeof(batt_text), "%u%%", static_cast<unsigned>(battery_pct_));
   lv_label_set_text(battery_pct_label_, batt_text);
 
-  lv_obj_align_to(gps_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
-  lv_obj_align_to(wifi_label_, gps_label_, LV_ALIGN_OUT_RIGHT_MID, kHeaderIconsGap, 0);
-  lv_obj_align(battery_pct_label_, LV_ALIGN_RIGHT_MID, kHeaderBatteryTextX, 0);
-  lv_obj_align(battery_bar_, LV_ALIGN_RIGHT_MID, kHeaderBatteryBarX, 0);
-  lv_obj_align_to(wifi_ap_badge_label_, wifi_label_, LV_ALIGN_TOP_RIGHT, 4, -4);
+  const bool hide_wireless_icons = contacts_open_;
+  const bool hide_time_label = contacts_open_;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  const bool hide_battery_pct = true;
+#else
+  const bool hide_battery_pct = contacts_open_;
+#endif
 
-  const lv_coord_t wifi_right_x = static_cast<lv_coord_t>(lv_obj_get_x(wifi_label_) + lv_obj_get_width(wifi_label_));
-  const lv_coord_t batt_left_x = static_cast<lv_coord_t>(lv_obj_get_x(battery_pct_label_));
-  const lv_coord_t time_center_x = static_cast<lv_coord_t>((wifi_right_x + batt_left_x) / 2);
-  const lv_coord_t time_x = static_cast<lv_coord_t>(time_center_x - (lv_obj_get_width(time_label_) / 2));
-  lv_obj_align(time_label_, LV_ALIGN_LEFT_MID, time_x, 0);
+  if (hide_battery_pct) {
+    lv_obj_add_flag(battery_pct_label_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(battery_pct_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(battery_pct_label_, LV_ALIGN_RIGHT_MID, kHeaderBatteryTextX, 0);
+  }
+
+  if (hide_wireless_icons) {
+    lv_obj_add_flag(gps_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(wifi_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(wifi_ap_badge_label_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(gps_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(wifi_label_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  if (hide_time_label) {
+    lv_obj_add_flag(time_label_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(time_label_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  if (!hide_wireless_icons) {
+    lv_obj_align_to(gps_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
+    lv_obj_align_to(wifi_label_, gps_label_, LV_ALIGN_OUT_RIGHT_MID, kHeaderIconsGap, 0);
+    lv_obj_align_to(wifi_ap_badge_label_, wifi_label_, LV_ALIGN_TOP_RIGHT, 4, -4);
+  }
+  lv_obj_align(battery_bar_, LV_ALIGN_RIGHT_MID, kHeaderBatteryBarX, 0);
+  if (!hide_time_label) {
+    const lv_coord_t left_anchor_right_x = hide_wireless_icons
+        ? static_cast<lv_coord_t>(lv_obj_get_x(channel_selector_btn_) + lv_obj_get_width(channel_selector_btn_))
+        : static_cast<lv_coord_t>(lv_obj_get_x(wifi_label_) + lv_obj_get_width(wifi_label_));
+    const lv_coord_t batt_left_x = static_cast<lv_coord_t>(lv_obj_get_x(battery_bar_));
+    const lv_coord_t time_center_x = static_cast<lv_coord_t>((left_anchor_right_x + batt_left_x) / 2);
+    const lv_coord_t time_x = static_cast<lv_coord_t>(time_center_x - (lv_obj_get_width(time_label_) / 2));
+    lv_obj_align(time_label_, LV_ALIGN_LEFT_MID, time_x, 0);
+  }
 
   lv_obj_set_style_text_color(gps_label_, gps_ok_ ? kColorWifiOn : kColorTextDim, 0);
-  if (!wifi_config_server_on_) {
+  if (hide_wireless_icons || !wifi_config_server_on_) {
     lv_obj_set_style_text_color(wifi_label_, kColorWifiOff, 0);
     lv_obj_add_flag(wifi_ap_badge_label_, LV_OBJ_FLAG_HIDDEN);
   } else {
@@ -3600,7 +4397,9 @@ void StandaloneUi::focusCurrentZoneObject() {
   }
 
   if (compose_open_ && compose_input_) {
-    lv_group_focus_obj(compose_input_);
+    if (!kUseOnscreenKeyboard) {
+      lv_group_focus_obj(compose_input_);
+    }
     return;
   }
 
@@ -3609,12 +4408,43 @@ void StandaloneUi::focusCurrentZoneObject() {
     return;
   }
 
-  if (contacts_open_ && contacts_count_ > 0 && contacts_node_rows_[contacts_selected_index_]) {
-    lv_group_focus_obj(contacts_node_rows_[contacts_selected_index_]);
-    return;
+  if (contacts_open_) {
+    const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
+    if (channel_dropdown_open_ && contacts_option_count > 0) {
+      if (dropdown_highlight_channel_ >= contacts_option_count) {
+        dropdown_highlight_channel_ = static_cast<uint8_t>(contacts_option_count - 1);
+      }
+      lv_group_focus_obj(channel_dropdown_rows_[dropdown_highlight_channel_]);
+      return;
+    }
+
+    if (contacts_nav_focused_) {
+      lv_group_focus_obj(channel_selector_btn_);
+      return;
+    }
+
+    if (contacts_dm_open_) {
+      if (contacts_dm_panel_) {
+        lv_group_focus_obj(contacts_dm_panel_);
+      }
+      return;
+    }
+
+    if (contacts_action_rows_[contacts_action_index_]) {
+      lv_group_focus_obj(contacts_action_rows_[contacts_action_index_]);
+      return;
+    }
+
+    if (channel_selector_btn_) {
+      lv_group_focus_obj(channel_selector_btn_);
+      return;
+    }
   }
 
   if (channel_dropdown_open_ && configured_channel_count_ > 0) {
+    if (dropdown_highlight_channel_ >= configured_channel_count_) {
+      dropdown_highlight_channel_ = static_cast<uint8_t>(configured_channel_count_ - 1);
+    }
     lv_group_focus_obj(channel_dropdown_rows_[dropdown_highlight_channel_]);
     return;
   }
@@ -3706,37 +4536,7 @@ void StandaloneUi::triggerShortcut(uint8_t index) {
   }
 
   if (index == 1) {
-    if (!openContactsDialog()) {
-      appendChatLine("[INFO] Contacts panel unavailable; listing heard nodes:", ChatLineKind::Normal);
-      if (!mesh_adapter_) {
-        appendChatLine("[INFO] Mesh adapter unavailable", ChatLineKind::Error);
-        return;
-      }
-
-      mesh::MeshContactSummary contacts[8]{};
-      const int count = mesh_adapter_->exportContacts(contacts, 8);
-      if (count <= 0) {
-        appendChatLine("[INFO] No heard nodes yet", ChatLineKind::Normal);
-        return;
-      }
-
-      for (int i = 1; i < count; i++) {
-        mesh::MeshContactSummary key = contacts[i];
-        int j = i - 1;
-        while (j >= 0 && contactSortBefore(key, contacts[j])) {
-          contacts[j + 1] = contacts[j];
-          j--;
-        }
-        contacts[j + 1] = key;
-      }
-
-      char line[96] = {};
-      for (int i = 0; i < count; i++) {
-        snprintf(line, sizeof(line), "[CT] %s%s", contacts[i].favorite ? "* " : "", contacts[i].name);
-        appendChatLine(line, ChatLineKind::Normal);
-      }
-      return;
-    }
+    openContactsDialog();
     return;
   }
 
@@ -3872,6 +4672,20 @@ void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_ke
   const bool key_match = dm_has_key && line_has_key && strcmp(dm_active_key_, contact_key) == 0;
   const bool name_match = dmNameLikelyMatch(dm_active_name_, contact_name);
   const bool line_matches_active = key_match || name_match;
+
+  bool line_matches_contacts_dm = false;
+  if (contacts_open_ && contacts_dm_open_ && contacts_count_ > 0 && contacts_selected_index_ < contacts_count_) {
+    const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+    const bool selected_has_key = selected.public_key_hex[0] != '\0';
+    const bool contacts_key_match =
+        selected_has_key && line_has_key && strcmp(selected.public_key_hex, contact_key) == 0;
+    const bool contacts_name_match = dmNameLikelyMatch(selected.name, contact_name);
+    line_matches_contacts_dm = contacts_key_match || contacts_name_match;
+    if (line_matches_contacts_dm) {
+      rebuildContactsDmPanel();
+    }
+  }
+
   if (dm_open_ && !line_matches_active) {
     if (false) Serial.printf("[UI][DM] skip line active_name=%s line_name=%s dm_key=%d line_key=%d\n",
                   dm_active_name_, contact_name, dm_has_key ? 1 : 0, line_has_key ? 1 : 0);
@@ -4016,6 +4830,8 @@ void StandaloneUi::rebuildDmDialog() {
   for (size_t i = recent_count; i > 0; i--) {
     const size_t idx = recent_indices[i - 1];
     const StoredDmLine& line = stored_dm_[idx];
+    char display_line[112] = {};
+    formatDmDisplayLine(line.text, line.timestamp_epoch, display_line, sizeof(display_line));
 
     if (dm_row_count_ >= kMaxChatRows) {
       break;
@@ -4045,7 +4861,7 @@ void StandaloneUi::rebuildDmDialog() {
         break;
     }
 
-    lv_label_set_text(row, line.text);
+    lv_label_set_text(row, display_line);
     dm_rows_[dm_row_count_++] = row;
   }
 
@@ -4072,7 +4888,10 @@ void StandaloneUi::rebuildDmDialog() {
 }
 
 void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_key) {
+  CTS_TRACE("openDmDialog enter name=%s open=%d", contact_name ? contact_name : "(null)", dm_open_ ? 1 : 0);
   if (!contact_name || contact_name[0] == '\0' || !dm_dialog_ || !contacts_dialog_) {
+    CTS_TRACE("openDmDialog blocked dialog=%p contacts=%p", static_cast<void*>(dm_dialog_),
+              static_cast<void*>(contacts_dialog_));
     return;
   }
 
@@ -4107,8 +4926,7 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
       lv_obj_set_flex_align(dm_panel_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
       lv_obj_set_style_pad_row(dm_panel_, 1, LV_PART_MAIN);
       lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_KEY, this);
-      lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_PRESSED, this);
-      lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_CLICKED, this);
+      lv_obj_add_event_cb(dm_panel_, onDmEvent, LV_EVENT_PRESSED, this);
       lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
       if (key_group_) {
         lv_group_add_obj(key_group_, dm_panel_);
@@ -4121,6 +4939,33 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
     if (false) Serial.println("[UI][DM] open aborted: DM UI incomplete");
     return;
   }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (!dm_close_btn_) {
+    dm_close_btn_ = lv_btn_create(dm_dialog_);
+    if (dm_close_btn_) {
+      lv_obj_set_size(dm_close_btn_, LV_PCT(100), 22);
+      lv_obj_align(dm_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
+      lv_obj_add_style(dm_close_btn_, &style_button_, 0);
+      lv_obj_add_style(dm_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+      lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+      lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+      lv_obj_add_event_cb(dm_close_btn_, onDmEvent, LV_EVENT_PRESSED, this);
+      lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+      if (key_group_) {
+        lv_group_add_obj(key_group_, dm_close_btn_);
+      }
+    }
+  }
+  if (dm_close_btn_ && !dm_close_label_) {
+    dm_close_label_ = lv_label_create(dm_close_btn_);
+    if (dm_close_label_) {
+      lv_obj_add_style(dm_close_label_, &style_text_main_, 0);
+      lv_label_set_text(dm_close_label_, "CLOSE");
+      lv_obj_center(dm_close_label_);
+    }
+  }
+#endif
 
   strncpy(dm_active_name_, contact_name, sizeof(dm_active_name_) - 1);
   dm_active_name_[sizeof(dm_active_name_) - 1] = '\0';
@@ -4157,9 +5002,11 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
     lv_obj_add_flag(dm_panel_, LV_OBJ_FLAG_CLICKABLE);
   }
   if (dm_close_btn_) {
+    lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
   }
   if (dm_new_btn_) {
+    lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
   }
   lv_obj_move_foreground(dm_dialog_);
@@ -4177,9 +5024,12 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
   if (key_group_ && dm_panel_) {
     lv_group_focus_obj(dm_panel_);
   }
+  CTS_TRACE("openDmDialog done dm_open=%d key_present=%d", dm_open_ ? 1 : 0,
+            dm_active_key_[0] != '\0' ? 1 : 0);
 }
 
 void StandaloneUi::closeDmDialog(bool focus_chat) {
+  CTS_TRACE("closeDmDialog enter focus_chat=%d open=%d", focus_chat ? 1 : 0, dm_open_ ? 1 : 0);
   if (!dm_open_ || !dm_dialog_) {
     return;
   }
@@ -4200,34 +5050,33 @@ void StandaloneUi::closeDmDialog(bool focus_chat) {
 
   if (focus_chat) {
     closeContactsDialog(true);
+    CTS_TRACE("closeDmDialog exit -> chat");
     return;
   }
 
   if (contacts_dialog_) {
+    contacts_open_ = true;
     lv_obj_clear_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(contacts_dialog_, LV_OBJ_FLAG_CLICKABLE);
-    if (contacts_nodes_panel_) {
-      lv_obj_add_flag(contacts_nodes_panel_, LV_OBJ_FLAG_CLICKABLE);
-    }
     if (contacts_detail_panel_) {
       lv_obj_add_flag(contacts_detail_panel_, LV_OBJ_FLAG_CLICKABLE);
     }
     lv_obj_move_foreground(contacts_dialog_);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (contacts_close_btn_) {
-      lv_obj_move_foreground(contacts_close_btn_);
+    if (contacts_count_ > 0 && contacts_selected_index_ >= contacts_count_) {
+      contacts_selected_index_ = static_cast<uint8_t>(contacts_count_ - 1);
     }
-#endif
-    contacts_actions_focused_ = true;
+    contacts_nav_focused_ = false;
+    contacts_dm_open_ = false;
     contacts_action_index_ = 1;
     refreshContactsDialog(false);
-    if (key_group_ && contacts_action_rows_[contacts_action_index_]) {
-      lv_group_focus_obj(contacts_action_rows_[contacts_action_index_]);
-    }
+    focusCurrentZoneObject();
   } else {
     contacts_open_ = false;
     setFocusZone(FocusZone::Chat);
   }
+  refreshHeaderVisuals();
+  resetPointerInputState();
+  CTS_TRACE("closeDmDialog exit -> contacts_open=%d", contacts_open_ ? 1 : 0);
 }
 
 void StandaloneUi::openHelpDialog() {
@@ -4240,9 +5089,16 @@ void StandaloneUi::openHelpDialog() {
   focus_zone_ = FocusZone::Shortcuts;
   refreshShortcutVisuals();
   lv_obj_clear_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN);
+  if (help_body_panel_) {
+    lv_obj_scroll_to_y(help_body_panel_, 0, LV_ANIM_OFF);
+  }
   lv_obj_move_foreground(help_dialog_);
   if (key_group_) {
-    lv_group_focus_obj(help_dialog_);
+    if (help_body_panel_) {
+      lv_group_focus_obj(help_body_panel_);
+    } else {
+      lv_group_focus_obj(help_dialog_);
+    }
   }
 }
 
@@ -4662,13 +5518,15 @@ void StandaloneUi::handleKey(uint32_t key) {
     advert_popup_open_ = false;
     advert_popup_deadline_ms_ = 0;
   }
-  if (contacts_open_ && (!contacts_dialog_ || lv_obj_has_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN))) {
+  if (contacts_open_ && !dm_open_ && (!contacts_dialog_ || lv_obj_has_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     contacts_open_ = false;
-    contacts_actions_focused_ = false;
+    contacts_nav_focused_ = false;
+    contacts_dm_open_ = false;
   }
-  if (dm_open_ && (!dm_dialog_ || lv_obj_has_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN))) {
+  if (dm_open_ && !compose_open_ && (!dm_dialog_ || lv_obj_has_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     dm_open_ = false;
   }
+  // Keyboard visibility is managed explicitly by compose open/close flows.
 
   uint32_t norm_key = key;
   const bool is_lvgl_special =
@@ -4684,6 +5542,10 @@ void StandaloneUi::handleKey(uint32_t key) {
     norm_key = norm_key - 'A' + 'a';
   }
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  norm_key = remapCardputerNavKey(norm_key, !compose_open_);
+#endif
+
 #if PLUMERIA_KEY_DEBUG
   if (false) Serial.printf("[KEYUI] handleKey raw=%lu norm=%lu cfg=%d compose=%d dropdown=%d focus=%u\n",
                 static_cast<unsigned long>(key), static_cast<unsigned long>(norm_key), cfg_open_ ? 1 : 0,
@@ -4694,6 +5556,13 @@ void StandaloneUi::handleKey(uint32_t key) {
   const bool is_escape = (norm_key == LV_KEY_ESC || norm_key == 27 || norm_key == 8);
   lv_obj_t* focused = key_group_ ? lv_group_get_focused(key_group_) : nullptr;
   const bool chat_focused = (focused == chat_panel_);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  if (compose_open_ && (key == '`' || key == '~')) {
+    handleComposeKey(LV_KEY_ESC);
+    return;
+  }
+#endif
 
   if (compose_open_) {
     handleComposeKey(key);
@@ -4715,6 +5584,18 @@ void StandaloneUi::handleKey(uint32_t key) {
         (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r' || norm_key == LV_KEY_ESC ||
          norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127)) {
       closeHelpDialog();
+      return;
+    }
+    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+      if (help_body_panel_) {
+        lv_obj_scroll_by(help_body_panel_, 0, -kMsgScrollStep, LV_ANIM_OFF);
+      }
+      return;
+    }
+    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+      if (help_body_panel_) {
+        lv_obj_scroll_by(help_body_panel_, 0, kMsgScrollStep, LV_ANIM_OFF);
+      }
       return;
     }
     if (norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127 || norm_key == LV_KEY_ESC ||
@@ -4844,72 +5725,169 @@ void StandaloneUi::handleKey(uint32_t key) {
   }
 
   if (contacts_open_) {
-    if (focused == contacts_close_btn_ &&
-        (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r' || norm_key == LV_KEY_ESC ||
-         norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127)) {
-      closeContactsDialog(true);
-      return;
-    }
+    const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
 
-    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
-      if (contacts_actions_focused_) {
-        if (contacts_action_index_ == 0) {
-          contacts_action_index_ = static_cast<uint8_t>(kContactActionCount - 1);
-        } else {
-          contacts_action_index_--;
-        }
-        refreshContactsDialog(false);
-        if (key_group_ && contacts_action_rows_[contacts_action_index_]) {
-          lv_group_focus_obj(contacts_action_rows_[contacts_action_index_]);
-        }
-      } else {
-        moveContactsSelection(-1);
-      }
-      return;
-    }
-    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
-      if (contacts_actions_focused_) {
-        contacts_action_index_ = static_cast<uint8_t>((contacts_action_index_ + 1) % kContactActionCount);
-        refreshContactsDialog(false);
-        if (key_group_ && contacts_action_rows_[contacts_action_index_]) {
-          lv_group_focus_obj(contacts_action_rows_[contacts_action_index_]);
-        }
-      } else {
-        moveContactsSelection(1);
-      }
-      return;
-    }
-    if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
-      if (!contacts_actions_focused_) {
-        contacts_actions_focused_ = true;
-        contacts_action_index_ = 0;
-        refreshContactsDialog(false);
-        if (key_group_ && contacts_action_rows_[contacts_action_index_]) {
-          lv_group_focus_obj(contacts_action_rows_[contacts_action_index_]);
-        }
-      } else {
-        activateContactsAction(contacts_action_index_);
-      }
+    if (kKeyboardNavEnabled && norm_key == 'f') {
+      activateContactsAction(0);
       return;
     }
     if (kKeyboardNavEnabled && (norm_key == 'd' || norm_key == 'm')) {
       activateContactsAction(1);
       return;
     }
-    if (norm_key == LV_KEY_ESC) {
-      closeContactsDialog(false);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (kKeyboardNavEnabled && norm_key == 'c') {
+      activateContactsAction(2);
       return;
     }
+#endif
+
+    if (norm_key == LV_KEY_ESC) {
+      closeContactsDialog(true);
+      return;
+    }
+
     if (norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127) {
-      if (contacts_actions_focused_) {
-        contacts_actions_focused_ = false;
+      if (channel_dropdown_open_) {
+        closeChannelDropdown(false);
+        contacts_nav_focused_ = true;
         refreshContactsDialog(false);
-        if (key_group_ && contacts_count_ > 0 && contacts_node_rows_[contacts_selected_index_]) {
-          lv_group_focus_obj(contacts_node_rows_[contacts_selected_index_]);
-        }
-      } else {
-        closeContactsDialog(true);
+        focusCurrentZoneObject();
+        return;
       }
+      if (!contacts_nav_focused_) {
+        contacts_nav_focused_ = true;
+        contacts_dm_open_ = false;
+        refreshContactsDialog(false);
+        focusCurrentZoneObject();
+        return;
+      }
+      closeContactsDialog(true);
+      return;
+    }
+
+    if (channel_dropdown_open_) {
+      if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+        moveDropdownHighlight(-1);
+        return;
+      }
+      if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+        moveDropdownHighlight(1);
+        return;
+      }
+      if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        if (contacts_dropdown_guard_until_ms_ != 0 && now < contacts_dropdown_guard_until_ms_) {
+          return;
+        }
+#endif
+        if (now - last_dropdown_open_ms_ < kContactsDropdownEnterGuardMs) {
+          return;
+        }
+        if (now - last_selector_action_ms_ < kContactsDropdownEnterGuardMs) {
+          return;
+        }
+        last_selector_action_ms_ = now;
+        contacts_dropdown_guard_until_ms_ = 0;
+        if (contacts_option_count > 0 && dropdown_highlight_channel_ < contacts_option_count) {
+          contacts_selected_index_ = dropdown_highlight_channel_;
+        }
+        contacts_nav_focused_ = false;
+        contacts_dm_open_ = false;
+        closeChannelDropdown(true);
+        refreshContactsDialog(false);
+        focusCurrentZoneObject();
+        return;
+      }
+      if (norm_key == LV_KEY_LEFT || norm_key == LV_KEY_RIGHT) {
+        closeChannelDropdown(false);
+        contacts_nav_focused_ = true;
+        refreshContactsDialog(false);
+        focusCurrentZoneObject();
+        return;
+      }
+      return;
+    }
+
+    if (contacts_nav_focused_) {
+      if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r' || norm_key == LV_KEY_RIGHT) {
+        if (contacts_count_ > 0) {
+          if (now - last_selector_action_ms_ < kNavDebounceMs) {
+            return;
+          }
+          last_selector_action_ms_ = now;
+          contacts_dropdown_guard_until_ms_ = now + kContactsDropdownEnterGuardMs;
+          openChannelDropdown();
+        }
+        return;
+      }
+      if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+        moveContactsSelection(-1);
+        return;
+      }
+      if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+        moveContactsSelection(1);
+        return;
+      }
+      return;
+    }
+
+    if (contacts_dm_open_) {
+      if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+        startComposeForSelectedContact();
+        return;
+      }
+      if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+        if (contacts_dm_panel_) {
+          lv_obj_scroll_by(contacts_dm_panel_, 0, -kMsgScrollStep, LV_ANIM_OFF);
+        }
+        return;
+      }
+      if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+        if (contacts_dm_panel_) {
+          lv_obj_scroll_by(contacts_dm_panel_, 0, kMsgScrollStep, LV_ANIM_OFF);
+        }
+        return;
+      }
+      if (norm_key == LV_KEY_LEFT) {
+        contacts_nav_focused_ = true;
+        refreshContactsDialog(false);
+        focusCurrentZoneObject();
+        return;
+      }
+      return;
+    }
+
+    if (norm_key == LV_KEY_LEFT) {
+      contacts_nav_focused_ = true;
+      refreshContactsDialog(false);
+      focusCurrentZoneObject();
+      return;
+    }
+    if (norm_key == LV_KEY_RIGHT) {
+      contacts_dm_open_ = true;
+      refreshContactsDialog(false);
+      focusCurrentZoneObject();
+      return;
+    }
+    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+      if (contacts_action_index_ == 0) {
+        contacts_action_index_ = kContactActionCount - 1;
+      } else {
+        contacts_action_index_--;
+      }
+      refreshContactsDialog(false);
+      focusCurrentZoneObject();
+      return;
+    }
+    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+      contacts_action_index_ = static_cast<uint8_t>((contacts_action_index_ + 1) % kContactActionCount);
+      refreshContactsDialog(false);
+      focusCurrentZoneObject();
+      return;
+    }
+    if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      activateContactsAction(contacts_action_index_);
       return;
     }
     return;
@@ -4932,7 +5910,17 @@ void StandaloneUi::handleKey(uint32_t key) {
         return;
       }
       last_selector_action_ms_ = now;
-      selectChannel(dropdown_highlight_channel_, true);
+      if (contacts_open_) {
+        const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
+        if (contacts_option_count > 0 && dropdown_highlight_channel_ < contacts_option_count) {
+          contacts_selected_index_ = dropdown_highlight_channel_;
+        }
+        contacts_nav_focused_ = false;
+        contacts_dm_open_ = false;
+        refreshContactsDialog(false);
+      } else {
+        selectChannel(dropdown_highlight_channel_, true);
+      }
       closeChannelDropdown(true);
       return;
     }
@@ -5053,13 +6041,15 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
     advert_popup_open_ = false;
     advert_popup_deadline_ms_ = 0;
   }
-  if (contacts_open_ && (!contacts_dialog_ || lv_obj_has_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN))) {
+  if (contacts_open_ && !dm_open_ && (!contacts_dialog_ || lv_obj_has_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     contacts_open_ = false;
-    contacts_actions_focused_ = false;
+    contacts_nav_focused_ = false;
+    contacts_dm_open_ = false;
   }
-  if (dm_open_ && (!dm_dialog_ || lv_obj_has_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN))) {
+  if (dm_open_ && !compose_open_ && (!dm_dialog_ || lv_obj_has_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     dm_open_ = false;
   }
+  // Keyboard visibility is managed explicitly by compose open/close flows.
 
   if (help_open_) {
     if ((target == help_close_btn_) || (target == help_close_label_) || hasAncestor(target, help_close_btn_)) {
@@ -5101,12 +6091,34 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   }
 
   if (compose_open_) {
+    lv_indev_t* indev = lv_indev_get_act();
+    if (indev && compose_keyboard_ && !lv_obj_has_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN)) {
+      lv_point_t pt{};
+      lv_indev_get_point(indev, &pt);
+      lv_area_t kb_area{};
+      lv_obj_get_coords(compose_keyboard_, &kb_area);
+      if (pt.x >= kb_area.x1 && pt.x <= kb_area.x2 && pt.y >= kb_area.y1 && pt.y <= kb_area.y2) {
+        // Coordinate fallback: treat taps in keyboard bounds as keyboard interaction.
+        return;
+      }
+    }
     if (compose_keyboard_ && hasAncestor(target, compose_keyboard_)) {
       // Let LVGL keyboard process key taps.
       return;
     }
-    if (hasAncestor(target, compose_dialog_) && compose_input_ && key_group_) {
-      lv_group_focus_obj(compose_input_);
+    const uint32_t now = millis();
+    if (compose_opened_ms_ != 0 && static_cast<uint32_t>(now - compose_opened_ms_) < kComposeOpenTapIgnoreMs) {
+      // Ignore follow-on click events from the same gesture that opened compose.
+      return;
+    }
+    if (hasAncestor(target, compose_dialog_)) {
+      if (!kUseOnscreenKeyboard && compose_input_ && key_group_) {
+        lv_group_focus_obj(compose_input_);
+      }
+      return;
+    }
+    if (kUseOnscreenKeyboard) {
+      // Ignore outside taps while compose is open to avoid stale underlying targets.
       return;
     }
     // Tap outside compose closes modal instead of trapping the UI.
@@ -5115,6 +6127,59 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   }
 
   if (dm_open_) {
+    lv_point_t trace_pt{};
+    int trace_x = -1;
+    int trace_y = -1;
+    lv_indev_t* trace_indev = lv_indev_get_act();
+    if (trace_indev) {
+      lv_indev_get_point(trace_indev, &trace_pt);
+      trace_x = trace_pt.x;
+      trace_y = trace_pt.y;
+    }
+    CTS_TRACE("dm_click target=%p pt=%d,%d", static_cast<void*>(target), trace_x, trace_y);
+
+    // Coordinate-first DM touch routing for Heltec stability.
+    if (dm_dialog_) {
+      lv_indev_t* indev = lv_indev_get_act();
+      if (indev) {
+        lv_point_t pt{};
+        lv_indev_get_point(indev, &pt);
+
+        if (dm_close_btn_) {
+          lv_area_t close_area{};
+          lv_obj_get_coords(dm_close_btn_, &close_area);
+          if (pt.x >= close_area.x1 && pt.x <= close_area.x2 && pt.y >= close_area.y1 && pt.y <= close_area.y2) {
+            closeDmDialog(false);
+            return;
+          }
+        }
+
+        if (dm_new_btn_) {
+          lv_area_t new_area{};
+          lv_obj_get_coords(dm_new_btn_, &new_area);
+          if (pt.x >= new_area.x1 && pt.x <= new_area.x2 && pt.y >= new_area.y1 && pt.y <= new_area.y2) {
+            compose_dm_mode_ = true;
+            compose_return_to_dm_ = true;
+            strncpy(compose_target_dm_pubkey_, dm_active_key_, sizeof(compose_target_dm_pubkey_) - 1);
+            compose_target_dm_pubkey_[sizeof(compose_target_dm_pubkey_) - 1] = '\0';
+            strncpy(compose_target_channel_, dm_active_name_, sizeof(compose_target_channel_) - 1);
+            compose_target_channel_[sizeof(compose_target_channel_) - 1] = '\0';
+            lv_async_call(onOpenComposeDialogAsync, this);
+            return;
+          }
+        }
+
+        lv_area_t dm_area{};
+        lv_obj_get_coords(dm_dialog_, &dm_area);
+        if (pt.x >= dm_area.x1 && pt.x <= dm_area.x2 && pt.y >= dm_area.y1 && pt.y <= dm_area.y2) {
+          if (key_group_ && dm_panel_) {
+            lv_group_focus_obj(dm_panel_);
+          }
+          return;
+        }
+      }
+    }
+
     if ((target == dm_close_btn_) || (target == dm_close_label_) || hasAncestor(target, dm_close_btn_)) {
       closeDmDialog(false);
       return;
@@ -5126,7 +6191,7 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
       compose_target_dm_pubkey_[sizeof(compose_target_dm_pubkey_) - 1] = '\0';
       strncpy(compose_target_channel_, dm_active_name_, sizeof(compose_target_channel_) - 1);
       compose_target_channel_[sizeof(compose_target_channel_) - 1] = '\0';
-      openComposeDialog();
+      lv_async_call(onOpenComposeDialogAsync, this);
       return;
     }
 
@@ -5140,79 +6205,111 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   }
 
   if (contacts_open_) {
-    if ((target == contacts_close_btn_) || (target == contacts_close_label_) || hasAncestor(target, contacts_close_btn_)) {
-      closeContactsDialog(true);
+    const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
+    const bool in_selector = hasAncestor(target, channel_selector_btn_);
+    const bool in_dropdown = hasAncestor(target, channel_dropdown_panel_);
+    int dropdown_row_idx = -1;
+    for (uint8_t i = 0; i < contacts_option_count; i++) {
+      if (target == channel_dropdown_rows_[i] || target == channel_dropdown_labels_[i] ||
+          hasAncestor(target, channel_dropdown_rows_[i])) {
+        dropdown_row_idx = static_cast<int>(i);
+        break;
+      }
+    }
+
+    if (in_selector) {
+      const uint32_t now = millis();
+#if defined(DEVICE_TLORA_PAGER_TFT)
+      if (contacts_dropdown_guard_until_ms_ != 0 && now < contacts_dropdown_guard_until_ms_) {
+        return;
+      }
+#endif
+      if (now - last_selector_action_ms_ < kContactsDropdownEnterGuardMs) {
+        return;
+      }
+      if (channel_dropdown_open_ && (now - last_dropdown_open_ms_ < kContactsDropdownEnterGuardMs)) {
+        return;
+      }
+      last_selector_action_ms_ = now;
+
+      contacts_nav_focused_ = true;
+      if (channel_dropdown_open_) {
+        contacts_dropdown_guard_until_ms_ = 0;
+        closeChannelDropdown(false);
+      } else {
+        contacts_dropdown_guard_until_ms_ = now + kContactsDropdownEnterGuardMs;
+        openChannelDropdown();
+      }
+      refreshContactsDialog(false);
+      focusCurrentZoneObject();
       return;
     }
 
-    for (uint8_t i = 0; i < contacts_count_; i++) {
-      if ((target == contacts_node_rows_[i]) || (target == contacts_node_labels_[i]) ||
-          hasAncestor(target, contacts_node_rows_[i])) {
-        contacts_selected_index_ = i;
-        contacts_actions_focused_ = false;
-        refreshContactsDialog(false);
+    if (channel_dropdown_open_) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+      const uint32_t now = millis();
+      if (contacts_dropdown_guard_until_ms_ != 0 && now < contacts_dropdown_guard_until_ms_) {
         return;
       }
+#endif
+      if (dropdown_row_idx >= 0) {
+        contacts_selected_index_ = static_cast<uint8_t>(dropdown_row_idx);
+        contacts_nav_focused_ = false;
+        contacts_dm_open_ = false;
+        contacts_dropdown_guard_until_ms_ = 0;
+        closeChannelDropdown(true);
+        refreshContactsDialog(false);
+        focusCurrentZoneObject();
+        return;
+      }
+      if (!in_dropdown) {
+        closeChannelDropdown(false);
+        contacts_nav_focused_ = true;
+        refreshContactsDialog(false);
+        focusCurrentZoneObject();
+      }
+      return;
     }
+
+    if ((target == contacts_dm_new_btn_) || (target == contacts_dm_new_label_) || hasAncestor(target, contacts_dm_new_btn_)) {
+      contacts_nav_focused_ = false;
+      contacts_dm_open_ = true;
+      refreshContactsDialog(false);
+      startComposeForSelectedContact();
+      return;
+    }
+
+    if (hasAncestor(target, contacts_dm_panel_)) {
+      contacts_nav_focused_ = false;
+      contacts_dm_open_ = true;
+      refreshContactsDialog(false);
+      if (key_group_ && contacts_dm_panel_) {
+        lv_group_focus_obj(contacts_dm_panel_);
+      }
+      return;
+    }
+
     for (uint8_t i = 0; i < kContactActionCount; i++) {
       if ((target == contacts_action_rows_[i]) || (target == contacts_action_labels_[i]) ||
           hasAncestor(target, contacts_action_rows_[i])) {
-        contacts_actions_focused_ = true;
         contacts_action_index_ = i;
-        refreshContactsDialog(false);
+        contacts_nav_focused_ = false;
+        contacts_dm_open_ = false;
         if (kTouchDirectActivate) {
           activateContactsAction(i);
+        } else {
+          refreshContactsDialog(false);
+          focusCurrentZoneObject();
         }
         return;
       }
     }
 
-    // Fallback: resolve taps by pointer location in case LVGL reports a parent target.
-    if (contacts_dialog_) {
-      lv_indev_t* indev = lv_indev_get_act();
-      if (indev) {
-        lv_point_t pt{};
-        lv_indev_get_point(indev, &pt);
-
-        if (contacts_nodes_panel_) {
-          lv_area_t area{};
-          lv_obj_get_coords(contacts_nodes_panel_, &area);
-          if (pt.x >= area.x1 && pt.x <= area.x2 && pt.y >= area.y1 && pt.y <= area.y2) {
-            const lv_coord_t local_y =
-                static_cast<lv_coord_t>(pt.y - area.y1 - lv_obj_get_scroll_y(contacts_nodes_panel_));
-            if (local_y >= 0) {
-              const int idx = static_cast<int>(local_y / 20);
-              if (idx >= 0 && idx < static_cast<int>(contacts_count_)) {
-                contacts_selected_index_ = static_cast<uint8_t>(idx);
-                contacts_actions_focused_ = false;
-                refreshContactsDialog(false);
-                return;
-              }
-            }
-          }
-        }
-
-        if (contacts_detail_panel_) {
-          lv_area_t area{};
-          lv_obj_get_coords(contacts_detail_panel_, &area);
-          if (pt.x >= area.x1 && pt.x <= area.x2 && pt.y >= area.y1 && pt.y <= area.y2) {
-            const lv_coord_t local_y =
-                static_cast<lv_coord_t>(pt.y - area.y1 - lv_obj_get_scroll_y(contacts_detail_panel_));
-            if (local_y >= 0) {
-              const int idx = static_cast<int>(local_y / 20);
-              if (idx >= 0 && idx < static_cast<int>(kContactActionCount)) {
-                contacts_actions_focused_ = true;
-                contacts_action_index_ = static_cast<uint8_t>(idx);
-                refreshContactsDialog(false);
-                if (kTouchDirectActivate) {
-                  activateContactsAction(contacts_action_index_);
-                }
-                return;
-              }
-            }
-          }
-        }
-      }
+    if (hasAncestor(target, contacts_detail_info_panel_)) {
+      contacts_nav_focused_ = false;
+      contacts_dm_open_ = false;
+      refreshContactsDialog(false);
+      return;
     }
 
     if (hasAncestor(target, contacts_dialog_)) {
@@ -5335,6 +6432,9 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
       }
       if (target == ui->channel_selector_btn_) {
         ui->focus_zone_ = FocusZone::Selector;
+        if (ui->contacts_open_) {
+          ui->contacts_nav_focused_ = true;
+        }
       }
       if (target == ui->chat_panel_) {
         ui->focus_zone_ = FocusZone::Chat;
@@ -5358,7 +6458,8 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
         ui->focus_zone_ = FocusZone::Shortcuts;
         ui->selected_shortcut_ = 1;
       }
-      if (target == ui->help_dialog_ || target == ui->help_title_label_ || target == ui->help_body_label_) {
+      if (target == ui->help_dialog_ || target == ui->help_body_panel_ || target == ui->help_title_label_ ||
+          target == ui->help_body_label_ || hasAncestor(target, ui->help_body_panel_)) {
         ui->focus_zone_ = FocusZone::Shortcuts;
         ui->selected_shortcut_ = 2;
       }
@@ -5374,6 +6475,18 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
           break;
         }
       }
+      if (ui->contacts_open_) {
+        const uint8_t contacts_option_count = clampOptionCount(ui->contacts_count_, kChannelCount);
+        for (uint8_t i = 0; i < contacts_option_count; i++) {
+          if (target == ui->channel_dropdown_rows_[i] || target == ui->channel_dropdown_labels_[i]) {
+            ui->focus_zone_ = FocusZone::Selector;
+            ui->dropdown_highlight_channel_ = i;
+            ui->contacts_nav_focused_ = true;
+            ui->refreshDropdownVisuals();
+            break;
+          }
+        }
+      }
       for (uint8_t i = 0; i < kCfgRowCount; i++) {
         if (target == ui->cfg_rows_[i] || target == ui->cfg_row_labels_[i]) {
           ui->cfg_selected_row_ = i;
@@ -5383,24 +6496,24 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
           break;
         }
       }
-      for (uint8_t i = 0; i < ui->contacts_count_; i++) {
-        if ((target == ui->contacts_node_rows_[i]) || (target == ui->contacts_node_labels_[i]) ||
-            hasAncestor(target, ui->contacts_node_rows_[i])) {
-          ui->contacts_selected_index_ = i;
-          ui->contacts_actions_focused_ = false;
-          break;
-        }
-      }
       for (uint8_t i = 0; i < kContactActionCount; i++) {
         if ((target == ui->contacts_action_rows_[i]) || (target == ui->contacts_action_labels_[i]) ||
             hasAncestor(target, ui->contacts_action_rows_[i])) {
           ui->contacts_action_index_ = i;
-          ui->contacts_actions_focused_ = true;
+          ui->contacts_nav_focused_ = false;
+          ui->contacts_dm_open_ = false;
           break;
         }
       }
-      if (target == ui->contacts_close_btn_ || target == ui->contacts_close_label_) {
-        ui->contacts_actions_focused_ = false;
+      if ((target == ui->contacts_dm_panel_) || hasAncestor(target, ui->contacts_dm_panel_) ||
+          (target == ui->contacts_dm_new_btn_) || (target == ui->contacts_dm_new_label_) ||
+          hasAncestor(target, ui->contacts_dm_new_btn_)) {
+        ui->contacts_nav_focused_ = false;
+        ui->contacts_dm_open_ = true;
+      }
+      if ((target == ui->contacts_detail_info_panel_) || hasAncestor(target, ui->contacts_detail_info_panel_)) {
+        ui->contacts_nav_focused_ = false;
+        ui->contacts_dm_open_ = false;
       }
       for (uint8_t i = 0; i < kShortcutCount; i++) {
         if (target == ui->shortcut_btns_[i] || target == ui->shortcut_labels_[i]) {
@@ -5412,12 +6525,50 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
       ui->refreshShortcutVisuals();
       break;
     case LV_EVENT_PRESSED:
+      ui->handleClick(target);
+      break;
     case LV_EVENT_CLICKED:
+      // Contacts has its own callback path; ignore generic CLICKED there to avoid double-dispatch.
+      if (ui->contacts_open_ && ui->contacts_dialog_ && hasAncestor(target, ui->contacts_dialog_)) {
+        break;
+      }
       ui->handleClick(target);
       break;
     default:
       break;
   }
+}
+
+void StandaloneUi::onContactsEvent(lv_event_t* event) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(event));
+  if (!ui) {
+    return;
+  }
+
+  const lv_event_code_t code = lv_event_get_code(event);
+  if (code != LV_EVENT_CLICKED) {
+    return;
+  }
+
+  lv_obj_t* target = lv_event_get_target(event);
+  CTS_TRACE("onContactsEvent click target=%p", static_cast<void*>(target));
+  ui->handleClick(target);
+}
+
+void StandaloneUi::onDmEvent(lv_event_t* event) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(event));
+  if (!ui) {
+    return;
+  }
+
+  const lv_event_code_t code = lv_event_get_code(event);
+  if (code != LV_EVENT_PRESSED && code != LV_EVENT_CLICKED) {
+    return;
+  }
+
+  lv_obj_t* target = lv_event_get_target(event);
+  CTS_TRACE("onDmEvent code=%d target=%p", static_cast<int>(code), static_cast<void*>(target));
+  ui->handleClick(target);
 }
 
 void StandaloneUi::loop() {
@@ -5426,14 +6577,38 @@ void StandaloneUi::loop() {
   }
 
   const uint32_t now = millis();
+  if (pending_contacts_open_ && kUseOnscreenKeyboard) {
+    CTS_TRACE("openContactsDialog loop_open");
+    onOpenContactsDialogAsync(this);
+  } else if (pending_contacts_show_ && kUseOnscreenKeyboard) {
+    pending_contacts_show_ = false;
+    CTS_TRACE("openContactsDialog loop_show");
+    if (contacts_dialog_) {
+      lv_obj_clear_flag(contacts_dialog_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(contacts_dialog_);
+    }
+    if (shortcut_strip_) {
+      lv_obj_add_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
+    }
+    pending_contacts_post_open_ = true;
+  } else if (pending_contacts_post_open_ && kUseOnscreenKeyboard) {
+    CTS_TRACE("openContactsDialog loop_post_activate");
+    onContactsPostOpenAsync(this);
+  }
+
   syncChannelsFromMeshIfNeeded(now);
   refreshClockIfNeeded(now);
   refreshUnreadPulse(now);
 
   if (now - last_dm_retention_prune_ms_ >= kDmRetentionPruneMs) {
     last_dm_retention_prune_ms_ = now;
-    if (pruneStoredDmByRetention(nowEpochSecondsOrZero()) && dm_open_) {
-      rebuildDmDialog();
+    if (pruneStoredDmByRetention(nowEpochSecondsOrZero())) {
+      if (dm_open_) {
+        rebuildDmDialog();
+      }
+      if (contacts_open_ && contacts_dm_open_) {
+        rebuildContactsDmPanel();
+      }
     }
   }
 
@@ -5512,13 +6687,25 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
     const bool line_has_key = event.peer_key[0] != '\0';
     const bool key_match = dm_has_key && line_has_key && strcmp(dm_active_key_, event.peer_key) == 0;
     const bool name_match = dmNameLikelyMatch(dm_active_name_, event.channel_name);
-    const bool matches_active_dm = dm_open_ && (key_match || name_match);
+    bool contacts_match = false;
+    if (contacts_open_ && contacts_dm_open_ && contacts_count_ > 0 && contacts_selected_index_ < contacts_count_) {
+      const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+      const bool selected_has_key = selected.public_key_hex[0] != '\0';
+      const bool contacts_key_match =
+          selected_has_key && line_has_key && strcmp(selected.public_key_hex, event.peer_key) == 0;
+      const bool contacts_name_match = dmNameLikelyMatch(selected.name, event.channel_name);
+      contacts_match = contacts_key_match || contacts_name_match;
+    }
+    const bool matches_active_dm = (dm_open_ && (key_match || name_match)) || contacts_match;
 
     if (false) Serial.printf("[UI][DM] event from=%s dm_open=%d key_match=%d name_match=%d active=%d\n", event.channel_name,
                   dm_open_ ? 1 : 0, key_match ? 1 : 0, name_match ? 1 : 0, matches_active_dm ? 1 : 0);
 
     if (!matches_active_dm) {
       has_unread_dm_ = true;
+      refreshShortcutVisuals();
+    } else if (has_unread_dm_) {
+      has_unread_dm_ = false;
       refreshShortcutVisuals();
     }
     char hhmm[8] = {};
