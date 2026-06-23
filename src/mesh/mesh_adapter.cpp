@@ -786,6 +786,9 @@ class StandaloneChatMesh : public BaseChatMesh {
     const uint8_t header = raw[0];
     const uint8_t route = header & PH_ROUTE_MASK;
     const uint8_t type = (header >> PH_TYPE_SHIFT) & PH_TYPE_MASK;
+    char metrics[64] = {};
+    snprintf(metrics, sizeof(metrics), "RADIO snr=%.1f rssi=%.1f", snr, rssi);
+    adapter_->queueInfo(metrics);
     if (false) Serial.printf("[RADIO][RAW] len=%d type=%u route=%u snr=%.1f rssi=%.1f hdr=0x%02X\n", len,
                   static_cast<unsigned>(type), static_cast<unsigned>(route), snr, rssi,
                   static_cast<unsigned>(header));

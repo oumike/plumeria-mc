@@ -35,7 +35,7 @@ class StandaloneUi {
   };
 
   static constexpr uint8_t kChannelCount = 40;
-  static constexpr uint8_t kShortcutCount = 3;
+  static constexpr uint8_t kShortcutCount = 4;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
   static constexpr uint8_t kCfgRowCount = 4;
 #else
@@ -49,6 +49,7 @@ class StandaloneUi {
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
   static constexpr size_t kMaxStoredChatRows = 128;
+  static constexpr size_t kMetricChartPoints = 60;
 
   bool createStyles();
   void buildLayout();
@@ -90,6 +91,20 @@ class StandaloneUi {
   void clearDmPanel();
   void openHelpDialog();
   void closeHelpDialog();
+  void openLiveDialog();
+  void closeLiveDialog();
+  void openLiveUtilDialog();
+  void closeLiveUtilDialog();
+  void openLiveSnrDialog();
+  void closeLiveSnrDialog();
+  void appendLiveFeedLine(const char* text, ChatLineKind kind);
+  void clearLivePanel();
+  void rebuildLiveDialog();
+  void appendUtilizationSample(uint16_t util_percent, uint16_t packets_per_sec_x10);
+  void appendSnrRssiSample(int16_t snr_db, int16_t rssi_dbm);
+  void rebuildLiveUtilChart();
+  void rebuildLiveSnrChart();
+  void sampleLiveMetrics(uint32_t now_ms);
   void triggerAdvertZeroHop();
   void triggerAdvertFlood();
   void openAdvertPopup(const char* text, bool is_error);
@@ -215,6 +230,29 @@ class StandaloneUi {
   lv_obj_t* help_body_label_ = nullptr;
   lv_obj_t* help_close_btn_ = nullptr;
   lv_obj_t* help_close_label_ = nullptr;
+  lv_obj_t* live_dialog_ = nullptr;
+  lv_obj_t* live_title_label_ = nullptr;
+  lv_obj_t* live_body_panel_ = nullptr;
+  lv_obj_t* live_hint_label_ = nullptr;
+  lv_obj_t* live_close_btn_ = nullptr;
+  lv_obj_t* live_close_label_ = nullptr;
+  lv_obj_t* live_util_dialog_ = nullptr;
+  lv_obj_t* live_util_title_label_ = nullptr;
+  lv_obj_t* live_util_chart_ = nullptr;
+  lv_obj_t* live_util_units_label_ = nullptr;
+  lv_obj_t* live_util_hint_label_ = nullptr;
+  lv_obj_t* live_util_stats_label_ = nullptr;
+  lv_chart_series_t* live_util_series_ = nullptr;
+  lv_obj_t* live_snr_dialog_ = nullptr;
+  lv_obj_t* live_snr_title_label_ = nullptr;
+  lv_obj_t* live_snr_chart_ = nullptr;
+  lv_obj_t* live_snr_units_label_ = nullptr;
+  lv_obj_t* live_snr_hint_label_ = nullptr;
+  lv_obj_t* live_snr_stats_label_ = nullptr;
+  lv_chart_series_t* live_snr_series_ = nullptr;
+  lv_chart_series_t* live_rssi_series_ = nullptr;
+  lv_obj_t* live_rows_[kMaxChatRows]{};
+  size_t live_row_count_ = 0;
   lv_obj_t* advert_popup_ = nullptr;
   lv_obj_t* advert_popup_label_ = nullptr;
 
@@ -255,6 +293,9 @@ class StandaloneUi {
   bool contacts_open_ = false;
   bool dm_open_ = false;
   bool help_open_ = false;
+  bool live_open_ = false;
+  bool live_util_open_ = false;
+  bool live_snr_open_ = false;
   bool advert_popup_open_ = false;
   bool has_unread_dm_ = false;
   bool contacts_nav_focused_ = false;
@@ -318,6 +359,22 @@ class StandaloneUi {
   StoredChatLine stored_chat_[kMaxStoredChatRows]{};
   size_t stored_chat_head_ = 0;
   size_t stored_chat_count_ = 0;
+  StoredChatLine stored_live_[kMaxStoredChatRows]{};
+  size_t stored_live_head_ = 0;
+  size_t stored_live_count_ = 0;
+  uint16_t util_history_[kMetricChartPoints]{};
+  size_t util_history_head_ = 0;
+  size_t util_history_count_ = 0;
+  int16_t snr_history_[kMetricChartPoints]{};
+  int16_t rssi_history_[kMetricChartPoints]{};
+  size_t radio_history_head_ = 0;
+  size_t radio_history_count_ = 0;
+  uint16_t util_latest_percent_ = 0;
+  uint16_t util_latest_pps_x10_ = 0;
+  int16_t last_snr_db_ = 0;
+  int16_t last_rssi_dbm_ = -120;
+  uint32_t last_util_sample_ms_ = 0;
+  uint32_t last_util_raw_rx_count_ = 0;
   bool chat_history_dirty_ = false;
   uint32_t last_chat_persist_ms_ = 0;
   bool dm_history_dirty_ = false;

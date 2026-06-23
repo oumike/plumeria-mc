@@ -55,6 +55,9 @@ const lv_color_t kColorRx = lv_color_hex(0x89E3FF);
 const lv_color_t kColorTx = lv_color_hex(0xA8FFB5);
 const lv_color_t kColorAck = lv_color_hex(0x7ED6A7);
 const lv_color_t kColorErr = lv_color_hex(0xFF7D7D);
+const lv_color_t kColorLiveInfo = lv_color_hex(0x7ED6A7);
+const lv_color_t kColorLiveDirect = lv_color_hex(0xFFD27A);
+const lv_color_t kColorLiveChannel = lv_color_hex(0x89E3FF);
 const lv_color_t kColorWifiOn = lv_color_hex(0x59D88E);
 const lv_color_t kColorWifiOff = lv_color_hex(0xF56767);
 const lv_color_t kColorWifiApBadge = lv_color_hex(0xD8E7F2);
@@ -239,33 +242,43 @@ uint32_t remapCardputerNavKey(uint32_t key, bool allow_nav_remap) {
 const char* kShortcutNames[] = {
   "CFG",
   "CONT",
+  "LIVE",
   "HELP",
 };
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 const char* kShortcutNames[] = {
   "CFG",
   "CONTACTS",
+  "LIVE",
   "HELP",
 };
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
 const char* kShortcutNames[] = {
   "(C)FG",
   "C(O)NT",
+  "(L)IVE",
   "(H)ELP",
 };
 #else
 const char* kShortcutNames[] = {
   "(C)FG",
   "C(O)NTACTS",
+  "(L)IVE",
   "(H)ELP",
 };
 #endif
+
+constexpr uint8_t kShortcutCfg = 0;
+constexpr uint8_t kShortcutContacts = 1;
+constexpr uint8_t kShortcutLive = 2;
+constexpr uint8_t kShortcutHelp = 3;
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
 const char* kHelpBodyText =
   "Touch guide:\n"
   "CFG: Device settings and web config\n"
   "CONTACTS: Favorites and direct messages\n"
+  "LIVE: Mesh traffic feed\n"
   "HELP: Open this screen\n"
   "ADVZ: Send one-hop presence advert\n"
   "ADVF: Send flood advert across mesh\n"
@@ -275,6 +288,7 @@ const char* kHelpBodyText =
 const char* kHelpBodyText =
   "Keyboard shortcuts:\n"
   "h = Help (global except compose)\n"
+  "l = Live feed\n"
   "c = Config\n"
   "o = Contacts\n"
   "m = Compose to current room\n"
@@ -1090,6 +1104,51 @@ bool hasAncestor(lv_obj_t* node, lv_obj_t* ancestor) {
     }
   }
   return false;
+}
+
+int clampInt(int value, int low, int high) {
+  if (value < low) {
+    return low;
+  }
+  if (value > high) {
+    return high;
+  }
+  return value;
+}
+
+bool parseRadioInfoSample(const char* text, int16_t* out_snr_db, int16_t* out_rssi_dbm) {
+  if (!text || !out_snr_db || !out_rssi_dbm) {
+    return false;
+  }
+  float snr = 0.0f;
+  float rssi = 0.0f;
+  if (sscanf(text, "RADIO snr=%f rssi=%f", &snr, &rssi) != 2) {
+    return false;
+  }
+  const int snr_i = static_cast<int>(snr >= 0.0f ? snr + 0.5f : snr - 0.5f);
+  const int rssi_i = static_cast<int>(rssi >= 0.0f ? rssi + 0.5f : rssi - 0.5f);
+  *out_snr_db = static_cast<int16_t>(clampInt(snr_i, -40, 20));
+  *out_rssi_dbm = static_cast<int16_t>(clampInt(rssi_i, -130, 0));
+  return true;
+}
+
+lv_color_t liveFeedTextColor(const char* text, bool is_error) {
+  if (is_error) {
+    return kColorErr;
+  }
+  if (!text) {
+    return kColorTextMain;
+  }
+  if (strstr(text, "] INFO ") != nullptr) {
+    return kColorLiveInfo;
+  }
+  if (strstr(text, "] DM ") != nullptr) {
+    return kColorLiveDirect;
+  }
+  if (strstr(text, "] CH ") != nullptr) {
+    return kColorLiveChannel;
+  }
+  return kColorTextMain;
 }
 
 void resetPointerInputState() {
@@ -2162,6 +2221,207 @@ void StandaloneUi::buildLayout() {
   help_close_label_ = nullptr;
 #endif
 
+  const lv_coord_t live_dialog_w = clampCoord(main_w - dialogInsetW(10, 2), 210, dialogMaxW(300, 340));
+  const lv_coord_t live_dialog_h = clampCoord(main_h - 16, 150, 220);
+
+  live_dialog_ = lv_obj_create(root_);
+  lv_obj_add_style(live_dialog_, &style_panel_, 0);
+  lv_obj_set_size(live_dialog_, live_dialog_w, live_dialog_h);
+  lv_obj_align(live_dialog_, LV_ALIGN_CENTER, 0, kModalVerticalNudgeY);
+  lv_obj_add_flag(live_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(live_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(live_dialog_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_border_width(live_dialog_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(live_dialog_, kColorBorder, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(live_dialog_, LV_OPA_40, LV_PART_MAIN);
+  lv_obj_add_event_cb(live_dialog_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(live_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(live_dialog_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+  live_title_label_ = lv_label_create(live_dialog_);
+  lv_obj_add_style(live_title_label_, &style_text_main_, 0);
+  lv_label_set_text(live_title_label_, "Live Feed");
+  lv_obj_align(live_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
+
+  live_hint_label_ = lv_label_create(live_dialog_);
+  lv_obj_add_style(live_hint_label_, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(live_hint_label_, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(live_hint_label_, "c: clear  u: util  s: snr/rssi");
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  lv_obj_align(live_hint_label_, LV_ALIGN_BOTTOM_LEFT, 4, -26);
+#else
+  lv_obj_align(live_hint_label_, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
+#endif
+
+  const lv_coord_t live_body_y = 18;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  const lv_coord_t live_body_h = static_cast<lv_coord_t>(live_dialog_h - 56);
+#else
+  const lv_coord_t live_body_h = static_cast<lv_coord_t>(live_dialog_h - 36);
+#endif
+
+  live_body_panel_ = lv_obj_create(live_dialog_);
+  lv_obj_set_pos(live_body_panel_, 2, live_body_y);
+  lv_obj_set_size(live_body_panel_, static_cast<lv_coord_t>(live_dialog_w - 4), live_body_h);
+  lv_obj_set_style_bg_opa(live_body_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(live_body_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(live_body_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(live_body_panel_, 1, LV_PART_MAIN);
+  lv_obj_set_scroll_dir(live_body_panel_, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(live_body_panel_, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_set_layout(live_body_panel_, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(live_body_panel_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(live_body_panel_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_add_flag(live_body_panel_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(live_body_panel_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(live_body_panel_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(live_body_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  live_close_btn_ = lv_btn_create(live_dialog_);
+  lv_obj_set_size(live_close_btn_, LV_PCT(100), 22);
+  lv_obj_align(live_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
+  lv_obj_add_style(live_close_btn_, &style_button_, 0);
+  lv_obj_add_style(live_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_add_event_cb(live_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(live_close_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(live_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+  live_close_label_ = lv_label_create(live_close_btn_);
+  lv_obj_add_style(live_close_label_, &style_text_main_, 0);
+  lv_label_set_text(live_close_label_, "CLOSE");
+  lv_obj_center(live_close_label_);
+
+  // Keep the footer control fixed over the scrollable body panel.
+  lv_obj_move_foreground(live_close_btn_);
+#else
+  live_close_btn_ = nullptr;
+  live_close_label_ = nullptr;
+#endif
+
+  live_util_dialog_ = lv_obj_create(root_);
+  lv_obj_add_style(live_util_dialog_, &style_panel_, 0);
+  lv_obj_set_size(live_util_dialog_, live_dialog_w, live_dialog_h);
+  lv_obj_align(live_util_dialog_, LV_ALIGN_CENTER, 0, kModalVerticalNudgeY);
+  lv_obj_add_flag(live_util_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(live_util_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_border_width(live_util_dialog_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(live_util_dialog_, kColorBorder, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(live_util_dialog_, LV_OPA_40, LV_PART_MAIN);
+  lv_obj_add_event_cb(live_util_dialog_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(live_util_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(live_util_dialog_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+  live_util_title_label_ = lv_label_create(live_util_dialog_);
+  lv_obj_add_style(live_util_title_label_, &style_text_main_, 0);
+  lv_label_set_text(live_util_title_label_, "Channel Utilization");
+  lv_obj_align(live_util_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
+
+  live_util_units_label_ = lv_label_create(live_util_dialog_);
+  lv_obj_add_style(live_util_units_label_, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(live_util_units_label_, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(live_util_units_label_, "Y: %  X: s");
+  lv_obj_align(live_util_units_label_, LV_ALIGN_TOP_RIGHT, -4, 2);
+
+  live_util_chart_ = lv_chart_create(live_util_dialog_);
+  lv_obj_set_pos(live_util_chart_, 4, 18);
+  lv_obj_set_size(live_util_chart_, static_cast<lv_coord_t>(live_dialog_w - 8),
+                  static_cast<lv_coord_t>(live_dialog_h - 42));
+  lv_obj_set_style_bg_opa(live_util_chart_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(live_util_chart_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(live_util_chart_, kColorBorder, LV_PART_MAIN);
+  lv_obj_set_style_line_color(live_util_chart_, kColorBorder, LV_PART_ITEMS);
+  lv_chart_set_type(live_util_chart_, LV_CHART_TYPE_LINE);
+  lv_chart_set_point_count(live_util_chart_, kMetricChartPoints);
+  lv_chart_set_div_line_count(live_util_chart_, 4, 6);
+  lv_chart_set_range(live_util_chart_, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+  lv_obj_add_event_cb(live_util_chart_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(live_util_chart_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  live_util_series_ = lv_chart_add_series(live_util_chart_, kColorActive, LV_CHART_AXIS_PRIMARY_Y);
+
+  live_util_stats_label_ = lv_label_create(live_util_dialog_);
+  lv_obj_add_style(live_util_stats_label_, &style_text_main_, 0);
+  lv_label_set_text(live_util_stats_label_, "0%  (0.0 pkt/s)");
+  lv_obj_align(live_util_stats_label_, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+
+  live_util_hint_label_ = lv_label_create(live_util_dialog_);
+  lv_obj_add_style(live_util_hint_label_, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(live_util_hint_label_, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(live_util_hint_label_, "backspace: close chart");
+  lv_obj_align(live_util_hint_label_, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
+
+  live_snr_dialog_ = lv_obj_create(root_);
+  lv_obj_add_style(live_snr_dialog_, &style_panel_, 0);
+  lv_obj_set_size(live_snr_dialog_, live_dialog_w, live_dialog_h);
+  lv_obj_align(live_snr_dialog_, LV_ALIGN_CENTER, 0, kModalVerticalNudgeY);
+  lv_obj_add_flag(live_snr_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(live_snr_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_border_width(live_snr_dialog_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(live_snr_dialog_, kColorBorder, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(live_snr_dialog_, LV_OPA_40, LV_PART_MAIN);
+  lv_obj_add_event_cb(live_snr_dialog_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(live_snr_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(live_snr_dialog_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+  live_snr_title_label_ = lv_label_create(live_snr_dialog_);
+  lv_obj_add_style(live_snr_title_label_, &style_text_main_, 0);
+  lv_label_set_text(live_snr_title_label_, "SNR / RSSI");
+  lv_obj_align(live_snr_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
+
+  live_snr_units_label_ = lv_label_create(live_snr_dialog_);
+  lv_obj_add_style(live_snr_units_label_, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(live_snr_units_label_, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(live_snr_units_label_, "Y: dB / dBm  X: s");
+  lv_obj_align(live_snr_units_label_, LV_ALIGN_TOP_RIGHT, -4, 2);
+
+  live_snr_chart_ = lv_chart_create(live_snr_dialog_);
+  lv_obj_set_pos(live_snr_chart_, 4, 18);
+  lv_obj_set_size(live_snr_chart_, static_cast<lv_coord_t>(live_dialog_w - 8),
+                  static_cast<lv_coord_t>(live_dialog_h - 42));
+  lv_obj_set_style_bg_opa(live_snr_chart_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(live_snr_chart_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(live_snr_chart_, kColorBorder, LV_PART_MAIN);
+  lv_obj_set_style_line_color(live_snr_chart_, kColorBorder, LV_PART_ITEMS);
+  lv_chart_set_type(live_snr_chart_, LV_CHART_TYPE_LINE);
+  lv_chart_set_point_count(live_snr_chart_, kMetricChartPoints);
+  lv_chart_set_div_line_count(live_snr_chart_, 4, 6);
+  lv_chart_set_range(live_snr_chart_, LV_CHART_AXIS_PRIMARY_Y, -130, 20);
+  lv_obj_add_event_cb(live_snr_chart_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(live_snr_chart_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  live_snr_series_ = lv_chart_add_series(live_snr_chart_, kColorAck, LV_CHART_AXIS_PRIMARY_Y);
+  live_rssi_series_ = lv_chart_add_series(live_snr_chart_, kColorErr, LV_CHART_AXIS_PRIMARY_Y);
+
+  live_snr_stats_label_ = lv_label_create(live_snr_dialog_);
+  lv_obj_add_style(live_snr_stats_label_, &style_text_main_, 0);
+  lv_label_set_text(live_snr_stats_label_, "SNR 0 dB  RSSI -120 dBm");
+  lv_obj_align(live_snr_stats_label_, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+
+  live_snr_hint_label_ = lv_label_create(live_snr_dialog_);
+  lv_obj_add_style(live_snr_hint_label_, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(live_snr_hint_label_, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(live_snr_hint_label_, "backspace: close chart");
+  lv_obj_align(live_snr_hint_label_, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
+
+  memset(live_rows_, 0, sizeof(live_rows_));
+  live_row_count_ = 0;
+  memset(util_history_, 0, sizeof(util_history_));
+  memset(snr_history_, 0, sizeof(snr_history_));
+  memset(rssi_history_, 0, sizeof(rssi_history_));
+  util_history_head_ = 0;
+  util_history_count_ = 0;
+  radio_history_head_ = 0;
+  radio_history_count_ = 0;
+
   advert_popup_ = lv_obj_create(root_);
   lv_obj_add_style(advert_popup_, &style_panel_, 0);
   lv_obj_set_size(advert_popup_, clampCoord(main_w - 20, 150, dialogMaxW(220, 270)), 52);
@@ -2307,6 +2567,27 @@ void StandaloneUi::bindInputGroup() {
   }
   if (help_close_btn_) {
     lv_group_add_obj(key_group_, help_close_btn_);
+  }
+  if (live_dialog_) {
+    lv_group_add_obj(key_group_, live_dialog_);
+  }
+  if (live_body_panel_) {
+    lv_group_add_obj(key_group_, live_body_panel_);
+  }
+  if (live_close_btn_) {
+    lv_group_add_obj(key_group_, live_close_btn_);
+  }
+  if (live_util_dialog_) {
+    lv_group_add_obj(key_group_, live_util_dialog_);
+  }
+  if (live_util_chart_) {
+    lv_group_add_obj(key_group_, live_util_chart_);
+  }
+  if (live_snr_dialog_) {
+    lv_group_add_obj(key_group_, live_snr_dialog_);
+  }
+  if (live_snr_chart_) {
+    lv_group_add_obj(key_group_, live_snr_chart_);
   }
 
   for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev; indev = lv_indev_get_next(indev)) {
@@ -3640,7 +3921,7 @@ void StandaloneUi::closeContactsDialog(bool focus_chat) {
   }
 
   focus_zone_ = FocusZone::Shortcuts;
-  selected_shortcut_ = 1;
+  selected_shortcut_ = kShortcutContacts;
   refreshShortcutVisuals();
   focusCurrentZoneObject();
   CTS_TRACE("closeContactsDialog exit -> shortcuts");
@@ -3829,7 +4110,7 @@ void StandaloneUi::closeCfgDialog(bool focus_chat) {
     setFocusZone(FocusZone::Chat);
   } else {
     focus_zone_ = FocusZone::Shortcuts;
-    selected_shortcut_ = 0;
+    selected_shortcut_ = kShortcutCfg;
     refreshShortcutVisuals();
     focusCurrentZoneObject();
   }
@@ -4167,7 +4448,7 @@ void StandaloneUi::refreshShortcutVisuals() {
     lv_obj_remove_style(shortcut_btns_[i], &style_unread_edge_, 0);
 
     if (shortcut_labels_[i]) {
-      const bool unread_dm = (i == 1 && has_unread_dm_);
+      const bool unread_dm = (i == kShortcutContacts && has_unread_dm_);
       const bool selected = (focus_zone_ == FocusZone::Shortcuts && i == selected_shortcut_);
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -4183,7 +4464,7 @@ void StandaloneUi::refreshShortcutVisuals() {
 #endif
     }
 
-    if (i == 1 && has_unread_dm_) {
+    if (i == kShortcutContacts && has_unread_dm_) {
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
       lv_obj_add_style(shortcut_btns_[i], &style_unread_edge_, 0);
 #endif
@@ -4225,8 +4506,8 @@ void StandaloneUi::refreshUnreadPulse(uint32_t now_ms) {
   lv_style_set_border_opa(&style_unread_edge_, border_opa);
   lv_style_set_outline_opa(&style_unread_edge_, outline_opa);
 
-  if (has_unread_dm_ && shortcut_btns_[1]) {
-    lv_obj_invalidate(shortcut_btns_[1]);
+  if (has_unread_dm_ && shortcut_btns_[kShortcutContacts]) {
+    lv_obj_invalidate(shortcut_btns_[kShortcutContacts]);
   }
   if (has_unread_channel && !channel_dropdown_open_ && channel_selector_btn_) {
     lv_obj_invalidate(channel_selector_btn_);
@@ -4530,17 +4811,22 @@ void StandaloneUi::triggerShortcut(uint8_t index) {
   }
   closeChannelDropdown(true);
 
-  if (index == 0) {
+  if (index == kShortcutCfg) {
     openCfgDialog();
     return;
   }
 
-  if (index == 1) {
+  if (index == kShortcutContacts) {
     openContactsDialog();
     return;
   }
 
-  if (index == 2) {
+  if (index == kShortcutLive) {
+    openLiveDialog();
+    return;
+  }
+
+  if (index == kShortcutHelp) {
     openHelpDialog();
     return;
   }
@@ -5080,12 +5366,16 @@ void StandaloneUi::closeDmDialog(bool focus_chat) {
 }
 
 void StandaloneUi::openHelpDialog() {
+  if (live_open_) {
+    closeLiveDialog();
+  }
+
   if (help_open_ || !help_dialog_) {
     return;
   }
 
   help_open_ = true;
-  selected_shortcut_ = 2;
+  selected_shortcut_ = kShortcutHelp;
   focus_zone_ = FocusZone::Shortcuts;
   refreshShortcutVisuals();
   lv_obj_clear_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN);
@@ -5110,6 +5400,379 @@ void StandaloneUi::closeHelpDialog() {
   help_open_ = false;
   lv_obj_add_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN);
   focusCurrentZoneObject();
+}
+
+void StandaloneUi::clearLivePanel() {
+  for (size_t i = 0; i < live_row_count_; i++) {
+    if (live_rows_[i]) {
+      lv_obj_del(live_rows_[i]);
+      live_rows_[i] = nullptr;
+    }
+  }
+  live_row_count_ = 0;
+}
+
+void StandaloneUi::appendLiveFeedLine(const char* text, ChatLineKind kind) {
+  if (!text || text[0] == '\0') {
+    return;
+  }
+
+  if (stored_live_count_ < kMaxStoredChatRows) {
+    const size_t write_index = (stored_live_head_ + stored_live_count_) % kMaxStoredChatRows;
+    strncpy(stored_live_[write_index].channel_name, "LIVE", sizeof(stored_live_[write_index].channel_name) - 1);
+    stored_live_[write_index].channel_name[sizeof(stored_live_[write_index].channel_name) - 1] = '\0';
+    strncpy(stored_live_[write_index].text, text, sizeof(stored_live_[write_index].text) - 1);
+    stored_live_[write_index].text[sizeof(stored_live_[write_index].text) - 1] = '\0';
+    stored_live_[write_index].kind = kind;
+    stored_live_count_++;
+  } else {
+    strncpy(stored_live_[stored_live_head_].channel_name, "LIVE",
+            sizeof(stored_live_[stored_live_head_].channel_name) - 1);
+    stored_live_[stored_live_head_].channel_name[sizeof(stored_live_[stored_live_head_].channel_name) - 1] = '\0';
+    strncpy(stored_live_[stored_live_head_].text, text, sizeof(stored_live_[stored_live_head_].text) - 1);
+    stored_live_[stored_live_head_].text[sizeof(stored_live_[stored_live_head_].text) - 1] = '\0';
+    stored_live_[stored_live_head_].kind = kind;
+    stored_live_head_ = (stored_live_head_ + 1) % kMaxStoredChatRows;
+  }
+
+  if (!live_open_ || !live_body_panel_) {
+    return;
+  }
+
+  if (stored_live_count_ == 1) {
+    rebuildLiveDialog();
+    return;
+  }
+
+  const bool at_bottom = lv_obj_get_scroll_bottom(live_body_panel_) <= 2;
+  const lv_coord_t scroll_y = lv_obj_get_scroll_y(live_body_panel_);
+
+  if (live_row_count_ >= kMaxChatRows) {
+    lv_obj_del(live_rows_[0]);
+    for (size_t i = 1; i < live_row_count_; i++) {
+      live_rows_[i - 1] = live_rows_[i];
+    }
+    live_row_count_--;
+  }
+
+  lv_obj_t* row = lv_label_create(live_body_panel_);
+  lv_obj_set_width(row, LV_PCT(100));
+  lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+  lv_obj_add_style(row, &style_text_main_, 0);
+  lv_obj_set_style_text_font(row, chatPanelFont(), 0);
+
+  switch (kind) {
+    case ChatLineKind::Rx:
+      lv_obj_add_style(row, &style_msg_rx_, 0);
+      break;
+    case ChatLineKind::Tx:
+      lv_obj_add_style(row, &style_msg_tx_, 0);
+      break;
+    case ChatLineKind::Ack:
+      lv_obj_add_style(row, &style_msg_ack_, 0);
+      break;
+    case ChatLineKind::Error:
+      lv_obj_add_style(row, &style_msg_err_, 0);
+      break;
+    case ChatLineKind::Normal:
+    default:
+      break;
+  }
+
+  lv_label_set_text(row, text);
+  lv_obj_set_style_text_color(row, liveFeedTextColor(text, kind == ChatLineKind::Error), 0);
+  live_rows_[live_row_count_++] = row;
+
+  if (at_bottom) {
+    lv_obj_scroll_to_y(live_body_panel_, LV_COORD_MAX, LV_ANIM_OFF);
+  } else {
+    lv_obj_scroll_to_y(live_body_panel_, scroll_y, LV_ANIM_OFF);
+  }
+}
+
+void StandaloneUi::rebuildLiveDialog() {
+  if (!live_body_panel_) {
+    return;
+  }
+
+  clearLivePanel();
+
+  if (stored_live_count_ == 0) {
+    lv_obj_t* row = lv_label_create(live_body_panel_);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(row, &style_text_dim_, 0);
+    lv_obj_set_style_text_font(row, chatPanelFont(), 0);
+    lv_label_set_text(row, "(no mesh traffic yet)");
+    live_rows_[live_row_count_++] = row;
+    return;
+  }
+
+  const size_t first =
+      (stored_live_count_ > kMaxChatRows) ? (stored_live_count_ - kMaxChatRows) : static_cast<size_t>(0);
+  for (size_t i = first; i < stored_live_count_; i++) {
+    const size_t idx = (stored_live_head_ + i) % kMaxStoredChatRows;
+    lv_obj_t* row = lv_label_create(live_body_panel_);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(row, &style_text_main_, 0);
+    lv_obj_set_style_text_font(row, chatPanelFont(), 0);
+
+    switch (stored_live_[idx].kind) {
+      case ChatLineKind::Rx:
+        lv_obj_add_style(row, &style_msg_rx_, 0);
+        break;
+      case ChatLineKind::Tx:
+        lv_obj_add_style(row, &style_msg_tx_, 0);
+        break;
+      case ChatLineKind::Ack:
+        lv_obj_add_style(row, &style_msg_ack_, 0);
+        break;
+      case ChatLineKind::Error:
+        lv_obj_add_style(row, &style_msg_err_, 0);
+        break;
+      case ChatLineKind::Normal:
+      default:
+        break;
+    }
+
+    lv_label_set_text(row, stored_live_[idx].text);
+    lv_obj_set_style_text_color(row,
+                                liveFeedTextColor(stored_live_[idx].text,
+                                                  stored_live_[idx].kind == ChatLineKind::Error),
+                                0);
+    live_rows_[live_row_count_++] = row;
+  }
+
+  lv_obj_scroll_to_y(live_body_panel_, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+void StandaloneUi::openLiveDialog() {
+  if (help_open_) {
+    closeHelpDialog();
+  }
+
+  if (live_open_ || !live_dialog_) {
+    return;
+  }
+
+  live_open_ = true;
+  selected_shortcut_ = kShortcutLive;
+  focus_zone_ = FocusZone::Shortcuts;
+  refreshShortcutVisuals();
+  lv_obj_clear_flag(live_dialog_, LV_OBJ_FLAG_HIDDEN);
+  rebuildLiveDialog();
+  lv_obj_move_foreground(live_dialog_);
+  if (key_group_) {
+    if (live_body_panel_) {
+      lv_group_focus_obj(live_body_panel_);
+    } else {
+      lv_group_focus_obj(live_dialog_);
+    }
+  }
+}
+
+void StandaloneUi::closeLiveDialog() {
+  if (!live_open_ || !live_dialog_) {
+    return;
+  }
+
+  closeLiveUtilDialog();
+  closeLiveSnrDialog();
+  live_open_ = false;
+  lv_obj_add_flag(live_dialog_, LV_OBJ_FLAG_HIDDEN);
+  focusCurrentZoneObject();
+}
+
+void StandaloneUi::appendUtilizationSample(uint16_t util_percent, uint16_t packets_per_sec_x10) {
+  util_latest_percent_ = util_percent;
+  util_latest_pps_x10_ = packets_per_sec_x10;
+
+  const size_t write_index = (util_history_count_ < kMetricChartPoints)
+                                 ? ((util_history_head_ + util_history_count_) % kMetricChartPoints)
+                                 : util_history_head_;
+  util_history_[write_index] = util_percent;
+  if (util_history_count_ < kMetricChartPoints) {
+    util_history_count_++;
+  } else {
+    util_history_head_ = (util_history_head_ + 1) % kMetricChartPoints;
+  }
+
+  if (!live_util_open_ || !live_util_chart_ || !live_util_series_) {
+    return;
+  }
+
+  lv_chart_set_next_value(live_util_chart_, live_util_series_, util_percent);
+  lv_chart_refresh(live_util_chart_);
+  if (live_util_stats_label_) {
+    char stats[48] = {};
+    snprintf(stats, sizeof(stats), "%u%%  (%u.%u pkt/s)", static_cast<unsigned>(util_latest_percent_),
+             static_cast<unsigned>(util_latest_pps_x10_ / 10), static_cast<unsigned>(util_latest_pps_x10_ % 10));
+    lv_label_set_text(live_util_stats_label_, stats);
+  }
+}
+
+void StandaloneUi::appendSnrRssiSample(int16_t snr_db, int16_t rssi_dbm) {
+  last_snr_db_ = snr_db;
+  last_rssi_dbm_ = rssi_dbm;
+
+  const size_t write_index = (radio_history_count_ < kMetricChartPoints)
+                                 ? ((radio_history_head_ + radio_history_count_) % kMetricChartPoints)
+                                 : radio_history_head_;
+  snr_history_[write_index] = snr_db;
+  rssi_history_[write_index] = rssi_dbm;
+  if (radio_history_count_ < kMetricChartPoints) {
+    radio_history_count_++;
+  } else {
+    radio_history_head_ = (radio_history_head_ + 1) % kMetricChartPoints;
+  }
+
+  if (!live_snr_open_ || !live_snr_chart_ || !live_snr_series_ || !live_rssi_series_) {
+    return;
+  }
+
+  lv_chart_set_next_value(live_snr_chart_, live_snr_series_, snr_db);
+  lv_chart_set_next_value(live_snr_chart_, live_rssi_series_, rssi_dbm);
+  lv_chart_refresh(live_snr_chart_);
+  if (live_snr_stats_label_) {
+    char stats[64] = {};
+    snprintf(stats, sizeof(stats), "SNR %d dB  RSSI %d dBm", static_cast<int>(last_snr_db_),
+             static_cast<int>(last_rssi_dbm_));
+    lv_label_set_text(live_snr_stats_label_, stats);
+  }
+}
+
+void StandaloneUi::rebuildLiveUtilChart() {
+  if (!live_util_chart_ || !live_util_series_) {
+    return;
+  }
+
+  lv_chart_set_point_count(live_util_chart_, kMetricChartPoints);
+  lv_chart_set_all_value(live_util_chart_, live_util_series_, 0);
+
+  for (size_t i = 0; i < util_history_count_; i++) {
+    const size_t idx = (util_history_head_ + i) % kMetricChartPoints;
+    lv_chart_set_next_value(live_util_chart_, live_util_series_, util_history_[idx]);
+  }
+  lv_chart_refresh(live_util_chart_);
+
+  if (live_util_stats_label_) {
+    char stats[48] = {};
+    snprintf(stats, sizeof(stats), "%u%%  (%u.%u pkt/s)", static_cast<unsigned>(util_latest_percent_),
+             static_cast<unsigned>(util_latest_pps_x10_ / 10), static_cast<unsigned>(util_latest_pps_x10_ % 10));
+    lv_label_set_text(live_util_stats_label_, stats);
+  }
+}
+
+void StandaloneUi::rebuildLiveSnrChart() {
+  if (!live_snr_chart_ || !live_snr_series_ || !live_rssi_series_) {
+    return;
+  }
+
+  lv_chart_set_point_count(live_snr_chart_, kMetricChartPoints);
+  lv_chart_set_all_value(live_snr_chart_, live_snr_series_, 0);
+  lv_chart_set_all_value(live_snr_chart_, live_rssi_series_, -120);
+
+  for (size_t i = 0; i < radio_history_count_; i++) {
+    const size_t idx = (radio_history_head_ + i) % kMetricChartPoints;
+    lv_chart_set_next_value(live_snr_chart_, live_snr_series_, snr_history_[idx]);
+    lv_chart_set_next_value(live_snr_chart_, live_rssi_series_, rssi_history_[idx]);
+  }
+  lv_chart_refresh(live_snr_chart_);
+
+  if (live_snr_stats_label_) {
+    char stats[64] = {};
+    snprintf(stats, sizeof(stats), "SNR %d dB  RSSI %d dBm", static_cast<int>(last_snr_db_),
+             static_cast<int>(last_rssi_dbm_));
+    lv_label_set_text(live_snr_stats_label_, stats);
+  }
+}
+
+void StandaloneUi::openLiveUtilDialog() {
+  if (!live_util_dialog_) {
+    return;
+  }
+
+  closeLiveSnrDialog();
+  live_util_open_ = true;
+  lv_obj_clear_flag(live_util_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(live_util_dialog_);
+  rebuildLiveUtilChart();
+  if (key_group_ && live_util_chart_) {
+    lv_group_focus_obj(live_util_chart_);
+  }
+}
+
+void StandaloneUi::closeLiveUtilDialog() {
+  if (!live_util_open_ || !live_util_dialog_) {
+    return;
+  }
+
+  live_util_open_ = false;
+  lv_obj_add_flag(live_util_dialog_, LV_OBJ_FLAG_HIDDEN);
+  if (live_open_ && key_group_ && live_body_panel_) {
+    lv_group_focus_obj(live_body_panel_);
+  }
+}
+
+void StandaloneUi::openLiveSnrDialog() {
+  if (!live_snr_dialog_) {
+    return;
+  }
+
+  closeLiveUtilDialog();
+  live_snr_open_ = true;
+  lv_obj_clear_flag(live_snr_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(live_snr_dialog_);
+  rebuildLiveSnrChart();
+  if (key_group_ && live_snr_chart_) {
+    lv_group_focus_obj(live_snr_chart_);
+  }
+}
+
+void StandaloneUi::closeLiveSnrDialog() {
+  if (!live_snr_open_ || !live_snr_dialog_) {
+    return;
+  }
+
+  live_snr_open_ = false;
+  lv_obj_add_flag(live_snr_dialog_, LV_OBJ_FLAG_HIDDEN);
+  if (live_open_ && key_group_ && live_body_panel_) {
+    lv_group_focus_obj(live_body_panel_);
+  }
+}
+
+void StandaloneUi::sampleLiveMetrics(uint32_t now_ms) {
+  if (!mesh_adapter_) {
+    return;
+  }
+
+  mesh::MeshRadioStats stats{};
+  mesh_adapter_->getRadioStats(&stats);
+
+  if (last_util_sample_ms_ == 0) {
+    last_util_sample_ms_ = now_ms;
+    last_util_raw_rx_count_ = stats.rx_raw_count;
+    return;
+  }
+
+  const uint32_t elapsed = now_ms - last_util_sample_ms_;
+  if (elapsed < 1000) {
+    return;
+  }
+
+  uint32_t delta_raw = 0;
+  if (stats.rx_raw_count >= last_util_raw_rx_count_) {
+    delta_raw = stats.rx_raw_count - last_util_raw_rx_count_;
+  }
+
+  const uint32_t packets_per_sec_x10 = (delta_raw * 10000UL) / elapsed;
+  const uint32_t util_estimate = (delta_raw * 5000UL) / elapsed;
+  const uint16_t util_percent = static_cast<uint16_t>(util_estimate > 100UL ? 100UL : util_estimate);
+
+  appendUtilizationSample(util_percent, static_cast<uint16_t>(packets_per_sec_x10));
+  last_util_sample_ms_ = now_ms;
+  last_util_raw_rx_count_ = stats.rx_raw_count;
 }
 
 void StandaloneUi::openAdvertPopup(const char* text, bool is_error) {
@@ -5514,6 +6177,9 @@ void StandaloneUi::handleKey(uint32_t key) {
   if (help_open_ && (!help_dialog_ || lv_obj_has_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     help_open_ = false;
   }
+  if (live_open_ && (!live_dialog_ || lv_obj_has_flag(live_dialog_, LV_OBJ_FLAG_HIDDEN))) {
+    live_open_ = false;
+  }
   if (advert_popup_open_ && (!advert_popup_ || lv_obj_has_flag(advert_popup_, LV_OBJ_FLAG_HIDDEN))) {
     advert_popup_open_ = false;
     advert_popup_deadline_ms_ = 0;
@@ -5579,6 +6245,71 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
+  // Global shortcut: open/close Live feed from any screen except compose.
+  if (kKeyboardNavEnabled && norm_key == 'l') {
+    if (live_open_) {
+      closeLiveDialog();
+    } else {
+      openLiveDialog();
+    }
+    return;
+  }
+
+  if (live_open_) {
+    if (kKeyboardNavEnabled && norm_key == 'c') {
+      stored_live_head_ = 0;
+      stored_live_count_ = 0;
+      rebuildLiveDialog();
+      return;
+    }
+    if (kKeyboardNavEnabled && norm_key == 'u') {
+      if (live_util_open_) {
+        closeLiveUtilDialog();
+      } else {
+        openLiveUtilDialog();
+      }
+      return;
+    }
+    if (kKeyboardNavEnabled && norm_key == 's') {
+      if (live_snr_open_) {
+        closeLiveSnrDialog();
+      } else {
+        openLiveSnrDialog();
+      }
+      return;
+    }
+    if (live_util_open_ || live_snr_open_) {
+      if (norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127 || norm_key == LV_KEY_ESC) {
+        closeLiveUtilDialog();
+        closeLiveSnrDialog();
+      }
+      return;
+    }
+    if (focused == live_close_btn_ &&
+        (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r' || norm_key == LV_KEY_ESC ||
+         norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127)) {
+      closeLiveDialog();
+      return;
+    }
+    if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+      if (live_body_panel_) {
+        lv_obj_scroll_by(live_body_panel_, 0, -kMsgScrollStep, LV_ANIM_OFF);
+      }
+      return;
+    }
+    if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+      if (live_body_panel_) {
+        lv_obj_scroll_by(live_body_panel_, 0, kMsgScrollStep, LV_ANIM_OFF);
+      }
+      return;
+    }
+    if (norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127 || norm_key == LV_KEY_ESC) {
+      closeLiveDialog();
+      return;
+    }
+    return;
+  }
+
   if (help_open_) {
     if (focused == help_close_btn_ &&
         (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r' || norm_key == LV_KEY_ESC ||
@@ -5616,17 +6347,17 @@ void StandaloneUi::handleKey(uint32_t key) {
 
   // Global shortcut: open CFG from any non-compose screen.
   if (!cfg_open_ && !contacts_open_ && !dm_open_ && kKeyboardNavEnabled && norm_key == 'c') {
-    selected_shortcut_ = 0;
+    selected_shortcut_ = kShortcutCfg;
     setFocusZone(FocusZone::Shortcuts);
-    triggerShortcut(0);
+    triggerShortcut(kShortcutCfg);
     return;
   }
 
   // Global shortcut: open Contacts from any non-compose screen.
   if (!cfg_open_ && !contacts_open_ && !dm_open_ && kKeyboardNavEnabled && norm_key == 'o') {
-    selected_shortcut_ = 1;
+    selected_shortcut_ = kShortcutContacts;
     setFocusZone(FocusZone::Shortcuts);
-    triggerShortcut(1);
+    triggerShortcut(kShortcutContacts);
     return;
   }
 
@@ -6012,9 +6743,9 @@ void StandaloneUi::handleKey(uint32_t key) {
       if (!kKeyboardNavEnabled) {
         return;
       }
-      selected_shortcut_ = 1;
+      selected_shortcut_ = kShortcutContacts;
       setFocusZone(FocusZone::Shortcuts);
-      triggerShortcut(1);
+      triggerShortcut(kShortcutContacts);
       return;
     default:
       if (is_escape && focus_zone_ != FocusZone::Selector) {
@@ -6037,6 +6768,9 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   if (help_open_ && (!help_dialog_ || lv_obj_has_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     help_open_ = false;
   }
+  if (live_open_ && (!live_dialog_ || lv_obj_has_flag(live_dialog_, LV_OBJ_FLAG_HIDDEN))) {
+    live_open_ = false;
+  }
   if (advert_popup_open_ && (!advert_popup_ || lv_obj_has_flag(advert_popup_, LV_OBJ_FLAG_HIDDEN))) {
     advert_popup_open_ = false;
     advert_popup_deadline_ms_ = 0;
@@ -6054,6 +6788,13 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   if (help_open_) {
     if ((target == help_close_btn_) || (target == help_close_label_) || hasAncestor(target, help_close_btn_)) {
       closeHelpDialog();
+    }
+    return;
+  }
+
+  if (live_open_) {
+    if ((target == live_close_btn_) || (target == live_close_label_) || hasAncestor(target, live_close_btn_)) {
+      closeLiveDialog();
     }
     return;
   }
@@ -6451,21 +7192,42 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
       }
       if (target == ui->dm_panel_) {
         ui->focus_zone_ = FocusZone::Shortcuts;
-        ui->selected_shortcut_ = 1;
+        ui->selected_shortcut_ = kShortcutContacts;
       }
       if (target == ui->dm_new_btn_ || target == ui->dm_new_label_ || target == ui->dm_close_btn_ ||
           target == ui->dm_close_label_) {
         ui->focus_zone_ = FocusZone::Shortcuts;
-        ui->selected_shortcut_ = 1;
+        ui->selected_shortcut_ = kShortcutContacts;
+      }
+      if (target == ui->live_dialog_ || target == ui->live_body_panel_ || target == ui->live_title_label_ ||
+          hasAncestor(target, ui->live_body_panel_)) {
+        ui->focus_zone_ = FocusZone::Shortcuts;
+        ui->selected_shortcut_ = kShortcutLive;
+      }
+      if (target == ui->live_util_dialog_ || target == ui->live_util_chart_ || target == ui->live_util_title_label_ ||
+          target == ui->live_util_units_label_ || target == ui->live_util_hint_label_ ||
+          target == ui->live_util_stats_label_) {
+        ui->focus_zone_ = FocusZone::Shortcuts;
+        ui->selected_shortcut_ = kShortcutLive;
+      }
+      if (target == ui->live_snr_dialog_ || target == ui->live_snr_chart_ || target == ui->live_snr_title_label_ ||
+          target == ui->live_snr_units_label_ || target == ui->live_snr_hint_label_ ||
+          target == ui->live_snr_stats_label_) {
+        ui->focus_zone_ = FocusZone::Shortcuts;
+        ui->selected_shortcut_ = kShortcutLive;
+      }
+      if (target == ui->live_close_btn_ || target == ui->live_close_label_) {
+        ui->focus_zone_ = FocusZone::Shortcuts;
+        ui->selected_shortcut_ = kShortcutLive;
       }
       if (target == ui->help_dialog_ || target == ui->help_body_panel_ || target == ui->help_title_label_ ||
           target == ui->help_body_label_ || hasAncestor(target, ui->help_body_panel_)) {
         ui->focus_zone_ = FocusZone::Shortcuts;
-        ui->selected_shortcut_ = 2;
+        ui->selected_shortcut_ = kShortcutHelp;
       }
       if (target == ui->help_close_btn_ || target == ui->help_close_label_) {
         ui->focus_zone_ = FocusZone::Shortcuts;
-        ui->selected_shortcut_ = 2;
+        ui->selected_shortcut_ = kShortcutHelp;
       }
       for (uint8_t i = 0; i < ui->configured_channel_count_; i++) {
         if (target == ui->channel_dropdown_rows_[i] || target == ui->channel_dropdown_labels_[i]) {
@@ -6597,6 +7359,7 @@ void StandaloneUi::loop() {
   }
 
   syncChannelsFromMeshIfNeeded(now);
+  sampleLiveMetrics(now);
   refreshClockIfNeeded(now);
   refreshUnreadPulse(now);
 
@@ -6673,7 +7436,35 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
     return;
   }
 
+  char hhmm[8] = {};
+  formatUiClockHhMm(hhmm, sizeof(hhmm));
+
+  if (event.type == mesh::MeshEventType::Info) {
+    int16_t snr_db = 0;
+    int16_t rssi_dbm = 0;
+    if (parseRadioInfoSample(event.text, &snr_db, &rssi_dbm)) {
+      appendSnrRssiSample(snr_db, rssi_dbm);
+      return;
+    }
+
+    char live_line[128] = {};
+    snprintf(live_line, sizeof(live_line), "[%s] INFO %s", hhmm, event.text);
+
+    ChatLineKind info_kind = ChatLineKind::Ack;
+    if (strstr(event.text, "fail") || strstr(event.text, "Fail") || strstr(event.text, "dropped") ||
+        strstr(event.text, "timeout")) {
+      info_kind = ChatLineKind::Error;
+    }
+    appendLiveFeedLine(live_line, info_kind);
+    return;
+  }
+
   if (event.type == mesh::MeshEventType::DirectMessage) {
+    char live_line[128] = {};
+    snprintf(live_line, sizeof(live_line), "[%s] DM %s: %s", hhmm,
+             event.channel_name[0] != '\0' ? event.channel_name : "(unnamed)", event.text);
+    appendLiveFeedLine(live_line, ChatLineKind::Rx);
+
     strncpy(last_dm_sender_name_, event.channel_name, sizeof(last_dm_sender_name_) - 1);
     last_dm_sender_name_[sizeof(last_dm_sender_name_) - 1] = '\0';
     if (event.peer_key[0] != '\0') {
@@ -6698,9 +7489,6 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
     }
     const bool matches_active_dm = (dm_open_ && (key_match || name_match)) || contacts_match;
 
-    if (false) Serial.printf("[UI][DM] event from=%s dm_open=%d key_match=%d name_match=%d active=%d\n", event.channel_name,
-                  dm_open_ ? 1 : 0, key_match ? 1 : 0, name_match ? 1 : 0, matches_active_dm ? 1 : 0);
-
     if (!matches_active_dm) {
       has_unread_dm_ = true;
       refreshShortcutVisuals();
@@ -6708,8 +7496,6 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
       has_unread_dm_ = false;
       refreshShortcutVisuals();
     }
-    char hhmm[8] = {};
-    formatUiClockHhMm(hhmm, sizeof(hhmm));
     char initials[12] = {};
     abbreviateContactName(event.channel_name, initials, sizeof(initials));
     char dm_line[112] = {};
@@ -6721,6 +7507,11 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   if (event.type != mesh::MeshEventType::ChannelMessage) {
     return;
   }
+
+  char live_line[128] = {};
+  snprintf(live_line, sizeof(live_line), "[%s] CH %s: %s", hhmm,
+           event.channel_name[0] != '\0' ? event.channel_name : "(unknown)", event.text);
+  appendLiveFeedLine(live_line, ChatLineKind::Rx);
 
   const int channel_index = findConfiguredChannelIndex(event.channel_name);
   if (channel_index < 0) {
@@ -6744,8 +7535,6 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   }
 
   char display_text[96] = {};
-  char hhmm[8] = {};
-  formatUiClockHhMm(hhmm, sizeof(hhmm));
   snprintf(display_text, sizeof(display_text), "[%s] %s", hhmm, event.text);
 
   pushChannelHistoryLine(event.channel_name, display_text, ChatLineKind::Rx);
