@@ -65,6 +65,10 @@ class MeshAdapter {
   int getGpsSatelliteCount() const;
   bool setAdvertLocation(bool enabled, double latitude, double longitude);
   void getAdvertLocation(bool* enabled, double* latitude, double* longitude) const;
+  bool setPathHashMode(uint8_t mode);
+  uint8_t getPathHashMode() const;
+  bool setMeshRegion(const char* region_name);
+  void getMeshRegion(char* out_name, size_t out_size) const;
   bool setAutoAdvertIntervalMinutes(uint16_t minutes);
   uint16_t getAutoAdvertIntervalMinutes() const;
   bool broadcastSelfAdvertNow();
@@ -120,6 +124,8 @@ class MeshAdapter {
   uint32_t auto_advert_interval_ms_ = 21600000UL;
   uint16_t auto_advert_interval_minutes_ = 360;
   uint32_t last_persist_flush_ms_ = 0;
+  uint8_t path_hash_mode_ = 0;
+  char mesh_region_[32] = {};
   uint32_t rx_raw_count_ = 0;
   uint32_t rx_packet_count_ = 0;
   uint32_t last_rx_ms_ = 0;

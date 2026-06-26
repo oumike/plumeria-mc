@@ -63,7 +63,9 @@ void setErrText(char* out_err, size_t out_err_size, const char* text) {
 }
 
 void clearSdVfsRegistration() {
-  // Ignore return value: if path is not registered this is a no-op.
+  // Arduino SD defaults to "/sd" in this core, but some builds may use "/sdcard".
+  // Ignore return values: unregistering a non-registered path is a no-op.
+  (void)esp_vfs_fat_unregister_path("/sd");
   (void)esp_vfs_fat_unregister_path("/sdcard");
 }
 
@@ -301,15 +303,23 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
     return true;
   }
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
   SD.end();
   clearSdVfsRegistration();
   SPI.end();
   delay(6);
   SPI.begin(sd_sck, sd_miso, sd_mosi);
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+  static const char* kMountpoints[] = {"/sd", "/sdcard"};
   static const int kProfiles[] = {3, 2, 0, 1, 4};
   static const uint32_t kSpeeds[] = {4000000UL, 1000000UL, 400000UL};
+  // FATFS context allocs ~ sizeof(vfs_fat_ctx_t) + max_files*sizeof(FIL).
+  // With BOARD_HAS_PSRAM enabled in platformio.ini, FATFS allocates from PSRAM
+  // (CONFIG_FATFS_ALLOC_PREFER_EXTRAM); keeping max_files small still helps
+  // when PSRAM is missing or saturated.
+  constexpr uint8_t kSdMaxFiles = 2;
+  Serial.printf("[SD][boot] enter free_heap=%lu\n",
+                static_cast<unsigned long>(ESP.getFreeHeap()));
   for (size_t pi = 0; pi < (sizeof(kProfiles) / sizeof(kProfiles[0])); pi++) {
     if (!pagerPrepareSdPower(kProfiles[pi], out_err, out_err_size)) {
       continue;
@@ -321,13 +331,24 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
       SPI.end();
       delay(6);
       SPI.begin(sd_sck, sd_miso, sd_mosi);
-      if (kPagerBootDiag) {
-        pagerDiagLog("sd try profile=%d speed=%lu", kProfiles[pi],
-                     static_cast<unsigned long>(kSpeeds[si]));
-      }
-      if (!SD.begin(sd_cs, SPI, kSpeeds[si])) {
+      Serial.printf("[SD][boot] try profile=%d speed=%lu free_heap=%lu\n",
+                    kProfiles[pi],
+                    static_cast<unsigned long>(kSpeeds[si]),
+                    static_cast<unsigned long>(ESP.getFreeHeap()));
+
+      bool mounted = false;
+      for (size_t mi = 0; mi < (sizeof(kMountpoints) / sizeof(kMountpoints[0])); mi++) {
+        Serial.printf("[SD][boot] try mountpoint=%s\n", kMountpoints[mi]);
+        if (SD.begin(sd_cs, SPI, kSpeeds[si], kMountpoints[mi], kSdMaxFiles)) {
+          mounted = true;
+          break;
+        }
         SD.end();
         clearSdVfsRegistration();
+        delay(2);
+      }
+
+      if (!mounted) {
         SPI.end();
         delay(6);
         continue;
@@ -339,10 +360,8 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
         delay(6);
         continue;
       }
-      if (kPagerBootDiag) {
-        pagerDiagLog("sd mounted profile=%d speed=%lu", kProfiles[pi],
-                     static_cast<unsigned long>(kSpeeds[si]));
-      }
+      Serial.printf("[SD][boot] mounted profile=%d speed=%lu\n", kProfiles[pi],
+                    static_cast<unsigned long>(kSpeeds[si]));
       setErrText(out_err, out_err_size, "");
       return true;
     }
@@ -352,24 +371,25 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
   clearSdVfsRegistration();
   SPI.end();
   delay(6);
+  Serial.printf("[SD][boot] all profiles failed free_heap=%lu\n",
+                static_cast<unsigned long>(ESP.getFreeHeap()));
   setErrText(out_err, out_err_size, "SD mount failed");
   return false;
 #else
-  if (!SD.begin(sd_cs, SPI, kCfgSdClockHz)) {
-    // Recover from stale mount state by tearing down and retrying once.
-    SD.end();
-    clearSdVfsRegistration();
-    SPI.end();
-    delay(6);
-    SPI.begin(sd_sck, sd_miso, sd_mosi);
-    if (!SD.begin(sd_cs, SPI, kCfgSdClockHz)) {
-      SD.end();
-      clearSdVfsRegistration();
-      SPI.end();
-      delay(6);
-      setErrText(out_err, out_err_size, "SD mount failed");
-      return false;
-    }
+  // Cardputer / T-Deck path. Mirror camillia-mt's simple mount sequence:
+  // no SPI.end()/SD.end()/VFS unregister churn, no mountpoint override, no
+  // max_files override. On boards without PSRAM (e.g. Cardputer) the FATFS
+  // context allocates from fragmented internal DRAM, so the fewer
+  // allocations we trigger before the mount, the more likely it succeeds.
+  SPI.begin(sd_sck, sd_miso, sd_mosi);
+  delay(8);
+  bool mounted = SD.begin(sd_cs, SPI, 4000000UL);
+  if (!mounted) {
+    mounted = SD.begin(sd_cs, SPI, 1000000UL);
+  }
+  if (!mounted) {
+    setErrText(out_err, out_err_size, "SD mount failed");
+    return false;
   }
 #endif
 
@@ -536,6 +556,11 @@ void setup() {
   bool mesh_ready = false;
 
   plumeria::web::loadSettings(&g_web_settings);
+
+  if (display_ready) {
+    g_ui.showSplash(g_web_settings.node_name, 2200);
+  }
+
   g_display.setScreenTimeoutSeconds(g_web_settings.screen_timeout_seconds);
   plumeria::hal::RadioConfig radio_cfg = g_board.defaultRadioConfig();
   plumeria::web::applyRadioProfile(&radio_cfg, g_web_settings);

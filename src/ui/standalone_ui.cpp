@@ -7,6 +7,7 @@
 #include <Wire.h>
 #include <esp_vfs_fat.h>
 #include <lvgl.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -304,12 +305,26 @@ const char* kCfgRowLabels[] = {
   "Radio Preset",
   "Web Config",
   "GPS",
+  "Multipaths",
+  "Mesh Region",
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
   "Export Config",
   "Import Config",
   "Delete Config",
 #endif
 };
+
+constexpr uint8_t kCfgRowNodeName = 0;
+constexpr uint8_t kCfgRowRadioPreset = 1;
+constexpr uint8_t kCfgRowWebConfig = 2;
+constexpr uint8_t kCfgRowGps = 3;
+constexpr uint8_t kCfgRowMultipaths = 4;
+constexpr uint8_t kCfgRowMeshRegion = 5;
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+constexpr uint8_t kCfgRowExportConfig = 6;
+constexpr uint8_t kCfgRowImportConfig = 7;
+constexpr uint8_t kCfgRowDeleteConfig = 8;
+#endif
 
 const char* radioPresetDisplayName(const char* region) {
   if (!region || region[0] == '\0') {
@@ -577,6 +592,121 @@ void formatDmDisplayLine(const char* line_text, uint32_t timestamp_epoch, char* 
   snprintf(out_text, out_size, "[%s] %s", hhmm, line_text);
 }
 
+bool epochToLocalTm(uint32_t epoch_seconds, struct tm* out_tm) {
+  if (!out_tm || epoch_seconds == 0) {
+    return false;
+  }
+
+  const time_t event_time = static_cast<time_t>(epoch_seconds);
+  return localtime_r(&event_time, out_tm) != nullptr;
+}
+
+uint32_t dateKeyFromEpoch(uint32_t epoch_seconds) {
+  struct tm tm_event{};
+  if (!epochToLocalTm(epoch_seconds, &tm_event)) {
+    return 0;
+  }
+
+  const uint32_t year = static_cast<uint32_t>(tm_event.tm_year + 1900);
+  const uint32_t month = static_cast<uint32_t>(tm_event.tm_mon + 1);
+  const uint32_t day = static_cast<uint32_t>(tm_event.tm_mday);
+  return year * 10000UL + month * 100UL + day;
+}
+
+const char* dayOrdinalSuffix(uint8_t day) {
+  const uint8_t mod100 = static_cast<uint8_t>(day % 100U);
+  if (mod100 >= 11U && mod100 <= 13U) {
+    return "th";
+  }
+
+  switch (day % 10U) {
+    case 1:
+      return "st";
+    case 2:
+      return "nd";
+    case 3:
+      return "rd";
+    default:
+      return "th";
+  }
+}
+
+void formatEpochDateMarker(uint32_t epoch_seconds, char* out_text, size_t out_size) {
+  if (!out_text || out_size == 0) {
+    return;
+  }
+
+  out_text[0] = '\0';
+  struct tm tm_event{};
+  if (!epochToLocalTm(epoch_seconds, &tm_event)) {
+    return;
+  }
+
+  static const char* kMonthNames[12] = {
+      "January", "February", "March",     "April",   "May",      "June",
+      "July",    "August",   "September", "October", "November", "December",
+  };
+
+  const uint8_t month_idx = static_cast<uint8_t>(tm_event.tm_mon);
+  if (month_idx >= 12) {
+    return;
+  }
+
+  const uint8_t day = static_cast<uint8_t>(tm_event.tm_mday);
+  const unsigned year = static_cast<unsigned>(tm_event.tm_year + 1900);
+  snprintf(out_text, out_size, "%s %u%s %u", kMonthNames[month_idx], static_cast<unsigned>(day),
+           dayOrdinalSuffix(day), year);
+}
+
+lv_obj_t* createDateMarkerRow(lv_obj_t* panel, lv_coord_t row_w, uint32_t epoch_seconds, const lv_font_t* font) {
+  if (!panel) {
+    return nullptr;
+  }
+
+  char date_text[48] = {};
+  formatEpochDateMarker(epoch_seconds, date_text, sizeof(date_text));
+  if (date_text[0] == '\0') {
+    return nullptr;
+  }
+
+  lv_obj_t* row = lv_obj_create(panel);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_pad_top(row, 3, 0);
+  lv_obj_set_style_pad_bottom(row, 2, 0);
+  lv_obj_set_style_pad_column(row, 4, 0);
+  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(row, 0, 0);
+  lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  lv_obj_t* left_line = lv_obj_create(row);
+  lv_obj_remove_style_all(left_line);
+  lv_obj_set_flex_grow(left_line, 1);
+  lv_obj_set_height(left_line, 1);
+  lv_obj_set_style_bg_color(left_line, kColorBorder, 0);
+  lv_obj_set_style_bg_opa(left_line, LV_OPA_70, 0);
+
+  lv_obj_t* marker = lv_label_create(row);
+  if (font) {
+    lv_obj_set_style_text_font(marker, font, 0);
+  }
+  lv_obj_set_style_text_color(marker, kColorTextDim, 0);
+  lv_label_set_text(marker, date_text);
+
+  lv_obj_t* right_line = lv_obj_create(row);
+  lv_obj_remove_style_all(right_line);
+  lv_obj_set_flex_grow(right_line, 1);
+  lv_obj_set_height(right_line, 1);
+  lv_obj_set_style_bg_color(right_line, kColorBorder, 0);
+  lv_obj_set_style_bg_opa(right_line, LV_OPA_70, 0);
+
+  return row;
+}
+
 void formatContactLastHeard(uint32_t lastmod, char* out, size_t out_size) {
   if (!out || out_size == 0) {
     return;
@@ -741,10 +871,17 @@ void buildDebugTestMessage(char* out, size_t out_size) {
   }
 }
 
+struct PersistedChatLineLegacy {
+  char channel_name[32];
+  char text[96];
+  uint8_t kind;
+};
+
 struct PersistedChatLine {
   char channel_name[32];
   char text[96];
   uint8_t kind;
+  uint32_t timestamp_epoch;
 };
 
 struct PersistedDmLine {
@@ -768,7 +905,9 @@ void setErrText(char* out_err, size_t out_err_size, const char* text) {
 }
 
 void clearSdVfsRegistration() {
-  // Ignore return value: if path is not registered this is a no-op.
+  // Arduino SD defaults to "/sd" in this core, but some builds may use "/sdcard".
+  // Ignore return values: unregistering a non-registered path is a no-op.
+  (void)esp_vfs_fat_unregister_path("/sd");
   (void)esp_vfs_fat_unregister_path("/sdcard");
 }
 
@@ -1012,6 +1151,8 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
   delay(6);
   SPI.begin(sd_sck, sd_miso, sd_mosi);
 
+  static const char* kMountpoints[] = {"/sd", "/sdcard"};
+
 #if defined(DEVICE_TLORA_PAGER_TFT)
   static const int kProfiles[] = {3, 2, 0, 1, 4};
   static const uint32_t kSpeeds[] = {4000000UL, 1000000UL, 400000UL};
@@ -1028,9 +1169,24 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
       SPI.begin(sd_sck, sd_miso, sd_mosi);
       Serial.printf("[SD] try profile=%d speed=%lu\n", kProfiles[pi],
                     static_cast<unsigned long>(kSpeeds[si]));
-      if (!SD.begin(sd_cs, SPI, kSpeeds[si])) {
+
+      bool mounted = false;
+      for (size_t mi = 0; mi < (sizeof(kMountpoints) / sizeof(kMountpoints[0])); mi++) {
+        Serial.printf("[SD] try mountpoint=%s free_heap=%lu\n",
+                      kMountpoints[mi],
+                      static_cast<unsigned long>(ESP.getFreeHeap()));
+        // max_files=2 trims FATFS context alloc (vfs_fat_ctx_t + N*FIL) on
+        // internal heap; SDK CONFIG_FATFS_ALLOC_PREFER_EXTRAM is moot without PSRAM.
+        if (SD.begin(sd_cs, SPI, kSpeeds[si], kMountpoints[mi], 2)) {
+          mounted = true;
+          break;
+        }
         SD.end();
         clearSdVfsRegistration();
+        delay(2);
+      }
+
+      if (!mounted) {
         SPI.end();
         delay(6);
         continue;
@@ -1056,14 +1212,36 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
   setErrText(out_err, out_err_size, "SD mount failed");
   return false;
 #else
-  if (!SD.begin(sd_cs, SPI, kCfgSdClockHz)) {
+  bool mounted = false;
+  for (size_t mi = 0; mi < (sizeof(kMountpoints) / sizeof(kMountpoints[0])); mi++) {
+    if (SD.begin(sd_cs, SPI, kCfgSdClockHz, kMountpoints[mi], 2)) {
+      mounted = true;
+      break;
+    }
+    SD.end();
+    clearSdVfsRegistration();
+    delay(2);
+  }
+
+  if (!mounted) {
     // Recover from stale mount state by tearing down and retrying once.
     SD.end();
     clearSdVfsRegistration();
     SPI.end();
     delay(6);
     SPI.begin(sd_sck, sd_miso, sd_mosi);
-    if (!SD.begin(sd_cs, SPI, kCfgSdClockHz)) {
+
+    for (size_t mi = 0; mi < (sizeof(kMountpoints) / sizeof(kMountpoints[0])); mi++) {
+      if (SD.begin(sd_cs, SPI, kCfgSdClockHz, kMountpoints[mi], 2)) {
+        mounted = true;
+        break;
+      }
+      SD.end();
+      clearSdVfsRegistration();
+      delay(2);
+    }
+
+    if (!mounted) {
       SD.end();
       clearSdVfsRegistration();
       SPI.end();
@@ -1955,8 +2133,10 @@ void StandaloneUi::buildLayout() {
 
   cfg_dialog_ = lv_obj_create(root_);
   lv_obj_add_style(cfg_dialog_, &style_panel_, 0);
-  lv_obj_set_size(cfg_dialog_, clampCoord(main_w - dialogInsetW(6, 2), 220, dialogMaxW(280, 340)),
-                  clampCoord(main_h - 10, 188, 230));
+  const lv_coord_t cfg_dialog_w =
+      clampCoord(main_w - dialogInsetW(6, 2), 220, dialogMaxW(280, 340));
+  const lv_coord_t cfg_dialog_h = clampCoord(main_h - 10, 120, 230);
+  lv_obj_set_size(cfg_dialog_, cfg_dialog_w, cfg_dialog_h);
   lv_obj_align(cfg_dialog_, LV_ALIGN_CENTER, 0, kModalVerticalNudgeY);
   lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(cfg_dialog_, LV_OBJ_FLAG_SCROLLABLE);
@@ -2009,10 +2189,37 @@ void StandaloneUi::buildLayout() {
   const lv_coord_t cfg_row_step = kPagerWideDialogLayout ? 22 : 20;
   const lv_coord_t cfg_rows_x = kPagerWideDialogLayout ? 0 : 2;
 
+  // Wrap the rows in a scrollable content panel so small screens (e.g.
+  // Cardputer 240x135) can pan through all rows. The panel sits between the
+  // title bar at the top and the status label at the bottom; LVGL's group
+  // focus auto-scrolls the focused row into view during keyboard nav.
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  const lv_coord_t cfg_content_top = 18;
+  const lv_coord_t cfg_content_bottom_reserved = 26;  // close btn + padding
+#else
+  const lv_coord_t cfg_content_top = 18;
+  const lv_coord_t cfg_content_bottom_reserved = kPagerWideDialogLayout ? 16 : 14;
+#endif
+
+  cfg_content_panel_ = lv_obj_create(cfg_dialog_);
+  lv_obj_set_pos(cfg_content_panel_, cfg_rows_x, cfg_content_top);
+  lv_obj_set_size(cfg_content_panel_,
+                  static_cast<lv_coord_t>(LV_PCT(100)),
+                  static_cast<lv_coord_t>(cfg_dialog_h - cfg_content_top -
+                                          cfg_content_bottom_reserved));
+  lv_obj_set_style_bg_opa(cfg_content_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(cfg_content_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(cfg_content_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(cfg_content_panel_, 0, LV_PART_MAIN);
+  lv_obj_add_flag(cfg_content_panel_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scroll_dir(cfg_content_panel_, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(cfg_content_panel_, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_clear_flag(cfg_content_panel_, LV_OBJ_FLAG_CLICKABLE);
+
   for (uint8_t i = 0; i < kCfgRowCount; i++) {
-    cfg_rows_[i] = lv_btn_create(cfg_dialog_);
+    cfg_rows_[i] = lv_btn_create(cfg_content_panel_);
     lv_obj_set_size(cfg_rows_[i], LV_PCT(100), cfg_row_h);
-    lv_obj_set_pos(cfg_rows_[i], cfg_rows_x, static_cast<lv_coord_t>(20 + (i * cfg_row_step)));
+    lv_obj_set_pos(cfg_rows_[i], 0, static_cast<lv_coord_t>(i * cfg_row_step));
     lv_obj_add_style(cfg_rows_[i], &style_button_, 0);
     lv_obj_add_style(cfg_rows_[i], &style_button_focused_, LV_STATE_FOCUSED);
     lv_obj_add_event_cb(cfg_rows_[i], onFocusableEvent, LV_EVENT_KEY, this);
@@ -2026,10 +2233,10 @@ void StandaloneUi::buildLayout() {
   }
 
   // Visual split between status rows (name/preset) and actionable rows.
-  lv_obj_t* cfg_divider = lv_obj_create(cfg_dialog_);
+  lv_obj_t* cfg_divider = lv_obj_create(cfg_content_panel_);
   lv_obj_set_size(cfg_divider, LV_PCT(100), 3);
-  lv_obj_set_pos(cfg_divider, cfg_rows_x,
-                 static_cast<lv_coord_t>((20 + (2 * cfg_row_step)) - 1));
+  lv_obj_set_pos(cfg_divider, 0,
+                 static_cast<lv_coord_t>((2 * cfg_row_step) - 1));
   lv_obj_set_style_bg_opa(cfg_divider, LV_OPA_COVER, 0);
   lv_obj_set_style_bg_color(cfg_divider, lv_color_hex(0x2B4A63), 0);
   lv_obj_set_style_border_width(cfg_divider, 0, 0);
@@ -2635,7 +2842,236 @@ bool StandaloneUi::begin() {
     first_install_identity_prompt_ = false;
     openIdentityNamePrompt();
   }
+  if (splash_overlay_) {
+    lv_obj_move_foreground(splash_overlay_);
+  }
   return true;
+}
+
+namespace {
+
+constexpr uint32_t kSplashBgTop = 0x2C1B47;       // deep violet
+constexpr uint32_t kSplashBgBottom = 0x6B2E5C;    // dusk magenta
+constexpr uint32_t kSplashCard = 0x1A0F2B;        // near-black violet
+constexpr uint32_t kSplashPetal = 0xFFF5E6;       // creamy white
+constexpr uint32_t kSplashPetalShade = 0xF6D9B8;  // warm cream shade
+constexpr uint32_t kSplashCenter = 0xFFC845;      // plumeria yellow center
+constexpr uint32_t kSplashCenterRim = 0xE38B2E;   // amber ring
+constexpr uint32_t kSplashAccent = 0xF7B7C9;      // soft pink hint
+constexpr uint32_t kSplashTitle = 0xFFF7EE;
+constexpr uint32_t kSplashSubtitle = 0xE7BFD1;
+
+inline lv_obj_t* makeCircle(lv_obj_t* parent, lv_coord_t diameter, uint32_t hex,
+                            lv_coord_t x_offset, lv_coord_t y_offset, lv_opa_t opa = LV_OPA_COVER) {
+  lv_obj_t* dot = lv_obj_create(parent);
+  lv_obj_remove_style_all(dot);
+  lv_obj_set_size(dot, diameter, diameter);
+  lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(dot, lv_color_hex(hex), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(dot, opa, LV_PART_MAIN);
+  lv_obj_set_style_border_width(dot, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_align(dot, LV_ALIGN_CENTER, x_offset, y_offset);
+  return dot;
+}
+
+inline void drawPlumeriaFlower(lv_obj_t* parent, lv_coord_t cx, lv_coord_t cy,
+                               lv_coord_t flower_r, bool detailed) {
+  // Plumeria has 5 broad, rounded petals overlapping a yellow center.
+  // Detailed flowers also get shading rings and pink accents; corner
+  // flowers skip those rings to keep LVGL widget allocations bounded.
+  const float kPi = 3.14159265358979323846f;
+  const lv_coord_t petal_d = static_cast<lv_coord_t>(flower_r * 1.05f);
+  const lv_coord_t petal_offset = static_cast<lv_coord_t>(flower_r * 0.78f);
+  const lv_coord_t center_d = static_cast<lv_coord_t>(flower_r * 0.78f);
+
+  for (int i = 0; i < 5; i++) {
+    const float angle = -kPi / 2.0f + (static_cast<float>(i) * (2.0f * kPi / 5.0f));
+    const lv_coord_t px = cx + static_cast<lv_coord_t>(cosf(angle) * petal_offset);
+    const lv_coord_t py = cy + static_cast<lv_coord_t>(sinf(angle) * petal_offset);
+    makeCircle(parent, petal_d, kSplashPetal, px, py);
+  }
+
+  if (detailed) {
+    const lv_coord_t shade_d = static_cast<lv_coord_t>(flower_r * 0.55f);
+    const lv_coord_t shade_offset = static_cast<lv_coord_t>(flower_r * 0.62f);
+    const lv_coord_t accent_offset = static_cast<lv_coord_t>(flower_r * 0.35f);
+    const lv_coord_t accent_d = static_cast<lv_coord_t>(flower_r * 0.32f);
+    const lv_coord_t center_rim_d = static_cast<lv_coord_t>(flower_r * 0.90f);
+
+    for (int i = 0; i < 5; i++) {
+      const float angle = -kPi / 2.0f + (static_cast<float>(i) * (2.0f * kPi / 5.0f));
+      const lv_coord_t sx = cx + static_cast<lv_coord_t>(cosf(angle) * shade_offset);
+      const lv_coord_t sy = cy + static_cast<lv_coord_t>(sinf(angle) * shade_offset);
+      makeCircle(parent, shade_d, kSplashPetalShade, sx, sy, LV_OPA_60);
+    }
+    for (int i = 0; i < 5; i++) {
+      const float angle = -kPi / 2.0f + kPi / 5.0f +
+                          (static_cast<float>(i) * (2.0f * kPi / 5.0f));
+      const lv_coord_t ax = cx + static_cast<lv_coord_t>(cosf(angle) * accent_offset);
+      const lv_coord_t ay = cy + static_cast<lv_coord_t>(sinf(angle) * accent_offset);
+      makeCircle(parent, accent_d, kSplashAccent, ax, ay, LV_OPA_50);
+    }
+    // Amber rim behind the yellow disc.
+    makeCircle(parent, center_rim_d, kSplashCenterRim, cx, cy);
+  }
+  // Yellow center disc.
+  makeCircle(parent, center_d, kSplashCenter, cx, cy);
+}
+
+}  // namespace
+
+void StandaloneUi::showSplash(uint32_t duration_ms) {
+  showSplash(nullptr, duration_ms);
+}
+
+void StandaloneUi::showSplash(const char* node_name, uint32_t duration_ms) {
+  if (splash_overlay_) {
+    return;
+  }
+
+  const lv_coord_t w = lv_disp_get_hor_res(NULL);
+  const lv_coord_t h = lv_disp_get_ver_res(NULL);
+  const lv_coord_t shortest = w < h ? w : h;
+  const bool tiny = shortest < 160;
+
+  lv_obj_t* parent = lv_scr_act();
+  if (!parent) {
+    return;
+  }
+
+  lv_obj_t* overlay = lv_obj_create(parent);
+  lv_obj_remove_style_all(overlay);
+  lv_obj_set_size(overlay, w, h);
+  lv_obj_set_pos(overlay, 0, 0);
+  lv_obj_set_style_bg_color(overlay, lv_color_hex(kSplashBgTop), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_color(overlay, lv_color_hex(kSplashBgBottom), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_dir(overlay, LV_GRAD_DIR_VER, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(overlay, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(overlay, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+
+  // Card behind the flower, scaled to display.
+  const lv_coord_t card_w = static_cast<lv_coord_t>(w - (tiny ? 8 : 24));
+  const lv_coord_t card_h = static_cast<lv_coord_t>(h - (tiny ? 8 : 28));
+  lv_obj_t* card = lv_obj_create(overlay);
+  lv_obj_remove_style_all(card);
+  lv_obj_set_size(card, card_w, card_h);
+  lv_obj_center(card);
+  lv_obj_set_style_radius(card, tiny ? 6 : 14, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(card, lv_color_hex(kSplashCard), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(card, LV_OPA_70, LV_PART_MAIN);
+  lv_obj_set_style_border_color(card, lv_color_hex(kSplashAccent), LV_PART_MAIN);
+  lv_obj_set_style_border_opa(card, LV_OPA_40, LV_PART_MAIN);
+  lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+  // Flower geometry. `drawPlumeriaFlower` places each petal via
+  // LV_ALIGN_CENTER offsets, so cx/cy here are offsets from the card center.
+  // One large flower sits slightly above the card center, with smaller
+  // flowers tucked into each of the four corners. On tiny screens (e.g.
+  // Cardputer 240x135 without PSRAM) corner flowers are skipped to leave
+  // enough room in LVGL's default 48 KB pool for the main UI.
+  const lv_coord_t main_flower_r = static_cast<lv_coord_t>(shortest * (tiny ? 0.18f : 0.17f));
+  const lv_coord_t corner_flower_r =
+      static_cast<lv_coord_t>(main_flower_r * 0.50f);
+  const lv_coord_t main_cy = static_cast<lv_coord_t>(-card_h * (tiny ? 0.08f : 0.10f));
+
+  if (!tiny) {
+    // Approximate full radius of a flower (petal_offset + petal_r) so corners
+    // sit fully inside the card.
+    const lv_coord_t corner_extent = static_cast<lv_coord_t>(corner_flower_r * 1.4f);
+    const lv_coord_t corner_margin = 6;
+    const lv_coord_t corner_x =
+        static_cast<lv_coord_t>(card_w / 2 - corner_extent - corner_margin);
+    const lv_coord_t corner_y =
+        static_cast<lv_coord_t>(card_h / 2 - corner_extent - corner_margin);
+
+    drawPlumeriaFlower(card, -corner_x, -corner_y, corner_flower_r, false);
+    drawPlumeriaFlower(card, corner_x, -corner_y, corner_flower_r, false);
+    drawPlumeriaFlower(card, -corner_x, corner_y, corner_flower_r, false);
+    drawPlumeriaFlower(card, corner_x, corner_y, corner_flower_r, false);
+  }
+  drawPlumeriaFlower(card, 0, main_cy, main_flower_r, !tiny);
+
+  // Title + version.
+  lv_obj_t* title = lv_label_create(card);
+  lv_label_set_text(title, "PLUMERIA-MC");
+  lv_obj_set_style_text_color(title, lv_color_hex(kSplashTitle), LV_PART_MAIN);
+  lv_obj_set_style_text_letter_space(title, 2, LV_PART_MAIN);
+  const lv_font_t* title_font = nullptr;
+#if defined(LV_FONT_MONTSERRAT_18) && LV_FONT_MONTSERRAT_18
+  if (!tiny) {
+    title_font = &lv_font_montserrat_18;
+  }
+#endif
+#if defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
+  if (!title_font && !tiny) {
+    title_font = &lv_font_montserrat_16;
+  }
+#endif
+  if (!title_font) {
+    title_font = &lv_font_montserrat_14;
+  }
+  lv_obj_set_style_text_font(title, title_font, LV_PART_MAIN);
+  lv_obj_align(title, LV_ALIGN_CENTER, 0,
+               static_cast<lv_coord_t>(main_cy + main_flower_r + (tiny ? 14 : 22)));
+
+#ifdef APP_VERSION
+  const char* version_str = APP_VERSION;
+#else
+  const char* version_str = "dev";
+#endif
+  lv_obj_t* subtitle = lv_label_create(card);
+  lv_label_set_text(subtitle, version_str);
+  lv_obj_set_style_text_color(subtitle, lv_color_hex(kSplashSubtitle), LV_PART_MAIN);
+  const lv_font_t* subtitle_font = &lv_font_montserrat_14;
+#if defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  subtitle_font = &lv_font_montserrat_12;
+#elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  subtitle_font = &lv_font_montserrat_10;
+#endif
+  lv_obj_set_style_text_font(subtitle, subtitle_font, LV_PART_MAIN);
+  lv_obj_align_to(subtitle, title, LV_ALIGN_OUT_BOTTOM_MID, 0, tiny ? 2 : 6);
+
+  // Node name (if available) in the same font/size as the version, pinned
+  // toward the bottom of the card.
+  if (node_name && node_name[0] != '\0') {
+    lv_obj_t* node_label = lv_label_create(card);
+    lv_label_set_long_mode(node_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(node_label, static_cast<lv_coord_t>(card_w - (tiny ? 12 : 24)));
+    lv_obj_set_style_text_color(node_label, lv_color_hex(kSplashSubtitle), LV_PART_MAIN);
+    lv_obj_set_style_text_font(node_label, subtitle_font, LV_PART_MAIN);
+    lv_obj_set_style_text_align(node_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(node_label, node_name);
+    lv_obj_align(node_label, LV_ALIGN_BOTTOM_MID, 0, -(tiny ? 4 : 10));
+  }
+
+  splash_overlay_ = overlay;
+  splash_duration_ms_ = duration_ms;
+  splash_dismiss_ms_ = 0;
+  lv_obj_move_foreground(overlay);
+
+  // Render once so the splash is visible during the rest of setup() (mesh
+  // radio bring-up, web/AP init), instead of only appearing once loop()
+  // starts. The dismissal countdown is started in loop() on the first
+  // iteration where the splash is observed, so the user always gets the full
+  // duration regardless of how long setup() takes after this point.
+  lv_timer_handler();
+}
+
+void StandaloneUi::dismissSplash() {
+  if (!splash_overlay_) {
+    return;
+  }
+  lv_obj_t* overlay = splash_overlay_;
+  splash_overlay_ = nullptr;
+  splash_duration_ms_ = 0;
+  splash_dismiss_ms_ = 0;
+  lv_obj_del(overlay);
 }
 
 void StandaloneUi::setChannels(const char names[][32], size_t count) {
@@ -3405,6 +3841,7 @@ bool StandaloneUi::sendComposeMessage() {
     }
 
     sent_any = true;
+    const uint32_t line_epoch = nowEpochSecondsOrZero();
 
     char display_text[96] = {};
     if (!compose_dm_mode_) {
@@ -3420,10 +3857,10 @@ bool StandaloneUi::sendComposeMessage() {
     pending_local_echo_deadline_ms_ = millis() + kLocalEchoSuppressMs;
 
     if (!compose_dm_mode_) {
-      pushChannelHistoryLine(compose_target_channel_, display_text, ChatLineKind::Tx);
+      pushChannelHistoryLine(compose_target_channel_, display_text, ChatLineKind::Tx, line_epoch);
     }
     if (!compose_dm_mode_ && strcmp(compose_target_channel_, configured_channel_names_[active_channel_]) == 0) {
-      appendChatLine(display_text, ChatLineKind::Tx);
+      appendChatLine(display_text, ChatLineKind::Tx, line_epoch);
     } else if (compose_dm_mode_) {
       char hhmm[8] = {};
       formatUiClockHhMm(hhmm, sizeof(hhmm));
@@ -3431,7 +3868,7 @@ bool StandaloneUi::sendComposeMessage() {
       snprintf(dm_line, sizeof(dm_line), "[%s] Me: %s", hhmm, send_text);
       const char* dm_contact_name = compose_target_channel_[0] != '\0' ? compose_target_channel_ : dm_active_name_;
       const char* dm_contact_key = compose_target_dm_pubkey_[0] != '\0' ? compose_target_dm_pubkey_ : dm_active_key_;
-      appendDmLine(dm_contact_name, dm_contact_key, dm_line, ChatLineKind::Tx);
+      appendDmLine(dm_contact_name, dm_contact_key, dm_line, ChatLineKind::Tx, line_epoch);
     }
   };
 
@@ -3704,6 +4141,7 @@ void StandaloneUi::rebuildContactsDmPanel() {
   const char* selected_name = selected.name;
   const char* selected_key = selected.public_key_hex;
   const lv_coord_t row_w = lv_obj_get_content_width(contacts_dm_panel_);
+  uint32_t rendered_date_key = 0;
 
   size_t recent_indices[kDmDialogRecentLimit] = {};
   size_t recent_count = 0;
@@ -3728,6 +4166,13 @@ void StandaloneUi::rebuildContactsDmPanel() {
 
   for (size_t i = recent_count; i > 0; i--) {
     const StoredDmLine& line = stored_dm_[recent_indices[i - 1]];
+    const uint32_t date_key = dateKeyFromEpoch(line.timestamp_epoch);
+    if (line.timestamp_epoch != 0 && date_key != 0 && date_key != rendered_date_key) {
+      createDateMarkerRow(contacts_dm_panel_, row_w > 0 ? row_w : LV_PCT(100), line.timestamp_epoch,
+                          chatPanelFont());
+      rendered_date_key = date_key;
+    }
+
     char display_line[112] = {};
     formatDmDisplayLine(line.text, line.timestamp_epoch, display_line, sizeof(display_line));
     lv_obj_t* row = lv_label_create(contacts_dm_panel_);
@@ -4032,10 +4477,10 @@ void StandaloneUi::refreshCfgDialog() {
 
   char row_text[96] = {};
   snprintf(row_text, sizeof(row_text), "Name: %s", node_name[0] ? node_name : "-");
-  lv_label_set_text(cfg_row_labels_[0], row_text);
+  lv_label_set_text(cfg_row_labels_[kCfgRowNodeName], row_text);
 
   snprintf(row_text, sizeof(row_text), "Radio Preset: %s", radioPresetDisplayName(web_settings.region));
-  lv_label_set_text(cfg_row_labels_[1], row_text);
+  lv_label_set_text(cfg_row_labels_[kCfgRowRadioPreset], row_text);
 
   const bool web_on = plumeria::web::running();
   const char* web_ip = plumeria::web::ip();
@@ -4046,17 +4491,25 @@ void StandaloneUi::refreshCfgDialog() {
   } else {
     snprintf(row_text, sizeof(row_text), "Web Config: ON");
   }
-  lv_label_set_text(cfg_row_labels_[2], row_text);
+  lv_label_set_text(cfg_row_labels_[kCfgRowWebConfig], row_text);
 
-  lv_label_set_text(cfg_row_labels_[3], web_settings.send_location_in_advert
-                                         ? "GPS: OFF (using default lat/long)"
-                                         : "GPS: ON");
+  lv_label_set_text(cfg_row_labels_[kCfgRowGps], web_settings.send_location_in_advert
+                                              ? "GPS: OFF (using default lat/long)"
+                                              : "GPS: ON");
+
+  const uint8_t multipaths = static_cast<uint8_t>((web_settings.path_hash_mode <= 2 ? web_settings.path_hash_mode : 0) + 1);
+  snprintf(row_text, sizeof(row_text), "Multipaths: %u", static_cast<unsigned>(multipaths));
+  lv_label_set_text(cfg_row_labels_[kCfgRowMultipaths], row_text);
+
+  snprintf(row_text, sizeof(row_text), "Mesh Region: %s",
+           web_settings.mesh_region[0] ? web_settings.mesh_region : "(unfiltered)");
+  lv_label_set_text(cfg_row_labels_[kCfgRowMeshRegion], row_text);
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_label_set_text(cfg_row_labels_[4], "Export Config to SD");
-  lv_label_set_text(cfg_row_labels_[5], cfg_import_confirm_armed_ ? "Import Config [PRESS ENTER AGAIN]"
-                                                                   : "Import Config to SD");
-  lv_label_set_text(cfg_row_labels_[6], cfg_delete_confirm_armed_ ? "Delete Config [PRESS ENTER AGAIN]"
-                                                                   : "Delete Config from SD");
+  lv_label_set_text(cfg_row_labels_[kCfgRowExportConfig], "Export Config to SD");
+  lv_label_set_text(cfg_row_labels_[kCfgRowImportConfig], cfg_import_confirm_armed_ ? "Import Config [PRESS ENTER AGAIN]"
+                                                                                      : "Import Config to SD");
+  lv_label_set_text(cfg_row_labels_[kCfgRowDeleteConfig], cfg_delete_confirm_armed_ ? "Delete Config [PRESS ENTER AGAIN]"
+                                                                                      : "Delete Config from SD");
 #endif
 
   for (uint8_t i = 0; i < kCfgRowCount; i++) {
@@ -4124,12 +4577,14 @@ void StandaloneUi::moveCfgSelection(int delta) {
     next = 0;
   }
   cfg_selected_row_ = static_cast<uint8_t>(next);
-  if (cfg_selected_row_ != 5) {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (cfg_selected_row_ != kCfgRowImportConfig) {
     cfg_import_confirm_armed_ = false;
   }
-  if (cfg_selected_row_ != 6) {
+  if (cfg_selected_row_ != kCfgRowDeleteConfig) {
     cfg_delete_confirm_armed_ = false;
   }
+#endif
   refreshCfgDialog();
   if (key_group_ && cfg_rows_[cfg_selected_row_]) {
     lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
@@ -4288,22 +4743,25 @@ bool StandaloneUi::deleteConfigFromSd() {
 }
 
 void StandaloneUi::activateCfgSelection() {
-  if (cfg_selected_row_ != 5) {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (cfg_selected_row_ != kCfgRowImportConfig) {
     cfg_import_confirm_armed_ = false;
   }
-  if (cfg_selected_row_ != 6) {
+  if (cfg_selected_row_ != kCfgRowDeleteConfig) {
     cfg_delete_confirm_armed_ = false;
   }
+#endif
 
   switch (cfg_selected_row_) {
-    case 0:
-    case 1:
+    case kCfgRowNodeName:
+    case kCfgRowRadioPreset:
+    case kCfgRowMeshRegion:
       strncpy(cfg_status_text_, "Read-only row. Use web config to edit settings.", sizeof(cfg_status_text_) - 1);
       cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
       strncpy(cfg_action_text_, "No change", sizeof(cfg_action_text_) - 1);
       cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       break;
-    case 2: {
+    case kCfgRowWebConfig: {
       if (plumeria::web::running()) {
         plumeria::web::end();
         strncpy(cfg_status_text_, "Web Config disabled", sizeof(cfg_status_text_) - 1);
@@ -4331,7 +4789,7 @@ void StandaloneUi::activateCfgSelection() {
       cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       break;
     }
-    case 3: {
+    case kCfgRowGps: {
       plumeria::web::WebSettings web_settings{};
       plumeria::web::loadSettings(&web_settings);
       const bool gps_enabled = !web_settings.send_location_in_advert;
@@ -4349,13 +4807,28 @@ void StandaloneUi::activateCfgSelection() {
       cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       break;
     }
-    case 4:
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-      strncpy(cfg_status_text_, "Export unavailable on this hardware", sizeof(cfg_status_text_) - 1);
-      strncpy(cfg_action_text_, "Export unavailable", sizeof(cfg_action_text_) - 1);
-      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-#else
+    case kCfgRowMultipaths: {
+      plumeria::web::WebSettings web_settings{};
+      plumeria::web::loadSettings(&web_settings);
+      const uint8_t current_mode = web_settings.path_hash_mode <= 2 ? web_settings.path_hash_mode : 0;
+      const uint8_t next_mode = static_cast<uint8_t>((current_mode + 1) % 3);
+
+      char err[96] = {};
+      if (plumeria::web::setPathHashMode(next_mode, err, sizeof(err))) {
+        snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Multipaths set to %u",
+                 static_cast<unsigned>(next_mode + 1));
+        snprintf(cfg_action_text_, sizeof(cfg_action_text_), "Multipaths %u",
+                 static_cast<unsigned>(next_mode + 1));
+      } else {
+        strncpy(cfg_status_text_, err[0] ? err : "Multipaths change failed", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Multipaths failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+      break;
+    }
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    case kCfgRowExportConfig:
       if (exportConfigToSd()) {
         strncpy(cfg_action_text_, "Config exported", sizeof(cfg_action_text_) - 1);
       } else {
@@ -4366,15 +4839,8 @@ void StandaloneUi::activateCfgSelection() {
       }
       cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
       cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-#endif
       break;
-  case 5:
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-      strncpy(cfg_status_text_, "Import unavailable on this hardware", sizeof(cfg_status_text_) - 1);
-      strncpy(cfg_action_text_, "Import unavailable", sizeof(cfg_action_text_) - 1);
-      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-#else
+    case kCfgRowImportConfig:
       if (!cfg_import_confirm_armed_) {
         cfg_import_confirm_armed_ = true;
         strncpy(cfg_status_text_, "Press Enter again to confirm import", sizeof(cfg_status_text_) - 1);
@@ -4394,15 +4860,8 @@ void StandaloneUi::activateCfgSelection() {
         strncpy(cfg_action_text_, "Import failed", sizeof(cfg_action_text_) - 1);
         cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       }
-#endif
       break;
-  case 6:
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-      strncpy(cfg_status_text_, "Delete unavailable on this hardware", sizeof(cfg_status_text_) - 1);
-      strncpy(cfg_action_text_, "Delete unavailable", sizeof(cfg_action_text_) - 1);
-      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-#else
+    case kCfgRowDeleteConfig:
       if (!cfg_delete_confirm_armed_) {
         cfg_delete_confirm_armed_ = true;
         strncpy(cfg_status_text_, "Press Enter again to confirm delete", sizeof(cfg_status_text_) - 1);
@@ -4418,8 +4877,8 @@ void StandaloneUi::activateCfgSelection() {
         }
         cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       }
-#endif
       break;
+#endif
     default:
       break;
   }
@@ -4849,24 +5308,44 @@ void StandaloneUi::triggerAdvertFlood() {
   }
 }
 
-void StandaloneUi::appendChatLine(const char* text, ChatLineKind kind) {
+void StandaloneUi::appendChatLine(const char* text, ChatLineKind kind, uint32_t timestamp_epoch) {
   if (!text || text[0] == '\0' || !chat_panel_) {
     return;
   }
 
   const bool at_bottom = lv_obj_get_scroll_bottom(chat_panel_) <= 2;
   const lv_coord_t scroll_y = lv_obj_get_scroll_y(chat_panel_);
+  lv_coord_t row_w = lv_obj_get_content_width(chat_panel_);
+  if (row_w <= 0) {
+    row_w = lv_obj_get_width(chat_panel_);
+  }
+  const uint32_t date_key = dateKeyFromEpoch(timestamp_epoch);
 
-  if (chat_row_count_ >= kMaxChatRows) {
+  auto ensure_capacity = [&]() {
+    if (chat_row_count_ < kMaxChatRows) {
+      return;
+    }
     lv_obj_del(chat_rows_[0]);
     for (size_t i = 1; i < chat_row_count_; i++) {
       chat_rows_[i - 1] = chat_rows_[i];
     }
     chat_row_count_--;
+  };
+
+  if (date_key != 0 && date_key != chat_last_date_key_) {
+    ensure_capacity();
+    lv_obj_t* marker = createDateMarkerRow(chat_panel_, row_w > 0 ? row_w : LV_PCT(100), timestamp_epoch,
+                                           chatPanelFont());
+    if (marker) {
+      chat_rows_[chat_row_count_++] = marker;
+      chat_last_date_key_ = date_key;
+    }
   }
 
+  ensure_capacity();
+
   lv_obj_t* row = lv_label_create(chat_panel_);
-  lv_obj_set_width(row, LV_PCT(100));
+  lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
   lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
   lv_obj_add_style(row, &style_text_main_, 0);
   lv_obj_set_style_text_font(row, chatPanelFont(), 0);
@@ -4891,6 +5370,9 @@ void StandaloneUi::appendChatLine(const char* text, ChatLineKind kind) {
 
   lv_label_set_text(row, text);
   chat_rows_[chat_row_count_++] = row;
+  if (date_key != 0) {
+    chat_last_date_key_ = date_key;
+  }
 
   if (at_bottom) {
     lv_obj_scroll_to_y(chat_panel_, LV_COORD_MAX, LV_ANIM_OFF);
@@ -4907,15 +5389,17 @@ void StandaloneUi::clearDmPanel() {
     }
   }
   dm_row_count_ = 0;
+  dm_last_date_key_ = 0;
 }
 
 void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_key, const char* text,
-                                ChatLineKind kind) {
+                                ChatLineKind kind, uint32_t timestamp_epoch) {
   if (!contact_name || contact_name[0] == '\0' || !text || text[0] == '\0') {
     return;
   }
 
   const uint32_t now_epoch = nowEpochSecondsOrZero();
+  const uint32_t line_epoch = timestamp_epoch != 0 ? timestamp_epoch : now_epoch;
   pruneStoredDmByRetention(now_epoch);
 
   if (stored_dm_count_ < kMaxStoredChatRows) {
@@ -4931,7 +5415,7 @@ void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_ke
     strncpy(stored_dm_[write_index].text, text, sizeof(stored_dm_[write_index].text) - 1);
     stored_dm_[write_index].text[sizeof(stored_dm_[write_index].text) - 1] = '\0';
     stored_dm_[write_index].kind = kind;
-    stored_dm_[write_index].timestamp_epoch = now_epoch;
+    stored_dm_[write_index].timestamp_epoch = line_epoch;
     stored_dm_count_++;
   } else {
     strncpy(stored_dm_[stored_dm_head_].contact_name, contact_name,
@@ -4947,7 +5431,7 @@ void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_ke
     strncpy(stored_dm_[stored_dm_head_].text, text, sizeof(stored_dm_[stored_dm_head_].text) - 1);
     stored_dm_[stored_dm_head_].text[sizeof(stored_dm_[stored_dm_head_].text) - 1] = '\0';
     stored_dm_[stored_dm_head_].kind = kind;
-    stored_dm_[stored_dm_head_].timestamp_epoch = now_epoch;
+    stored_dm_[stored_dm_head_].timestamp_epoch = line_epoch;
     stored_dm_head_ = (stored_dm_head_ + 1) % kMaxStoredChatRows;
   }
 
@@ -4987,14 +5471,30 @@ void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_ke
     dm_w = lv_obj_get_width(dm_panel_);
   }
   const lv_coord_t row_w = dm_w > 4 ? static_cast<lv_coord_t>(dm_w - 2) : dm_w;
+  const uint32_t date_key = dateKeyFromEpoch(line_epoch);
 
-  if (dm_row_count_ >= kMaxChatRows) {
+  auto ensure_capacity = [&]() {
+    if (dm_row_count_ < kMaxChatRows) {
+      return;
+    }
     lv_obj_del(dm_rows_[0]);
     for (size_t i = 1; i < dm_row_count_; i++) {
       dm_rows_[i - 1] = dm_rows_[i];
     }
     dm_row_count_--;
+  };
+
+  if (date_key != 0 && date_key != dm_last_date_key_) {
+    ensure_capacity();
+    lv_obj_t* marker = createDateMarkerRow(dm_panel_, row_w > 0 ? row_w : LV_PCT(100), line_epoch,
+                                           chatPanelFont());
+    if (marker) {
+      dm_rows_[dm_row_count_++] = marker;
+      dm_last_date_key_ = date_key;
+    }
   }
+
+  ensure_capacity();
 
   lv_obj_t* row = lv_label_create(dm_panel_);
   lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
@@ -5022,6 +5522,9 @@ void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_ke
 
   lv_label_set_text(row, text);
   dm_rows_[dm_row_count_++] = row;
+  if (date_key != 0) {
+    dm_last_date_key_ = date_key;
+  }
 
   if (at_bottom) {
     lv_obj_scroll_to_y(dm_panel_, LV_COORD_MAX, LV_ANIM_OFF);
@@ -5116,6 +5619,19 @@ void StandaloneUi::rebuildDmDialog() {
   for (size_t i = recent_count; i > 0; i--) {
     const size_t idx = recent_indices[i - 1];
     const StoredDmLine& line = stored_dm_[idx];
+    const uint32_t date_key = dateKeyFromEpoch(line.timestamp_epoch);
+    if (line.timestamp_epoch != 0 && date_key != 0 && date_key != dm_last_date_key_) {
+      if (dm_row_count_ >= kMaxChatRows) {
+        break;
+      }
+      lv_obj_t* marker = createDateMarkerRow(dm_panel_, row_w > 0 ? row_w : LV_PCT(100), line.timestamp_epoch,
+                                             chatPanelFont());
+      if (marker) {
+        dm_rows_[dm_row_count_++] = marker;
+      }
+      dm_last_date_key_ = date_key;
+    }
+
     char display_line[112] = {};
     formatDmDisplayLine(line.text, line.timestamp_epoch, display_line, sizeof(display_line));
 
@@ -5811,10 +6327,13 @@ int StandaloneUi::findConfiguredChannelIndex(const char* channel_name) const {
   return -1;
 }
 
-void StandaloneUi::pushChannelHistoryLine(const char* channel_name, const char* text, ChatLineKind kind) {
+void StandaloneUi::pushChannelHistoryLine(const char* channel_name, const char* text, ChatLineKind kind,
+                                          uint32_t timestamp_epoch) {
   if (!channel_name || channel_name[0] == '\0' || !text || text[0] == '\0') {
     return;
   }
+
+  const uint32_t stored_epoch = timestamp_epoch != 0 ? timestamp_epoch : nowEpochSecondsOrZero();
 
   if (stored_chat_count_ < kMaxStoredChatRows) {
     size_t write_index = (stored_chat_head_ + stored_chat_count_) % kMaxStoredChatRows;
@@ -5823,6 +6342,7 @@ void StandaloneUi::pushChannelHistoryLine(const char* channel_name, const char* 
     strncpy(stored_chat_[write_index].text, text, sizeof(stored_chat_[write_index].text) - 1);
     stored_chat_[write_index].text[sizeof(stored_chat_[write_index].text) - 1] = '\0';
     stored_chat_[write_index].kind = kind;
+    stored_chat_[write_index].timestamp_epoch = stored_epoch;
     stored_chat_count_++;
     chat_history_dirty_ = true;
     return;
@@ -5834,6 +6354,7 @@ void StandaloneUi::pushChannelHistoryLine(const char* channel_name, const char* 
   strncpy(stored_chat_[stored_chat_head_].text, text, sizeof(stored_chat_[stored_chat_head_].text) - 1);
   stored_chat_[stored_chat_head_].text[sizeof(stored_chat_[stored_chat_head_].text) - 1] = '\0';
   stored_chat_[stored_chat_head_].kind = kind;
+  stored_chat_[stored_chat_head_].timestamp_epoch = stored_epoch;
   stored_chat_head_ = (stored_chat_head_ + 1) % kMaxStoredChatRows;
   chat_history_dirty_ = true;
 }
@@ -5850,12 +6371,25 @@ bool StandaloneUi::loadChatHistoryFromFs() {
   }
 
   const size_t blob_len = prefs.getBytesLength(kChatHistoryBlobKey);
-  if (blob_len < sizeof(PersistedChatLine)) {
+  if (blob_len < sizeof(PersistedChatLineLegacy)) {
     prefs.end();
     return false;
   }
 
-  int count = static_cast<int>(blob_len / sizeof(PersistedChatLine));
+  size_t record_size = 0;
+  bool has_timestamps = false;
+  if ((blob_len % sizeof(PersistedChatLine)) == 0) {
+    record_size = sizeof(PersistedChatLine);
+    has_timestamps = true;
+  } else if ((blob_len % sizeof(PersistedChatLineLegacy)) == 0) {
+    record_size = sizeof(PersistedChatLineLegacy);
+    has_timestamps = false;
+  } else {
+    prefs.end();
+    return false;
+  }
+
+  int count = static_cast<int>(blob_len / record_size);
   const uint16_t declared = prefs.getUShort(kChatHistoryCountKey, static_cast<uint16_t>(count));
   if (declared > 0 && declared < static_cast<uint16_t>(count)) {
     count = declared;
@@ -5865,8 +6399,8 @@ bool StandaloneUi::loadChatHistoryFromFs() {
     count = static_cast<int>(kMaxStoredChatRows);
   }
 
-  const size_t to_read = static_cast<size_t>(count) * sizeof(PersistedChatLine);
-  auto* persisted_buf = static_cast<PersistedChatLine*>(malloc(to_read));
+  const size_t to_read = static_cast<size_t>(count) * record_size;
+  auto* persisted_buf = static_cast<uint8_t*>(malloc(to_read));
   if (!persisted_buf) {
     prefs.end();
     return false;
@@ -5875,7 +6409,7 @@ bool StandaloneUi::loadChatHistoryFromFs() {
   const size_t got = prefs.getBytes(kChatHistoryBlobKey, persisted_buf, to_read);
   prefs.end();
 
-  const int loaded_count = static_cast<int>(got / sizeof(PersistedChatLine));
+  const int loaded_count = static_cast<int>(got / record_size);
   if (loaded_count <= 0) {
     free(persisted_buf);
     return false;
@@ -5886,7 +6420,20 @@ bool StandaloneUi::loadChatHistoryFromFs() {
   memset(stored_chat_, 0, sizeof(stored_chat_));
 
   for (int i = 0; i < loaded_count && stored_chat_count_ < kMaxStoredChatRows; i++) {
-    const PersistedChatLine& persisted = persisted_buf[i];
+    PersistedChatLine persisted{};
+    if (has_timestamps) {
+      const auto* rec = reinterpret_cast<const PersistedChatLine*>(persisted_buf + (i * record_size));
+      persisted = *rec;
+    } else {
+      const auto* legacy = reinterpret_cast<const PersistedChatLineLegacy*>(persisted_buf + (i * record_size));
+      strncpy(persisted.channel_name, legacy->channel_name, sizeof(persisted.channel_name) - 1);
+      persisted.channel_name[sizeof(persisted.channel_name) - 1] = '\0';
+      strncpy(persisted.text, legacy->text, sizeof(persisted.text) - 1);
+      persisted.text[sizeof(persisted.text) - 1] = '\0';
+      persisted.kind = legacy->kind;
+      persisted.timestamp_epoch = 0;
+    }
+
     size_t write_index = (stored_chat_head_ + stored_chat_count_) % kMaxStoredChatRows;
     strncpy(stored_chat_[write_index].channel_name, persisted.channel_name,
             sizeof(stored_chat_[write_index].channel_name) - 1);
@@ -5897,6 +6444,7 @@ bool StandaloneUi::loadChatHistoryFromFs() {
         (persisted.kind <= static_cast<uint8_t>(ChatLineKind::Error))
             ? static_cast<ChatLineKind>(persisted.kind)
             : ChatLineKind::Normal;
+    stored_chat_[write_index].timestamp_epoch = persisted.timestamp_epoch;
     stored_chat_count_++;
   }
 
@@ -5932,6 +6480,7 @@ bool StandaloneUi::saveChatHistoryToFs() {
     strncpy(persisted.text, stored_chat_[idx].text, sizeof(persisted.text) - 1);
     persisted.text[sizeof(persisted.text) - 1] = '\0';
     persisted.kind = static_cast<uint8_t>(stored_chat_[idx].kind);
+    persisted.timestamp_epoch = stored_chat_[idx].timestamp_epoch;
   }
 
   bool ok = true;
@@ -6145,6 +6694,7 @@ void StandaloneUi::clearChatPanel() {
     }
   }
   chat_row_count_ = 0;
+  chat_last_date_key_ = 0;
 }
 
 void StandaloneUi::rebuildChatForActiveChannel() {
@@ -6159,7 +6709,7 @@ void StandaloneUi::rebuildChatForActiveChannel() {
   for (size_t i = 0; i < stored_chat_count_; i++) {
     size_t idx = (stored_chat_head_ + i) % kMaxStoredChatRows;
     if (strcmp(stored_chat_[idx].channel_name, active_name) == 0) {
-      appendChatLine(stored_chat_[idx].text, stored_chat_[idx].kind);
+      appendChatLine(stored_chat_[idx].text, stored_chat_[idx].kind, stored_chat_[idx].timestamp_epoch);
     }
   }
 }
@@ -6816,9 +7366,14 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
     for (uint8_t i = 0; i < kCfgRowCount; i++) {
       if (target == cfg_rows_[i] || target == cfg_row_labels_[i]) {
         cfg_selected_row_ = i;
-        if (cfg_selected_row_ != 5) {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+        if (cfg_selected_row_ != kCfgRowImportConfig) {
           cfg_import_confirm_armed_ = false;
         }
+        if (cfg_selected_row_ != kCfgRowDeleteConfig) {
+          cfg_delete_confirm_armed_ = false;
+        }
+#endif
         refreshCfgDialog();
         if (kTouchDirectActivate) {
           activateCfgSelection();
@@ -7252,9 +7807,14 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
       for (uint8_t i = 0; i < kCfgRowCount; i++) {
         if (target == ui->cfg_rows_[i] || target == ui->cfg_row_labels_[i]) {
           ui->cfg_selected_row_ = i;
-          if (ui->cfg_selected_row_ != 5) {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+          if (ui->cfg_selected_row_ != kCfgRowImportConfig) {
             ui->cfg_import_confirm_armed_ = false;
           }
+          if (ui->cfg_selected_row_ != kCfgRowDeleteConfig) {
+            ui->cfg_delete_confirm_armed_ = false;
+          }
+#endif
           break;
         }
       }
@@ -7334,6 +7894,18 @@ void StandaloneUi::onDmEvent(lv_event_t* event) {
 }
 
 void StandaloneUi::loop() {
+  if (splash_overlay_) {
+    if (splash_dismiss_ms_ == 0) {
+      // First loop tick after the splash was built. The framebuffer hasn't
+      // been flushed yet (we intentionally don't pump LVGL during setup to
+      // avoid interleaving display SPI with the LoRa radio bring-up), so
+      // start the dismissal countdown now and let this iteration's
+      // lv_timer_handler render the splash.
+      splash_dismiss_ms_ = millis() + splash_duration_ms_;
+    } else if (millis() >= splash_dismiss_ms_) {
+      dismissSplash();
+    }
+  }
   if (!started_) {
     return;
   }
@@ -7460,6 +8032,7 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   }
 
   if (event.type == mesh::MeshEventType::DirectMessage) {
+    const uint32_t event_epoch = nowEpochSecondsOrZero();
     char live_line[128] = {};
     snprintf(live_line, sizeof(live_line), "[%s] DM %s: %s", hhmm,
              event.channel_name[0] != '\0' ? event.channel_name : "(unnamed)", event.text);
@@ -7500,7 +8073,7 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
     abbreviateContactName(event.channel_name, initials, sizeof(initials));
     char dm_line[112] = {};
     snprintf(dm_line, sizeof(dm_line), "[%s] %s: %s", hhmm, initials, event.text);
-    appendDmLine(event.channel_name, event.peer_key, dm_line, ChatLineKind::Rx);
+    appendDmLine(event.channel_name, event.peer_key, dm_line, ChatLineKind::Rx, event_epoch);
     return;
   }
 
@@ -7536,11 +8109,12 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
 
   char display_text[96] = {};
   snprintf(display_text, sizeof(display_text), "[%s] %s", hhmm, event.text);
+  const uint32_t event_epoch = nowEpochSecondsOrZero();
 
-  pushChannelHistoryLine(event.channel_name, display_text, ChatLineKind::Rx);
+  pushChannelHistoryLine(event.channel_name, display_text, ChatLineKind::Rx, event_epoch);
 
   if (static_cast<uint8_t>(channel_index) == active_channel_) {
-    appendChatLine(display_text, ChatLineKind::Rx);
+    appendChatLine(display_text, ChatLineKind::Rx, event_epoch);
   } else {
     unread_channels_[channel_index] = true;
     refreshChannelVisuals();

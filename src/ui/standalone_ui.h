@@ -12,6 +12,10 @@ class StandaloneUi {
   bool begin();
   void loop();
 
+  void showSplash(uint32_t duration_ms = 1800);
+  void showSplash(const char* node_name, uint32_t duration_ms = 1800);
+  void dismissSplash();
+
   void attachMeshAdapter(mesh::MeshAdapter* adapter);
   void setFirstInstallIdentityPrompt(bool enabled);
   void setChannels(const char names[][32], size_t count);
@@ -37,9 +41,9 @@ class StandaloneUi {
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 4;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  static constexpr uint8_t kCfgRowCount = 4;
+  static constexpr uint8_t kCfgRowCount = 6;
 #else
-  static constexpr uint8_t kCfgRowCount = 7;
+  static constexpr uint8_t kCfgRowCount = 9;
 #endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
   static constexpr uint8_t kContactActionCount = 3;
@@ -86,7 +90,8 @@ class StandaloneUi {
   void startComposeForSelectedContact();
   void openDmDialog(const char* contact_name, const char* contact_key);
   void closeDmDialog(bool focus_chat = false);
-  void appendDmLine(const char* contact_name, const char* contact_key, const char* text, ChatLineKind kind);
+  void appendDmLine(const char* contact_name, const char* contact_key, const char* text, ChatLineKind kind,
+                    uint32_t timestamp_epoch = 0);
   void rebuildDmDialog();
   void clearDmPanel();
   void openHelpDialog();
@@ -127,9 +132,10 @@ class StandaloneUi {
   void selectChannel(int index, bool activate);
   void triggerShortcut(uint8_t index);
 
-  void appendChatLine(const char* text, ChatLineKind kind);
+  void appendChatLine(const char* text, ChatLineKind kind, uint32_t timestamp_epoch = 0);
   int findConfiguredChannelIndex(const char* channel_name) const;
-  void pushChannelHistoryLine(const char* channel_name, const char* text, ChatLineKind kind);
+  void pushChannelHistoryLine(const char* channel_name, const char* text, ChatLineKind kind,
+                              uint32_t timestamp_epoch = 0);
   void rebuildChatForActiveChannel();
   void clearChatPanel();
   bool loadChatHistoryFromFs();
@@ -200,6 +206,7 @@ class StandaloneUi {
   lv_obj_t* cfg_status_label_ = nullptr;
   lv_obj_t* cfg_close_btn_ = nullptr;
   lv_obj_t* cfg_close_label_ = nullptr;
+  lv_obj_t* cfg_content_panel_ = nullptr;
   lv_obj_t* cfg_rows_[kCfgRowCount]{};
   lv_obj_t* cfg_row_labels_[kCfgRowCount]{};
   lv_obj_t* contacts_dialog_ = nullptr;
@@ -291,6 +298,10 @@ class StandaloneUi {
   bool compose_return_to_dm_ = false;
   bool cfg_open_ = false;
   bool contacts_open_ = false;
+
+  lv_obj_t* splash_overlay_ = nullptr;
+  uint32_t splash_duration_ms_ = 0;
+  uint32_t splash_dismiss_ms_ = 0;
   bool dm_open_ = false;
   bool help_open_ = false;
   bool live_open_ = false;
@@ -350,15 +361,18 @@ class StandaloneUi {
   StoredDmLine stored_dm_[kMaxStoredChatRows]{};
   size_t stored_dm_head_ = 0;
   size_t stored_dm_count_ = 0;
+  uint32_t dm_last_date_key_ = 0;
 
   struct StoredChatLine {
     char channel_name[32];
     char text[96];
     ChatLineKind kind;
+    uint32_t timestamp_epoch;
   };
   StoredChatLine stored_chat_[kMaxStoredChatRows]{};
   size_t stored_chat_head_ = 0;
   size_t stored_chat_count_ = 0;
+  uint32_t chat_last_date_key_ = 0;
   StoredChatLine stored_live_[kMaxStoredChatRows]{};
   size_t stored_live_head_ = 0;
   size_t stored_live_count_ = 0;

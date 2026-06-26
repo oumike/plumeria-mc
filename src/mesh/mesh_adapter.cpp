@@ -12,8 +12,10 @@
 #include <helpers/ESP32Board.h>
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/StaticPoolPacketManager.h>
+#include <helpers/TransportKeyStore.h>
 #include <helpers/radiolib/CustomSX1262.h>
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
+#include <SHA256.h>
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #include <M5Unified.h>
 #include <utility/PI4IOE5V6408_Class.hpp>
@@ -423,10 +425,43 @@ class StandaloneChatMesh : public BaseChatMesh {
       : BaseChatMesh(radio, millis_clock, rng, rtc_clock, packet_manager, mesh_tables),
         adapter_(adapter),
         advert_location_enabled_(false),
+        path_hash_mode_(0),
         advert_lat_(0.0),
         advert_lon_(0.0) {
     strncpy(node_name_, kDefaultNodeName, sizeof(node_name_) - 1);
     node_name_[sizeof(node_name_) - 1] = '\0';
+  }
+
+  void setPathHashMode(uint8_t mode) {
+    if (mode > 2) {
+      mode = 2;
+    }
+    path_hash_mode_ = mode;
+  }
+
+  uint8_t getPathHashMode() const {
+    return path_hash_mode_;
+  }
+
+  void setMeshRegion(const char* region_name) {
+    if (!region_name) {
+      region_name = "";
+    }
+    strncpy(mesh_region_name_, region_name, sizeof(mesh_region_name_) - 1);
+    mesh_region_name_[sizeof(mesh_region_name_) - 1] = '\0';
+    if (mesh_region_name_[0] == '\0') {
+      memset(&mesh_region_key_, 0, sizeof(mesh_region_key_));
+      mesh_region_active_ = false;
+    } else {
+      SHA256 sha;
+      sha.update(mesh_region_name_, strlen(mesh_region_name_));
+      sha.finalize(&mesh_region_key_.key, sizeof(mesh_region_key_.key));
+      mesh_region_active_ = true;
+    }
+  }
+
+  const char* getMeshRegion() const {
+    return mesh_region_name_;
   }
 
   void beginStandalone() {
@@ -566,6 +601,27 @@ class StandaloneChatMesh : public BaseChatMesh {
     return false;
   }
 
+  void sendFloodScoped(const ContactInfo& recipient, ::mesh::Packet* pkt, uint32_t delay_millis = 0) override {
+    (void)recipient;
+    if (mesh_region_active_ && pkt) {
+      uint16_t codes[2] = { mesh_region_key_.calcTransportCode(pkt), 0 };
+      sendFlood(pkt, codes, delay_millis, pathHashSizeForMode());
+    } else {
+      sendFlood(pkt, delay_millis, pathHashSizeForMode());
+    }
+  }
+
+  void sendFloodScoped(const ::mesh::GroupChannel& channel, ::mesh::Packet* pkt,
+                       uint32_t delay_millis = 0) override {
+    (void)channel;
+    if (mesh_region_active_ && pkt) {
+      uint16_t codes[2] = { mesh_region_key_.calcTransportCode(pkt), 0 };
+      sendFlood(pkt, codes, delay_millis, pathHashSizeForMode());
+    } else {
+      sendFlood(pkt, delay_millis, pathHashSizeForMode());
+    }
+  }
+
   void broadcastSelfAdvert() {
     ::mesh::Packet* packet = nullptr;
     if (advert_location_enabled_ && advert_lat_ >= -90.0 && advert_lat_ <= 90.0 &&
@@ -590,7 +646,12 @@ class StandaloneChatMesh : public BaseChatMesh {
       packet = createSelfAdvert(node_name_);
     }
     if (packet) {
-      sendFlood(packet);
+      if (mesh_region_active_) {
+        uint16_t codes[2] = { mesh_region_key_.calcTransportCode(packet), 0 };
+        sendFlood(packet, codes, 0, pathHashSizeForMode());
+      } else {
+        sendFlood(packet, 0, pathHashSizeForMode());
+      }
     }
   }
 
@@ -625,6 +686,20 @@ class StandaloneChatMesh : public BaseChatMesh {
   }
 
  protected:
+  bool regionMatches(::mesh::Packet* packet) const {
+    if (!mesh_region_active_) {
+      return true;
+    }
+    if (!packet) {
+      return false;
+    }
+    const uint16_t got = packet->transport_codes[0];
+    if (got == 0) {
+      return false;  // un-tagged traffic dropped when region filter is active
+    }
+    return got == mesh_region_key_.calcTransportCode(packet);
+  }
+
   void onDiscoveredContact(ContactInfo& contact, bool is_new, uint8_t path_len, const uint8_t* path) override {
     (void)path;
     char info[96];
@@ -643,6 +718,9 @@ class StandaloneChatMesh : public BaseChatMesh {
 
   void onAdvertRecv(::mesh::Packet* packet, const ::mesh::Identity& id, uint32_t timestamp,
                     const uint8_t* app_data, size_t app_data_len) override {
+    if (!regionMatches(packet)) {
+      return;
+    }
     BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
     if (!adapter_ || !app_data || app_data_len == 0 || app_data_len > MAX_ADVERT_DATA_SIZE) {
       return;
@@ -663,8 +741,10 @@ class StandaloneChatMesh : public BaseChatMesh {
 
   void onMessageRecv(const ContactInfo& contact, ::mesh::Packet* packet, uint32_t sender_timestamp,
                      const char* text) override {
-    (void)packet;
     (void)sender_timestamp;
+    if (!regionMatches(packet)) {
+      return;
+    }
     char contact_name[32] = {};
     if (contact.name[0] != '\0') {
       strncpy(contact_name, contact.name, sizeof(contact_name) - 1);
@@ -698,6 +778,9 @@ class StandaloneChatMesh : public BaseChatMesh {
 
   void onGroupDataRecv(::mesh::Packet* packet, uint8_t type, const ::mesh::GroupChannel& channel,
                        uint8_t* data, size_t len) override {
+    if (!regionMatches(packet)) {
+      return;
+    }
     if (type != PAYLOAD_TYPE_GRP_TXT) {
       BaseChatMesh::onGroupDataRecv(packet, type, channel, data, len);
       return;
@@ -808,6 +891,11 @@ class StandaloneChatMesh : public BaseChatMesh {
   }
 
  private:
+  uint8_t pathHashSizeForMode() const {
+    // MeshCore expects path hash size in bytes (1..3), while config mode is 0..2.
+    return static_cast<uint8_t>(path_hash_mode_ + 1);
+  }
+
   void resolveChannelName(const ::mesh::GroupChannel& group_channel, char* out_name, size_t out_name_size) {
     if (!out_name || out_name_size == 0) {
       return;
@@ -899,8 +987,12 @@ class StandaloneChatMesh : public BaseChatMesh {
   MeshAdapter* adapter_;
   char node_name_[32];
   bool advert_location_enabled_;
+  uint8_t path_hash_mode_;
   double advert_lat_;
   double advert_lon_;
+  char mesh_region_name_[32] = {};
+  TransportKey mesh_region_key_{};
+  bool mesh_region_active_ = false;
 };
 
 struct MeshRuntime {
@@ -1011,6 +1103,8 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
   }
 
   runtime_->mesh->setNodeName(kDefaultNodeName);
+  runtime_->mesh->setPathHashMode(path_hash_mode_);
+  runtime_->mesh->setMeshRegion(mesh_region_);
 
   identity_loaded_from_nvs_ = loadIdentityFromNvs(&runtime_->mesh->self_id);
   adverts_unlocked_for_boot_ = identity_loaded_from_nvs_;
@@ -1322,6 +1416,47 @@ bool MeshAdapter::setAutoAdvertIntervalMinutes(uint16_t minutes) {
   auto_advert_interval_minutes_ = minutes;
   auto_advert_interval_ms_ = static_cast<uint32_t>(minutes) * kMinuteMs;
   return true;
+}
+
+bool MeshAdapter::setPathHashMode(uint8_t mode) {
+  if (mode > 2) {
+    mode = 2;
+  }
+  path_hash_mode_ = mode;
+
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    return false;
+  }
+
+  runtime_->mesh->setPathHashMode(path_hash_mode_);
+  return true;
+}
+
+uint8_t MeshAdapter::getPathHashMode() const {
+  return path_hash_mode_;
+}
+
+bool MeshAdapter::setMeshRegion(const char* region_name) {
+  const char* safe = region_name ? region_name : "";
+  if (strlen(safe) >= sizeof(mesh_region_)) {
+    return false;
+  }
+  strncpy(mesh_region_, safe, sizeof(mesh_region_) - 1);
+  mesh_region_[sizeof(mesh_region_) - 1] = '\0';
+
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    return false;
+  }
+  runtime_->mesh->setMeshRegion(mesh_region_);
+  return true;
+}
+
+void MeshAdapter::getMeshRegion(char* out_name, size_t out_size) const {
+  if (!out_name || out_size == 0) {
+    return;
+  }
+  strncpy(out_name, mesh_region_, out_size - 1);
+  out_name[out_size - 1] = '\0';
 }
 
 uint16_t MeshAdapter::getAutoAdvertIntervalMinutes() const {

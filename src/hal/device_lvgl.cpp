@@ -251,8 +251,9 @@ constexpr bool kWheelInvertDirection = false;
 constexpr uint16_t kLvglBufferLines = 20;
 constexpr uint16_t kDefaultScreenTimeoutSeconds = 30;
 constexpr uint16_t kMaxScreenTimeoutSeconds = 600;
+constexpr uint32_t kManualInputLockMs = 1000;
 #if defined(DEVICE_TDECK)
-constexpr uint32_t kTdeckTrackballHoldOffMs = 3000;
+constexpr uint32_t kTdeckTrackballHoldOffMs = 2000;
 #endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -1032,6 +1033,7 @@ void pumpCardputerKeys() {
 uint16_t g_screen_timeout_seconds = kDefaultScreenTimeoutSeconds;
 uint32_t g_last_user_activity_ms = 0;
 bool g_screen_on = true;
+uint32_t g_input_lock_until_ms = 0;
 
 uint16_t normalizeScreenTimeoutSeconds(uint16_t timeout_seconds) {
   if (timeout_seconds > kMaxScreenTimeoutSeconds) {
@@ -1145,6 +1147,17 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   }
 
   uint32_t now_ms = millis();
+
+  if (g_input_lock_until_ms != 0 && static_cast<int32_t>(g_input_lock_until_ms - now_ms) > 0) {
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+    if (kHasPhysicalWheel && kScrollWheelUpPin >= 0 && kScrollWheelDownPin >= 0 && kScrollWheelPressPin >= 0) {
+      prev_click_pressed = (digitalRead(kScrollWheelPressPin) == kInputActiveLevel);
+      prev_up_pressed = (digitalRead(kScrollWheelUpPin) == kInputActiveLevel);
+      prev_down_pressed = (digitalRead(kScrollWheelDownPin) == kInputActiveLevel);
+    }
+#endif
+    return;
+  }
 
 #if defined(DEVICE_TDECK)
   // Prioritize keyboard keys so Enter/backspace/text are delivered independently
@@ -1424,6 +1437,7 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     trackball_long_press_fired = false;
   } else if (!trackball_long_press_fired && trackball_press_start_ms != 0 &&
              (now_ms - trackball_press_start_ms) >= kTdeckTrackballHoldOffMs) {
+    g_input_lock_until_ms = now_ms + kManualInputLockMs;
     setScreenPowerState(false);
     trackball_long_press_fired = true;
     prev_click_pressed = click_pressed;
@@ -1503,6 +1517,12 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 
 void read_touch(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   (void)drv;
+
+  const uint32_t now_ms = millis();
+  if (g_input_lock_until_ms != 0 && static_cast<int32_t>(g_input_lock_until_ms - now_ms) > 0) {
+    data->state = LV_INDEV_STATE_RELEASED;
+    return;
+  }
 
   int32_t tx = 0;
   int32_t ty = 0;
