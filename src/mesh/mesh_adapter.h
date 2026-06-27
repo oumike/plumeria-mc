@@ -12,6 +12,7 @@ enum class MeshEventType : uint8_t {
   Info,
   ChannelMessage,
   DirectMessage,
+  AckReceived,
 };
 
 struct MeshEvent {
@@ -19,6 +20,7 @@ struct MeshEvent {
   char channel_name[32];
   char peer_key[65];
   char text[96];
+  uint8_t ack_count;
 };
 
 struct MeshRadioStats {
@@ -67,6 +69,7 @@ class MeshAdapter {
   void getAdvertLocation(bool* enabled, double* latitude, double* longitude) const;
   bool setPathHashMode(uint8_t mode);
   uint8_t getPathHashMode() const;
+  bool setMultiAck(bool enabled);
   bool setMeshRegion(const char* region_name);
   void getMeshRegion(char* out_name, size_t out_size) const;
   bool setAutoAdvertIntervalMinutes(uint16_t minutes);
@@ -102,6 +105,7 @@ class MeshAdapter {
   void queueInfo(const char* text);
   void queueChannelMessage(const char* channel_name, const char* text);
   void queueDirectMessage(const char* contact_name, const char* contact_key, const char* text);
+  void queueAckReceived(const char* contact_name, const char* contact_key, const char* sent_text, uint8_t ack_count);
   void noteRxRaw();
   void noteRxPacket();
   void markContactsDirty();
@@ -125,6 +129,7 @@ class MeshAdapter {
   uint16_t auto_advert_interval_minutes_ = 360;
   uint32_t last_persist_flush_ms_ = 0;
   uint8_t path_hash_mode_ = 0;
+  bool multi_ack_enabled_ = false;
   char mesh_region_[32] = {};
   uint32_t rx_raw_count_ = 0;
   uint32_t rx_packet_count_ = 0;

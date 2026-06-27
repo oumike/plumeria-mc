@@ -426,10 +426,17 @@ class StandaloneChatMesh : public BaseChatMesh {
         adapter_(adapter),
         advert_location_enabled_(false),
         path_hash_mode_(0),
+        multi_ack_enabled_(false),
         advert_lat_(0.0),
         advert_lon_(0.0) {
     strncpy(node_name_, kDefaultNodeName, sizeof(node_name_) - 1);
     node_name_[sizeof(node_name_) - 1] = '\0';
+    pending_ack_contact_ = nullptr;
+    pending_ack_crc_ = 0;
+    ack_recv_count_ = 0;
+    pending_ack_name_[0] = '\0';
+    pending_ack_key_[0] = '\0';
+    pending_ack_text_[0] = '\0';
   }
 
   void setPathHashMode(uint8_t mode) {
@@ -441,6 +448,14 @@ class StandaloneChatMesh : public BaseChatMesh {
 
   uint8_t getPathHashMode() const {
     return path_hash_mode_;
+  }
+
+  void setMultiAck(bool enabled) {
+    multi_ack_enabled_ = enabled;
+  }
+
+  uint8_t getExtraAckTransmitCount() const override {
+    return multi_ack_enabled_ ? 1 : 0;
   }
 
   void setMeshRegion(const char* region_name) {
@@ -559,8 +574,17 @@ class StandaloneChatMesh : public BaseChatMesh {
     uint32_t est_timeout = 0;
     uint32_t ts = getRTCClock()->getCurrentTimeUnique();
     int send_result = sendMessage(*recipient, ts, 0, text, expected_ack, est_timeout);
-    (void)expected_ack;
     (void)est_timeout;
+    if (send_result != MSG_SEND_FAILED) {
+      pending_ack_contact_ = recipient;
+      pending_ack_crc_ = expected_ack;
+      ack_recv_count_ = 0;
+      strncpy(pending_ack_name_, recipient->name[0] ? recipient->name : "(unnamed)", sizeof(pending_ack_name_) - 1);
+      pending_ack_name_[sizeof(pending_ack_name_) - 1] = '\0';
+      bytesToHex(recipient->id.pub_key, PUB_KEY_SIZE, pending_ack_key_, sizeof(pending_ack_key_));
+      strncpy(pending_ack_text_, text, sizeof(pending_ack_text_) - 1);
+      pending_ack_text_[sizeof(pending_ack_text_) - 1] = '\0';
+    }
     return send_result != MSG_SEND_FAILED;
   }
 
@@ -578,8 +602,17 @@ class StandaloneChatMesh : public BaseChatMesh {
     uint32_t est_timeout = 0;
     uint32_t ts = getRTCClock()->getCurrentTimeUnique();
     int send_result = sendMessage(*recipient, ts, 0, text, expected_ack, est_timeout);
-    (void)expected_ack;
     (void)est_timeout;
+    if (send_result != MSG_SEND_FAILED) {
+      pending_ack_contact_ = recipient;
+      pending_ack_crc_ = expected_ack;
+      ack_recv_count_ = 0;
+      strncpy(pending_ack_name_, recipient->name[0] ? recipient->name : "(unnamed)", sizeof(pending_ack_name_) - 1);
+      pending_ack_name_[sizeof(pending_ack_name_) - 1] = '\0';
+      bytesToHex(recipient->id.pub_key, PUB_KEY_SIZE, pending_ack_key_, sizeof(pending_ack_key_));
+      strncpy(pending_ack_text_, text, sizeof(pending_ack_text_) - 1);
+      pending_ack_text_[sizeof(pending_ack_text_) - 1] = '\0';
+    }
     return send_result != MSG_SEND_FAILED;
   }
 
@@ -735,8 +768,17 @@ class StandaloneChatMesh : public BaseChatMesh {
   }
 
   ContactInfo* processAck(const uint8_t* data) override {
-    (void)data;
-    return nullptr;
+    if (!pending_ack_contact_ || !data || pending_ack_crc_ == 0) {
+      return nullptr;
+    }
+    uint32_t received_crc;
+    memcpy(&received_crc, data, 4);
+    if (received_crc != pending_ack_crc_) {
+      return nullptr;
+    }
+    ack_recv_count_++;
+    adapter_->queueAckReceived(pending_ack_name_, pending_ack_key_, pending_ack_text_, ack_recv_count_);
+    return pending_ack_contact_;
   }
 
   void onMessageRecv(const ContactInfo& contact, ::mesh::Packet* packet, uint32_t sender_timestamp,
@@ -988,11 +1030,18 @@ class StandaloneChatMesh : public BaseChatMesh {
   char node_name_[32];
   bool advert_location_enabled_;
   uint8_t path_hash_mode_;
+  bool multi_ack_enabled_;
   double advert_lat_;
   double advert_lon_;
   char mesh_region_name_[32] = {};
   TransportKey mesh_region_key_{};
   bool mesh_region_active_ = false;
+  ContactInfo* pending_ack_contact_ = nullptr;
+  uint32_t pending_ack_crc_ = 0;
+  uint8_t ack_recv_count_ = 0;
+  char pending_ack_name_[32] = {};
+  char pending_ack_key_[65] = {};
+  char pending_ack_text_[96] = {};
 };
 
 struct MeshRuntime {
@@ -1104,6 +1153,7 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
 
   runtime_->mesh->setNodeName(kDefaultNodeName);
   runtime_->mesh->setPathHashMode(path_hash_mode_);
+  runtime_->mesh->setMultiAck(multi_ack_enabled_);
   runtime_->mesh->setMeshRegion(mesh_region_);
 
   identity_loaded_from_nvs_ = loadIdentityFromNvs(&runtime_->mesh->self_id);
@@ -1434,6 +1484,14 @@ bool MeshAdapter::setPathHashMode(uint8_t mode) {
 
 uint8_t MeshAdapter::getPathHashMode() const {
   return path_hash_mode_;
+}
+
+bool MeshAdapter::setMultiAck(bool enabled) {
+  multi_ack_enabled_ = enabled;
+  if (runtime_ && runtime_->mesh) {
+    runtime_->mesh->setMultiAck(enabled);
+  }
+  return true;
 }
 
 bool MeshAdapter::setMeshRegion(const char* region_name) {
@@ -1819,6 +1877,31 @@ void MeshAdapter::queueDirectMessage(const char* contact_name, const char* conta
   }
   strncpy(evt.text, text, sizeof(evt.text) - 1);
   evt.text[sizeof(evt.text) - 1] = '\0';
+
+  event_head_ = (event_head_ + 1) % kMaxQueuedEvents;
+  event_count_++;
+}
+
+void MeshAdapter::queueAckReceived(const char* contact_name, const char* contact_key,
+                                   const char* sent_text, uint8_t ack_count) {
+  if (event_count_ == kMaxQueuedEvents) {
+    event_tail_ = (event_tail_ + 1) % kMaxQueuedEvents;
+    event_count_--;
+  }
+
+  MeshEvent& evt = event_queue_[event_head_];
+  evt.type = MeshEventType::AckReceived;
+  strncpy(evt.channel_name, contact_name ? contact_name : "", sizeof(evt.channel_name) - 1);
+  evt.channel_name[sizeof(evt.channel_name) - 1] = '\0';
+  if (contact_key && contact_key[0] != '\0') {
+    strncpy(evt.peer_key, contact_key, sizeof(evt.peer_key) - 1);
+    evt.peer_key[sizeof(evt.peer_key) - 1] = '\0';
+  } else {
+    evt.peer_key[0] = '\0';
+  }
+  strncpy(evt.text, sent_text ? sent_text : "", sizeof(evt.text) - 1);
+  evt.text[sizeof(evt.text) - 1] = '\0';
+  evt.ack_count = ack_count;
 
   event_head_ = (event_head_ + 1) % kMaxQueuedEvents;
   event_count_++;

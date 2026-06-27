@@ -306,6 +306,7 @@ const char* kCfgRowLabels[] = {
   "Web Config",
   "GPS",
   "Multipaths",
+  "Multi-ACK",
   "Mesh Region",
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
   "Export Config",
@@ -319,11 +320,12 @@ constexpr uint8_t kCfgRowRadioPreset = 1;
 constexpr uint8_t kCfgRowWebConfig = 2;
 constexpr uint8_t kCfgRowGps = 3;
 constexpr uint8_t kCfgRowMultipaths = 4;
-constexpr uint8_t kCfgRowMeshRegion = 5;
+constexpr uint8_t kCfgRowMultiAck = 5;
+constexpr uint8_t kCfgRowMeshRegion = 6;
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
-constexpr uint8_t kCfgRowExportConfig = 6;
-constexpr uint8_t kCfgRowImportConfig = 7;
-constexpr uint8_t kCfgRowDeleteConfig = 8;
+constexpr uint8_t kCfgRowExportConfig = 7;
+constexpr uint8_t kCfgRowImportConfig = 8;
+constexpr uint8_t kCfgRowDeleteConfig = 9;
 #endif
 
 const char* radioPresetDisplayName(const char* region) {
@@ -3869,6 +3871,17 @@ bool StandaloneUi::sendComposeMessage() {
       const char* dm_contact_name = compose_target_channel_[0] != '\0' ? compose_target_channel_ : dm_active_name_;
       const char* dm_contact_key = compose_target_dm_pubkey_[0] != '\0' ? compose_target_dm_pubkey_ : dm_active_key_;
       appendDmLine(dm_contact_name, dm_contact_key, dm_line, ChatLineKind::Tx, line_epoch);
+      dm_pending_ack_stored_idx_ = (stored_dm_head_ + stored_dm_count_ - 1) % kMaxStoredChatRows;
+      dm_pending_ack_label_ = (dm_open_ && dm_panel_ && dm_row_count_ > 0) ? dm_rows_[dm_row_count_ - 1] : nullptr;
+      strncpy(dm_pending_ack_hhmm_, hhmm, sizeof(dm_pending_ack_hhmm_) - 1);
+      dm_pending_ack_hhmm_[sizeof(dm_pending_ack_hhmm_) - 1] = '\0';
+      strncpy(dm_pending_ack_snippet_, send_text, sizeof(dm_pending_ack_snippet_) - 1);
+      dm_pending_ack_snippet_[sizeof(dm_pending_ack_snippet_) - 1] = '\0';
+      strncpy(dm_pending_ack_contact_key_, dm_contact_key ? dm_contact_key : "", sizeof(dm_pending_ack_contact_key_) - 1);
+      dm_pending_ack_contact_key_[sizeof(dm_pending_ack_contact_key_) - 1] = '\0';
+      strncpy(dm_pending_ack_contact_name_, dm_contact_name ? dm_contact_name : "", sizeof(dm_pending_ack_contact_name_) - 1);
+      dm_pending_ack_contact_name_[sizeof(dm_pending_ack_contact_name_) - 1] = '\0';
+      dm_pending_ack_count_ = 0;
     }
   };
 
@@ -4016,10 +4029,10 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
   }
 
   if (contacts_count_ == 0) {
-    lv_label_set_text(contacts_full_name_label_, "Node: -");
-    lv_label_set_text(contacts_lat_lon_label_, "Lat/Lon: -");
-    lv_label_set_text(contacts_last_heard_label_, "Last: -");
-    lv_label_set_text(contacts_telemetry_label_, "Telemetry: -");
+    lv_label_set_text(contacts_full_name_label_, "");
+    lv_label_set_text(contacts_lat_lon_label_, "");
+    lv_label_set_text(contacts_last_heard_label_, "");
+    lv_label_set_text(contacts_telemetry_label_, "");
     lv_label_set_text(contacts_action_labels_[0], addFavoriteActionLabel());
   #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_label_set_text(contacts_action_labels_[1], "DM");
@@ -4032,7 +4045,10 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(contacts_status_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
+    // Keep the node-detail panel empty when no contacts have been heard yet
+    // so it doesn't show placeholder dashes. The status label below still
+    // surfaces the "No heard nodes yet" message.
+    lv_obj_add_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(contacts_status_label_, "No heard nodes yet");
     refreshChannelVisuals();
     return;
@@ -4501,6 +4517,8 @@ void StandaloneUi::refreshCfgDialog() {
   snprintf(row_text, sizeof(row_text), "Multipaths: %u", static_cast<unsigned>(multipaths));
   lv_label_set_text(cfg_row_labels_[kCfgRowMultipaths], row_text);
 
+  lv_label_set_text(cfg_row_labels_[kCfgRowMultiAck], web_settings.multi_ack ? "Multi-ACK: ON" : "Multi-ACK: OFF");
+
   snprintf(row_text, sizeof(row_text), "Mesh Region: %s",
            web_settings.mesh_region[0] ? web_settings.mesh_region : "(unfiltered)");
   lv_label_set_text(cfg_row_labels_[kCfgRowMeshRegion], row_text);
@@ -4823,6 +4841,24 @@ void StandaloneUi::activateCfgSelection() {
         strncpy(cfg_status_text_, err[0] ? err : "Multipaths change failed", sizeof(cfg_status_text_) - 1);
         cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
         strncpy(cfg_action_text_, "Multipaths failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+      break;
+    }
+    case kCfgRowMultiAck: {
+      plumeria::web::WebSettings web_settings{};
+      plumeria::web::loadSettings(&web_settings);
+      const bool next = !web_settings.multi_ack;
+      char err[96] = {};
+      if (plumeria::web::setMultiAck(next, err, sizeof(err))) {
+        strncpy(cfg_status_text_, next ? "Multi-ACK enabled" : "Multi-ACK disabled", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, next ? "Multi-ACK ON" : "Multi-ACK OFF", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      } else {
+        strncpy(cfg_status_text_, err[0] ? err : "Multi-ACK toggle failed", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
         cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       }
       break;
@@ -5390,6 +5426,7 @@ void StandaloneUi::clearDmPanel() {
   }
   dm_row_count_ = 0;
   dm_last_date_key_ = 0;
+  dm_pending_ack_label_ = nullptr;
 }
 
 void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_key, const char* text,
@@ -8010,6 +8047,26 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
 
   char hhmm[8] = {};
   formatUiClockHhMm(hhmm, sizeof(hhmm));
+
+  if (event.type == mesh::MeshEventType::AckReceived) {
+    const bool key_match = dm_pending_ack_contact_key_[0] != '\0' && event.peer_key[0] != '\0' &&
+                           strcmp(dm_pending_ack_contact_key_, event.peer_key) == 0;
+    const bool name_match = dmNameLikelyMatch(dm_pending_ack_contact_name_, event.channel_name);
+    if ((key_match || name_match) && dm_pending_ack_stored_idx_ != SIZE_MAX) {
+      dm_pending_ack_count_++;
+      char ack_line[96] = {};
+      snprintf(ack_line, sizeof(ack_line), "[%s] (Ack: %u) Me: %s",
+               dm_pending_ack_hhmm_, static_cast<unsigned>(dm_pending_ack_count_), dm_pending_ack_snippet_);
+      strncpy(stored_dm_[dm_pending_ack_stored_idx_].text, ack_line,
+              sizeof(stored_dm_[dm_pending_ack_stored_idx_].text) - 1);
+      stored_dm_[dm_pending_ack_stored_idx_].text[sizeof(stored_dm_[dm_pending_ack_stored_idx_].text) - 1] = '\0';
+      dm_history_dirty_ = true;
+      if (dm_open_ && dm_dialog_ && dm_panel_) {
+        rebuildDmDialog();
+      }
+    }
+    return;
+  }
 
   if (event.type == mesh::MeshEventType::Info) {
     int16_t snr_db = 0;

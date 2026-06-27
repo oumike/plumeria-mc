@@ -122,5 +122,6 @@ fi
 git tag "$TAG"
 git push origin "$TAG"
 
-echo "Tag $TAG pushed. GitHub Actions will build and create the draft release."
-echo "https://github.com/oumike/plumeria-mc/actions"
+echo "Tag $TAG pushed. GitHub Actions will build and publish the release automatically."
+echo "Track progress: https://github.com/oumike/plumeria-mc/actions"
+echo "Release will appear at: https://github.com/oumike/plumeria-mc/releases/tag/$TAG"

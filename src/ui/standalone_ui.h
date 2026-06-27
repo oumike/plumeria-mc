@@ -41,9 +41,9 @@ class StandaloneUi {
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 4;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  static constexpr uint8_t kCfgRowCount = 6;
+  static constexpr uint8_t kCfgRowCount = 7;
 #else
-  static constexpr uint8_t kCfgRowCount = 9;
+  static constexpr uint8_t kCfgRowCount = 10;
 #endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
   static constexpr uint8_t kContactActionCount = 3;
@@ -231,6 +231,13 @@ class StandaloneUi {
   lv_obj_t* dm_close_label_ = nullptr;
   lv_obj_t* dm_rows_[kMaxChatRows]{};
   size_t dm_row_count_ = 0;
+  lv_obj_t* dm_pending_ack_label_ = nullptr;
+  char dm_pending_ack_contact_key_[65] = {};
+  char dm_pending_ack_contact_name_[32] = {};
+  char dm_pending_ack_hhmm_[8] = {};
+  char dm_pending_ack_snippet_[97] = {};
+  uint8_t dm_pending_ack_count_ = 0;
+  size_t dm_pending_ack_stored_idx_ = SIZE_MAX;
   lv_obj_t* help_dialog_ = nullptr;
   lv_obj_t* help_body_panel_ = nullptr;
   lv_obj_t* help_title_label_ = nullptr;

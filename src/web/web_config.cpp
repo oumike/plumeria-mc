@@ -160,7 +160,8 @@ void saveSettings(const plumeria::web::WebSettings& settings) {
   prefs.putUChar("lora_cr", settings.lora_cr);
   prefs.putChar("lora_pwr", settings.lora_tx_power_dbm);
   prefs.putUChar("path_hash_mode", settings.path_hash_mode);
-  prefs.putUShort("screen_timeout_s", settings.screen_timeout_seconds);
+  prefs.putBool("multi_ack", settings.multi_ack);
+  prefs.putUShort("screen_timeout", settings.screen_timeout_seconds);
   prefs.putString("mesh_region", settings.mesh_region);
   prefs.end();
 }
@@ -718,6 +719,7 @@ small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 <option value='2'>3</option>
 </select>
 </label>
+<label><input id='multi_ack' type='checkbox' style='width:auto;margin-right:8px'>Multi-ACK (show per-hop delivery count in message receipts)</label>
 <label>Mesh Region (filter; blank = unfiltered)<input id='mesh_region' maxlength='31' placeholder='e.g. #mountains-west or leave blank'></label>
 <label>Screen Timeout Seconds<input id='screen_timeout_sec' type='number' min='1' max='600' step='1'></label>
 </section>
@@ -866,6 +868,7 @@ async function loadStatus(force=false){
     }
     if(timeoutEl)timeoutEl.value=s.screen_timeout_sec||30;
     if(meshRegionEl)meshRegionEl.value=s.mesh_region||'';
+    const multiAckEl=document.getElementById('multi_ack');if(multiAckEl)multiAckEl.checked=!!s.multi_ack;
   }
 
   const latEl=document.getElementById('node_lat');
@@ -899,7 +902,7 @@ async function loadContacts(){const c=await jget('/api/contacts');contactsCache=
 
 async function addChannel(){const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}const r=await jpost('/api/channels/add',{name,psk});if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();},mesh_region:document.getElementById('mesh_region').value
 
-async function saveAll(){const tz=document.getElementById('timezone').value;const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,tz_offset:String(tzOffsetMinutes(tz)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,screen_timeout_sec:document.getElementById('screen_timeout_sec').value});alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
+async function saveAll(){const tz=document.getElementById('timezone').value;const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,tz_offset:String(tzOffsetMinutes(tz)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value});alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
 
 async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||((r&&r.error)||'done'));}
 async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||((r&&r.error)||'done'));}
@@ -1180,6 +1183,8 @@ void handleStatus() {
   payload += String(g_settings.advert_interval_minutes);
   payload += ",\"path_hash_mode\":";
   payload += String(g_settings.path_hash_mode);
+  payload += ",\"multi_ack\":";
+  payload += g_settings.multi_ack ? "true" : "false";
   payload += ",\"mesh_region\":";
   payload += jsonString(g_settings.mesh_region);
   payload += ",\"screen_timeout_sec\":";
@@ -1400,6 +1405,7 @@ void handleSaveAll() {
   String pwr = g_server.arg("pwr");
   String adv_int_min = g_server.arg("adv_int_min");
   String path_hash_mode = g_server.arg("path_hash_mode");
+  String multi_ack_str = g_server.arg("multi_ack");
   String screen_timeout_sec = g_server.arg("screen_timeout_sec");
   String mesh_region = g_server.arg("mesh_region");
 
@@ -1427,6 +1433,7 @@ void handleSaveAll() {
   pwr.trim();
   adv_int_min.trim();
   path_hash_mode.trim();
+  multi_ack_str.trim();
   screen_timeout_sec.trim();
   mesh_region.trim();
 
@@ -1552,6 +1559,7 @@ void handleSaveAll() {
   g_settings.lora_tx_power_dbm = static_cast<int8_t>(pwr_value);
   g_settings.advert_interval_minutes = static_cast<uint16_t>(advert_interval_minutes);
   g_settings.path_hash_mode = static_cast<uint8_t>(path_hash_mode_value);
+  g_settings.multi_ack = (multi_ack_str == "1" || multi_ack_str.equalsIgnoreCase("true"));
   g_settings.screen_timeout_seconds = static_cast<uint16_t>(screen_timeout_seconds);
   copyString(g_settings.wifi_ssid, sizeof(g_settings.wifi_ssid), ssid.c_str());
   copyString(g_settings.wifi_pass, sizeof(g_settings.wifi_pass), pass.c_str());
@@ -1572,6 +1580,7 @@ void handleSaveAll() {
     g_mesh->setGpsEnabled(!g_settings.send_location_in_advert);
     g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
     g_mesh->setPathHashMode(g_settings.path_hash_mode);
+    g_mesh->setMultiAck(g_settings.multi_ack);
     g_mesh->setMeshRegion(g_settings.mesh_region);
     g_mesh->broadcastSelfAdvertNow();
   }
@@ -1727,8 +1736,8 @@ void loadSettings(WebSettings* out_settings) {
   }
 
   uint16_t screen_timeout_seconds = kDefaultScreenTimeoutSeconds;
-  if (prefs.isKey("screen_timeout_s")) {
-    screen_timeout_seconds = prefs.getUShort("screen_timeout_s", kDefaultScreenTimeoutSeconds);
+  if (prefs.isKey("screen_timeout")) {
+    screen_timeout_seconds = prefs.getUShort("screen_timeout", kDefaultScreenTimeoutSeconds);
   }
 
   String ssid = kDefaultSsid;
@@ -1797,6 +1806,10 @@ void loadSettings(WebSettings* out_settings) {
   if (prefs.isKey("path_hash_mode")) {
     path_hash_mode = prefs.getUChar("path_hash_mode", kDefaultPathHashMode);
   }
+  bool multi_ack = false;
+  if (prefs.isKey("multi_ack")) {
+    multi_ack = prefs.getBool("multi_ack", false);
+  }
   String mesh_region = String("");
   if (prefs.isKey("mesh_region")) {
     mesh_region = prefs.getString("mesh_region", "");
@@ -1829,6 +1842,7 @@ void loadSettings(WebSettings* out_settings) {
   out_settings->lora_cr = cr;
   out_settings->lora_tx_power_dbm = pwr;
   out_settings->path_hash_mode = path_hash_mode;
+  out_settings->multi_ack = multi_ack;
   copyString(out_settings->mesh_region, sizeof(out_settings->mesh_region), mesh_region.c_str());
 }
 
@@ -1861,6 +1875,7 @@ bool begin(mesh::MeshAdapter* mesh_adapter, const WebSettings& initial_settings)
     g_mesh->setGpsEnabled(!g_settings.send_location_in_advert);
     g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
     g_mesh->setPathHashMode(g_settings.path_hash_mode);
+    g_mesh->setMultiAck(g_settings.multi_ack);
     g_mesh->setMeshRegion(g_settings.mesh_region);
   }
   applyTimezoneOffsetFromSettings();
@@ -2009,6 +2024,21 @@ bool setPathHashMode(uint8_t mode, char* err, size_t err_size) {
     g_settings = next;
   }
 
+  setImportError(err, err_size, "");
+  return true;
+}
+
+bool setMultiAck(bool enabled, char* err, size_t err_size) {
+  WebSettings next{};
+  loadSettings(&next);
+  next.multi_ack = enabled;
+  if (g_mesh) {
+    g_mesh->setMultiAck(enabled);
+  }
+  saveSettings(next);
+  if (g_running) {
+    g_settings = next;
+  }
   setImportError(err, err_size, "");
   return true;
 }
