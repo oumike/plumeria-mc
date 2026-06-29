@@ -9,6 +9,14 @@ RELEASE_ENVS=(
     heltec-v4-expansion-vertical
 )
 
+env_out_name() {
+    case "$1" in
+        heltec-v4-expansion)          echo "heltec" ;;
+        heltec-v4-expansion-vertical) echo "heltec-vertical" ;;
+        *)                            echo "$1" ;;
+    esac
+}
+
 has_env() {
     local env_name="$1"
     grep -q "^\[env:${env_name}\]" platformio.ini
@@ -18,6 +26,7 @@ clear_previous_builds() {
     echo "Clearing previous build artifacts..."
 
     rm -rf .pio/build
+    rm -rf dist
 
     if [[ -d builds ]]; then
         find builds -mindepth 1 ! -name ".gitkeep" -exec rm -rf {} +
@@ -106,6 +115,33 @@ fi
 
 ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
 echo "Build successful."
+
+# Stage release artifacts
+echo "Staging release artifacts to dist/..."
+mkdir -p dist
+
+for env_name in "${RELEASE_ENVS[@]}"; do
+    if ! has_env "$env_name"; then
+        continue
+    fi
+
+    build_dir=".pio/build/${env_name}"
+    out_name="$(env_out_name "$env_name")"
+
+    if [[ ! -f "${build_dir}/firmware.bin" ]]; then
+        echo "Warning: ${build_dir}/firmware.bin not found, skipping ${env_name}."
+        continue
+    fi
+
+    cp "${build_dir}/firmware.bin" "dist/plumeria-mc-${out_name}-${TAG}.bin"
+
+    if [[ -f "${build_dir}/firmware.elf" ]]; then
+        cp "${build_dir}/firmware.elf" "dist/plumeria-mc-${out_name}-${TAG}.elf"
+    fi
+done
+
+echo "Artifacts staged:"
+ls -lh dist/
 
 # Commit and push all changes
 git add -A

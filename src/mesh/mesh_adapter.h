@@ -13,6 +13,10 @@ enum class MeshEventType : uint8_t {
   ChannelMessage,
   DirectMessage,
   AckReceived,
+  LoginSuccess,
+  LoginFail,
+  LoginTimeout,
+  AdminCommandResponse,
 };
 
 struct MeshEvent {
@@ -21,6 +25,10 @@ struct MeshEvent {
   char peer_key[65];
   char text[96];
   uint8_t ack_count;
+  // Populated for LoginSuccess events; zero for others.
+  uint8_t login_perm;       // permission byte (admin bit etc.) from server
+  uint8_t login_acl_perm;   // ACL permission byte (v7+)
+  uint8_t login_fw_ver;     // server firmware ver level (v7+)
 };
 
 struct MeshRadioStats {
@@ -81,6 +89,8 @@ class MeshAdapter {
   int exportContacts(MeshContactSummary contacts[], int max_contacts) const;
   bool setContactFavoriteByPublicKeyHex(const char* public_key_hex, bool favorite);
   bool removeContactByPublicKeyHex(const char* public_key_hex);
+  bool sendLogin(const char* public_key_hex, const char* password);
+  bool sendAdminCommand(const char* public_key_hex, const char* command);
   bool addChannel(const char* channel_name, const char* psk_base64 = nullptr);
   bool removeChannel(const char* channel_name);
   void getRadioStats(MeshRadioStats* out_stats) const;
@@ -106,6 +116,12 @@ class MeshAdapter {
   void queueChannelMessage(const char* channel_name, const char* text);
   void queueDirectMessage(const char* contact_name, const char* contact_key, const char* text);
   void queueAckReceived(const char* contact_name, const char* contact_key, const char* sent_text, uint8_t ack_count);
+  void queueLoginEvent(MeshEventType type, const uint8_t* pub_key, const char* contact_name,
+                       uint8_t perm, uint8_t acl_perm, uint8_t fw_ver, const char* text);
+  void queueAdminCommandResponse(const uint8_t* pub_key, const char* contact_name, const char* text);
+  void handleLoginResponse(const void* contact, const uint8_t* data, uint8_t len);
+  void handleCommandData(const void* contact, const char* text);
+  void checkLoginTimeout(uint32_t now_ms);
   void noteRxRaw();
   void noteRxPacket();
   void markContactsDirty();
@@ -140,6 +156,12 @@ class MeshAdapter {
   bool contacts_dirty_ = false;
   bool channels_dirty_ = false;
   bool ready_ = false;
+
+  // Pending login tracking (single-flight).
+  bool pending_login_active_ = false;
+  uint8_t pending_login_pubkey_[kPubKeySize] = {};
+  uint32_t pending_login_deadline_ms_ = 0;
+  char pending_login_name_[32] = {};
 };
 
 }  // namespace mesh

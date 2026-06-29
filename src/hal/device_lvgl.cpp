@@ -553,8 +553,6 @@ constexpr uint8_t kPagerRegDebounceDis3 = 0x2B;
 constexpr uint8_t kPagerModShift = 0x01;
 constexpr uint8_t kPagerModSym = 0x02;
 constexpr uint32_t kPagerModTimeoutMs = 1500;
-constexpr uint8_t kPagerBottomCenterKeyNum = 31;
-constexpr uint32_t kPagerSleepCommandKey = 0x10001UL;
 constexpr uint32_t kPagerSleepWakeGuardMs = 1500;
 constexpr int kPagerDisplayTogglePin = 0;
 constexpr uint32_t kPagerDisplayToggleDebounceMs = 30;
@@ -727,11 +725,6 @@ uint32_t pagerReadMappedKey() {
     const uint8_t ev = pagerReadReg(static_cast<uint8_t>(kPagerRegKeyEventA + i));
     const bool pressed = (ev & 0x80) != 0;
     const uint8_t key_num = static_cast<uint8_t>(ev & 0x7F);
-
-    // Bottom-center key: dedicated display sleep command.
-    if (key_num == kPagerBottomCenterKeyNum) {
-      return kPagerSleepCommandKey;
-    }
 
     if (!pressed) {
       continue;
@@ -1348,15 +1341,6 @@ void read_scroll_wheel(lv_indev_drv_t* drv, lv_indev_data_t* data) {
       last_keyboard_probe_ms = kb_now_ms;
       const uint32_t mapped = pagerReadMappedKey();
       if (mapped != 0) {
-        if (mapped == kPagerSleepCommandKey) {
-          if (wakeDisplayForActivityAndConsumeEvent()) {
-            return;
-          }
-          g_pager_sleep_guard_until_ms = kb_now_ms + kPagerSleepWakeGuardMs;
-          setScreenPowerState(false);
-          return;
-        }
-
         if (wakeDisplayForActivityAndConsumeEvent()) {
           return;
         }

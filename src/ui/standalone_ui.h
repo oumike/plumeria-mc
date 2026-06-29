@@ -46,9 +46,9 @@ class StandaloneUi {
   static constexpr uint8_t kCfgRowCount = 10;
 #endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  static constexpr uint8_t kContactActionCount = 3;
+  static constexpr uint8_t kContactActionCount = 4;  // Fav, Admin, DM, Close
 #else
-  static constexpr uint8_t kContactActionCount = 2;
+  static constexpr uint8_t kContactActionCount = 3;  // Fav, Admin, DM
 #endif
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
@@ -148,6 +148,8 @@ class StandaloneUi {
   void handleClick(lv_obj_t* target);
   void showComposeKeyboard();
   void hideComposeKeyboard();
+  void showAdminPasswordKeyboard();
+  void hideAdminPasswordKeyboard();
 
   static void onFocusableEvent(lv_event_t* event);
   static void onContactsEvent(lv_event_t* event);
@@ -158,6 +160,25 @@ class StandaloneUi {
   static void onContactsPostOpenAsync(void* user_data);
   static void onOpenComposeDialogAsync(void* user_data);
   static void onComposePostOpenAsync(void* user_data);
+  static void onAdminPwEvent(lv_event_t* e);
+  static void onAdminScreenEvent(lv_event_t* e);
+  static void onAdminCmdEvent(lv_event_t* e);
+
+  void openAdminPasswordDialog(const char* contact_name, const char* contact_key, uint8_t contact_type);
+  void closeAdminPasswordDialog();
+  void submitAdminPassword();
+  void openAdminScreen(const char* contact_name);
+  void closeAdminScreen();
+  void openAdminCommandDialog();
+  void closeAdminCommandDialog();
+  void submitAdminCommand();
+  void loadAdminPassword(const char* public_key_hex, char* out_pw, size_t out_size);
+  void saveAdminPassword(const char* public_key_hex, const char* password);
+  void applyAdminLoginEvent(const mesh::MeshEvent& event);
+  void applyAdminCommandEvent(const mesh::MeshEvent& event);
+  void refreshAdminStatusLabel();
+  void refreshAdminCommandHistoryLabel();
+  void appendAdminCommandHistory(const char* command, const char* result, bool pending);
   bool pending_contacts_open_ = false;
   bool pending_contacts_show_ = false;
   bool pending_contacts_post_open_ = false;
@@ -238,6 +259,68 @@ class StandaloneUi {
   char dm_pending_ack_snippet_[97] = {};
   uint8_t dm_pending_ack_count_ = 0;
   size_t dm_pending_ack_stored_idx_ = SIZE_MAX;
+
+  // Admin password dialog
+  lv_obj_t* admin_pw_dialog_ = nullptr;
+  lv_obj_t* admin_pw_title_label_ = nullptr;
+  lv_obj_t* admin_pw_input_ = nullptr;
+  lv_obj_t* admin_pw_keyboard_ = nullptr;
+  lv_obj_t* admin_pw_save_btn_ = nullptr;
+  lv_obj_t* admin_pw_save_label_ = nullptr;
+  lv_obj_t* admin_pw_ok_btn_ = nullptr;
+  lv_obj_t* admin_pw_cancel_btn_ = nullptr;
+  bool admin_pw_open_ = false;
+  bool admin_pw_save_ = false;
+
+  // Admin screen (blank for now)
+  lv_obj_t* admin_screen_dialog_ = nullptr;
+  lv_obj_t* admin_screen_title_label_ = nullptr;
+  lv_obj_t* admin_screen_auth_label_ = nullptr;
+  lv_obj_t* admin_screen_close_btn_ = nullptr;
+  lv_obj_t* admin_screen_status_label_ = nullptr;
+  lv_obj_t* admin_screen_history_panel_ = nullptr;
+  lv_obj_t* admin_screen_history_label_ = nullptr;
+  lv_obj_t* admin_screen_hint_label_ = nullptr;
+  bool admin_screen_open_ = false;
+  uint32_t admin_screen_key_guard_until_ms_ = 0;
+
+  // Admin command dialog
+  lv_obj_t* admin_cmd_dialog_ = nullptr;
+  lv_obj_t* admin_cmd_title_label_ = nullptr;
+  lv_obj_t* admin_cmd_input_ = nullptr;
+  lv_obj_t* admin_cmd_run_btn_ = nullptr;
+  lv_obj_t* admin_cmd_cancel_btn_ = nullptr;
+  bool admin_cmd_open_ = false;
+
+  static constexpr uint8_t kAdminCmdHistoryMax = 10;
+  struct AdminCmdHistoryEntry {
+    char command[64];
+    char result[96];
+    bool pending;
+  };
+  AdminCmdHistoryEntry admin_cmd_history_[kAdminCmdHistoryMax]{};
+  uint8_t admin_cmd_history_count_ = 0;
+  char admin_cmd_history_render_[1200] = {};
+
+  // Pending admin target
+  char admin_target_key_[65] = {};
+  char admin_target_name_[32] = {};
+  uint8_t admin_target_type_ = 0;
+
+  // Admin login state machine
+  enum class AdminLoginState : uint8_t {
+    Idle,
+    Sending,
+    Pending,
+    Success,
+    Failed,
+    TimedOut,
+  };
+  AdminLoginState admin_login_state_ = AdminLoginState::Idle;
+  bool admin_is_admin_ = false;
+  uint8_t admin_login_acl_ = 0;
+  uint8_t admin_login_fw_ver_ = 0;
+
   lv_obj_t* help_dialog_ = nullptr;
   lv_obj_t* help_body_panel_ = nullptr;
   lv_obj_t* help_title_label_ = nullptr;

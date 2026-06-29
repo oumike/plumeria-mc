@@ -194,15 +194,31 @@ lv_coord_t contactsLeftPanePercent() {
   return kPagerWideDialogLayout ? 37 : 44;
 }
 
-const char* addFavoriteActionLabel() {
-  return kCompactFavoriteActionLabels ? "Add Fav" : "Add (F)avorite";
+const char* addFavoriteActionLabel(bool truncated = false) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  (void)truncated;
+  return "Add Fav";
+#else
+  if (kCompactFavoriteActionLabels) {
+    return "Add Fav";
+  }
+  return truncated ? "Add (F)av." : "Add (F)avorite";
+#endif
 }
 
-const char* favoriteActionLabel(bool currently_favorite) {
+const char* favoriteActionLabel(bool currently_favorite, bool truncated = false) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  (void)truncated;
+  return currently_favorite ? "Rem Fav" : "Add Fav";
+#else
   if (kCompactFavoriteActionLabels) {
     return currently_favorite ? "Rem Fav" : "Add Fav";
   }
+  if (truncated) {
+    return currently_favorite ? "Rem (F)av." : "Add (F)av.";
+  }
   return currently_favorite ? "Remove (F)avorite" : "Add (F)avorite";
+#endif
 }
 
 uint8_t clampOptionCount(uint8_t count, uint8_t limit) {
@@ -249,7 +265,7 @@ const char* kShortcutNames[] = {
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 const char* kShortcutNames[] = {
   "CFG",
-  "CONTACTS",
+  "CONT",
   "LIVE",
   "HELP",
 };
@@ -1680,7 +1696,7 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
     }
     lv_obj_set_size(contacts_detail_panel_, LV_PCT(100),
   #if defined(DEVICE_HELTEC_V4_EXPANSION)
-            46
+            50
   #else
             22
   #endif
@@ -1689,8 +1705,16 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
     lv_obj_set_style_bg_opa(contacts_detail_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(contacts_detail_panel_, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(contacts_detail_panel_, 0, LV_PART_MAIN);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_style_pad_top(contacts_detail_panel_, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(contacts_detail_panel_, 1, LV_PART_MAIN);
+#endif
     lv_obj_set_style_pad_column(contacts_detail_panel_, 2, LV_PART_MAIN);
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_style_pad_row(contacts_detail_panel_, 4, LV_PART_MAIN);
+  #else
     lv_obj_set_style_pad_row(contacts_detail_panel_, 2, LV_PART_MAIN);
+  #endif
     lv_obj_set_layout(contacts_detail_panel_, LV_LAYOUT_FLEX);
   #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_obj_set_flex_flow(contacts_detail_panel_, LV_FLEX_FLOW_ROW_WRAP);
@@ -1705,13 +1729,16 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
     static const char* kContactActionInitLabels[kContactActionCount] = {
       addFavoriteActionLabel(),
     #if defined(DEVICE_HELTEC_V4_EXPANSION)
-      "DM",
+      "Admin",      // index 1 — shown/hidden based on contact type
     #else
-      "(D)M",
+      "(A)dmin",    // index 1 — shown/hidden based on contact type
     #endif
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-      "CLOSE",
-#endif
+    #if defined(DEVICE_HELTEC_V4_EXPANSION)
+      "DM",         // index 2
+      "CLOSE",      // index 3
+    #else
+      "(D)M",       // index 2
+    #endif
     };
     for (uint8_t i = 0; i < kContactActionCount; i++) {
       contacts_action_rows_[i] = lv_btn_create(contacts_detail_panel_);
@@ -1719,11 +1746,15 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
         contacts_init_failed = true;
         break;
       }
-      if (i < 2) {
-        lv_obj_set_width(contacts_action_rows_[i], LV_PCT(49));
-      } else {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+      if (i == kContactActionCount - 1) {
         lv_obj_set_width(contacts_action_rows_[i], LV_PCT(100));
+      } else {
+        lv_obj_set_width(contacts_action_rows_[i], LV_PCT(32));
       }
+#else
+      lv_obj_set_width(contacts_action_rows_[i], LV_PCT(49));
+#endif
       lv_obj_set_height(contacts_action_rows_[i], 22);
       lv_obj_add_style(contacts_action_rows_[i], &style_button_, 0);
       lv_obj_add_style(contacts_action_rows_[i], &style_button_focused_, LV_STATE_FOCUSED);
@@ -3190,6 +3221,38 @@ void StandaloneUi::hideComposeKeyboard() {
 #endif
 }
 
+void StandaloneUi::showAdminPasswordKeyboard() {
+#if defined(LV_USE_KEYBOARD) && LV_USE_KEYBOARD
+  if (!kUseOnscreenKeyboard || !admin_pw_open_ || !admin_pw_input_ || !admin_pw_keyboard_) {
+    return;
+  }
+  if (!lv_obj_is_valid(admin_pw_keyboard_)) {
+    return;
+  }
+
+  const lv_coord_t screen_h = lv_disp_get_ver_res(nullptr);
+  const lv_coord_t kb_h = clampCoord(static_cast<lv_coord_t>(screen_h / 2), 90, 160);
+  lv_obj_set_size(admin_pw_keyboard_, LV_PCT(100), kb_h);
+  lv_obj_align(admin_pw_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_keyboard_set_textarea(admin_pw_keyboard_, admin_pw_input_);
+  lv_obj_clear_flag(admin_pw_keyboard_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(admin_pw_keyboard_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_move_foreground(admin_pw_keyboard_);
+#endif
+}
+
+void StandaloneUi::hideAdminPasswordKeyboard() {
+#if defined(LV_USE_KEYBOARD) && LV_USE_KEYBOARD
+  if (!admin_pw_keyboard_) {
+    return;
+  }
+  if (lv_obj_is_valid(admin_pw_keyboard_)) {
+    lv_obj_add_flag(admin_pw_keyboard_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(admin_pw_keyboard_, LV_OBJ_FLAG_CLICKABLE);
+  }
+#endif
+}
+
 void StandaloneUi::refreshChannelVisuals() {
   refreshSelectorVisuals();
   refreshDropdownVisuals();
@@ -3208,11 +3271,14 @@ void StandaloneUi::refreshSelectorVisuals() {
     if (contacts_count_ > 0) {
       const uint8_t selected = contacts_selected_index_ < contacts_count_ ? contacts_selected_index_ : 0;
       active_name = contacts_cache_[selected].name;
-      selector_char_cap = channelDisplayLenForDropdown(active_name);
+      selector_char_cap = strlen(active_name);
+      if (selector_char_cap == 0) {
+        selector_char_cap = 1;
+      }
       if (channel_dropdown_open_) {
         selector_char_cap = 1;
         for (uint8_t i = 0; i < contacts_count_; i++) {
-          const size_t display_len = channelDisplayLenForDropdown(contacts_cache_[i].name);
+          const size_t display_len = strlen(contacts_cache_[i].name);
           if (display_len > selector_char_cap) {
             selector_char_cap = display_len;
           }
@@ -3241,21 +3307,26 @@ void StandaloneUi::refreshSelectorVisuals() {
   lv_coord_t selector_max_w = kSelectorMaxW;
   if (contacts_mode && header_bar_) {
     const lv_coord_t header_w = lv_obj_get_width(header_bar_);
-    const lv_coord_t contacts_cap_w = static_cast<lv_coord_t>((header_w * 3) / 4);
+    // Keep symmetric edge spacing: selector is aligned at x=+2, so cap width
+    // to leave ~2px on the right side as well.
+    const lv_coord_t contacts_cap_w = static_cast<lv_coord_t>(header_w - 4);
     if (contacts_cap_w > kSelectorMinW) {
       selector_max_w = contacts_cap_w;
     }
   }
 
-  const size_t max_chars_for_width =
-      selector_max_w > 16 ? static_cast<size_t>((selector_max_w - 16) / 7) : static_cast<size_t>(1);
+    const lv_coord_t selector_hpad = contacts_mode ? 24 : 18;
+    const size_t max_chars_for_width =
+      selector_max_w > selector_hpad
+        ? static_cast<size_t>((selector_max_w - selector_hpad) / 7)
+        : static_cast<size_t>(1);
   if (selector_char_cap > max_chars_for_width) {
     selector_char_cap = max_chars_for_width;
     formatChannelLabelForSelector(active_name, selector_char_cap, selector_text, sizeof(selector_text));
     lv_label_set_text(channel_selector_label_, selector_text);
   }
 
-  const lv_coord_t selector_w = clampCoord(static_cast<lv_coord_t>(selector_char_cap * 7 + 18),
+  const lv_coord_t selector_w = clampCoord(static_cast<lv_coord_t>(selector_char_cap * 7 + selector_hpad),
                                            kSelectorMinW, selector_max_w);
   const lv_coord_t dropdown_min_w =
       static_cast<lv_coord_t>((kDropdownNameMaxChars + 3) * 7 + 16);
@@ -4034,13 +4105,51 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     lv_label_set_text(contacts_last_heard_label_, "");
     lv_label_set_text(contacts_telemetry_label_, "");
     lv_label_set_text(contacts_action_labels_[0], addFavoriteActionLabel());
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(contacts_action_labels_[1], "DM");
-  #else
-    lv_label_set_text(contacts_action_labels_[1], "(D)M");
-  #endif
+    // Admin button: hide when no contacts
+    if (contacts_action_rows_[1]) {
+      lv_obj_add_flag(contacts_action_rows_[1], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (contacts_action_labels_[1]) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(contacts_action_labels_[2], "CLOSE");
+      lv_label_set_text(contacts_action_labels_[1], "Admin");
+#else
+      lv_label_set_text(contacts_action_labels_[1], "(A)dmin");
+#endif
+    }
+    if (contacts_action_labels_[2]) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+      lv_label_set_text(contacts_action_labels_[2], "DM");
+#else
+      lv_label_set_text(contacts_action_labels_[2], "(D)M");
+#endif
+    }
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (contacts_action_labels_[3]) {
+      lv_label_set_text(contacts_action_labels_[3], "CLOSE");
+    }
+    if (contacts_action_rows_[0]) {
+      lv_obj_set_width(contacts_action_rows_[0], LV_PCT(49));
+    }
+    if (contacts_action_rows_[2]) {
+      lv_obj_set_width(contacts_action_rows_[2], LV_PCT(49));
+    }
+    if (contacts_action_rows_[1]) {
+      lv_obj_set_width(contacts_action_rows_[1], LV_PCT(32));
+    }
+    if (contacts_detail_panel_) {
+      lv_obj_invalidate(contacts_detail_panel_);
+    }
+#else
+    // Reset non-Heltec widths to default
+    if (contacts_action_rows_[0]) {
+      lv_obj_set_width(contacts_action_rows_[0], LV_PCT(49));
+    }
+    if (contacts_action_rows_[2]) {
+      lv_obj_set_width(contacts_action_rows_[2], LV_PCT(49));
+    }
+    if (contacts_detail_panel_) {
+      lv_obj_invalidate(contacts_detail_panel_);
+    }
 #endif
     lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
@@ -4074,15 +4183,72 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
   formatContactTelemetry(selected, detail, sizeof(detail));
   lv_label_set_text(contacts_telemetry_label_, detail);
 
-  lv_label_set_text(contacts_action_labels_[0], favoriteActionLabel(selected.favorite));
+  // Determine admin eligibility (repeater or room contacts) before labeling so
+  // we can pick a shortened favorite label that fits the narrower button.
+  const bool isAdminContact = (selected.type == 2 || selected.type == 3);
+
+  lv_label_set_text(contacts_action_labels_[0], favoriteActionLabel(selected.favorite, isAdminContact));
+
+  // Show/hide admin button
+  if (contacts_action_rows_[1]) {
+    if (isAdminContact) {
+      lv_obj_clear_flag(contacts_action_rows_[1], LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(contacts_action_rows_[1], LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  if (contacts_action_labels_[1]) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_label_set_text(contacts_action_labels_[1], "DM");
+    lv_label_set_text(contacts_action_labels_[1], "Admin");
 #else
-  lv_label_set_text(contacts_action_labels_[1], "(D)M");
+    lv_label_set_text(contacts_action_labels_[1], "(A)dmin");
 #endif
+  }
+  if (contacts_action_labels_[2]) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_label_set_text(contacts_action_labels_[2], "CLOSE");
+    lv_label_set_text(contacts_action_labels_[2], "DM");
+#else
+    lv_label_set_text(contacts_action_labels_[2], "(D)M");
 #endif
+  }
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (contacts_action_labels_[3]) {
+    lv_label_set_text(contacts_action_labels_[3], "CLOSE");
+  }
+#endif
+
+// Keep Heltec contact actions dense: with no Admin action (non-repeater),
+// Fav and DM each take half of the row.
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (contacts_action_rows_[0] && contacts_action_rows_[2]) {
+    const lv_coord_t action_w = isAdminContact ? LV_PCT(32) : LV_PCT(49);
+    lv_obj_set_width(contacts_action_rows_[0], action_w);
+    lv_obj_set_width(contacts_action_rows_[2], action_w);
+    if (contacts_action_rows_[1]) {
+      lv_obj_set_width(contacts_action_rows_[1], LV_PCT(32));
+    }
+    if (contacts_detail_panel_) {
+      lv_obj_invalidate(contacts_detail_panel_);
+    }
+  }
+#endif
+
+  // Update non-Heltec button widths dynamically based on admin visibility
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (contacts_action_rows_[0] && contacts_action_rows_[2]) {
+    const lv_coord_t btn_w = isAdminContact ? LV_PCT(32) : LV_PCT(49);
+    lv_obj_set_width(contacts_action_rows_[0], btn_w);
+    if (isAdminContact && contacts_action_rows_[1]) {
+      lv_obj_set_width(contacts_action_rows_[1], LV_PCT(32));
+    }
+    lv_obj_set_width(contacts_action_rows_[2], btn_w);
+  }
+  if (contacts_detail_panel_) {
+    lv_obj_invalidate(contacts_detail_panel_);
+  }
+#endif
+
   for (uint8_t i = 0; i < kContactActionCount; i++) {
     if (!contacts_action_rows_[i] || !contacts_action_labels_[i]) {
       continue;
@@ -4411,7 +4577,7 @@ void StandaloneUi::activateContactsAction(uint8_t action_idx) {
   }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (action_idx == 2) {
+  if (action_idx == 3) {
     closeContactsDialog(true);
     return;
   }
@@ -4468,6 +4634,13 @@ void StandaloneUi::activateContactsAction(uint8_t action_idx) {
   }
 
   if (action_idx == 1) {
+    if (selected.type == 2 || selected.type == 3) {
+      openAdminPasswordDialog(selected.name, selected.public_key_hex, selected.type);
+    }
+    return;
+  }
+
+  if (action_idx == 2) {
     contacts_dm_open_ = true;
     has_unread_dm_ = false;
     refreshShortcutVisuals();
@@ -4476,6 +4649,838 @@ void StandaloneUi::activateContactsAction(uint8_t action_idx) {
     return;
   }
 
+}
+
+// ---------------------------------------------------------------------------
+// Admin password dialog
+// ---------------------------------------------------------------------------
+
+void StandaloneUi::loadAdminPassword(const char* public_key_hex, char* out_pw, size_t out_size) {
+  if (!public_key_hex || !out_pw || out_size == 0) return;
+  out_pw[0] = '\0';
+  char nvskey[13] = {};
+  strncpy(nvskey, public_key_hex, 12);
+  nvskey[12] = '\0';
+  Preferences prefs;
+  if (!prefs.begin("adm_pw", true)) return;
+  String val = prefs.getString(nvskey, "");
+  prefs.end();
+  strncpy(out_pw, val.c_str(), out_size - 1);
+  out_pw[out_size - 1] = '\0';
+}
+
+void StandaloneUi::saveAdminPassword(const char* public_key_hex, const char* password) {
+  if (!public_key_hex) return;
+  char nvskey[13] = {};
+  strncpy(nvskey, public_key_hex, 12);
+  nvskey[12] = '\0';
+  Preferences prefs;
+  if (!prefs.begin("adm_pw", false)) return;
+  if (!password || password[0] == '\0') {
+    prefs.remove(nvskey);
+  } else {
+    prefs.putString(nvskey, password);
+  }
+  prefs.end();
+}
+
+void StandaloneUi::openAdminPasswordDialog(const char* contact_name, const char* contact_key,
+                                           uint8_t contact_type) {
+  char previous_target[65] = {};
+  strncpy(previous_target, admin_target_key_, sizeof(previous_target) - 1);
+  previous_target[sizeof(previous_target) - 1] = '\0';
+
+  strncpy(admin_target_key_, contact_key ? contact_key : "", sizeof(admin_target_key_) - 1);
+  admin_target_key_[sizeof(admin_target_key_) - 1] = '\0';
+  strncpy(admin_target_name_, contact_name ? contact_name : "", sizeof(admin_target_name_) - 1);
+  admin_target_name_[sizeof(admin_target_name_) - 1] = '\0';
+  admin_target_type_ = contact_type;
+  admin_pw_save_ = false;
+
+  if (previous_target[0] == '\0' || strcasecmp(previous_target, admin_target_key_) != 0) {
+    admin_cmd_history_count_ = 0;
+    memset(admin_cmd_history_, 0, sizeof(admin_cmd_history_));
+  }
+
+  // Create dialog on first use
+  if (!admin_pw_dialog_) {
+    admin_pw_dialog_ = lv_obj_create(root_);
+    if (!admin_pw_dialog_) return;
+    lv_obj_add_style(admin_pw_dialog_, &style_panel_, 0);
+    lv_obj_set_size(admin_pw_dialog_, dialogMaxW(200, 240), LV_SIZE_CONTENT);
+    lv_obj_align(admin_pw_dialog_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_pad_all(admin_pw_dialog_, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(admin_pw_dialog_, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(admin_pw_dialog_, 3, LV_PART_MAIN);
+    lv_obj_set_flex_flow(admin_pw_dialog_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(admin_pw_dialog_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(admin_pw_dialog_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(admin_pw_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(admin_pw_dialog_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(admin_pw_dialog_, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    // Title label
+    admin_pw_title_label_ = lv_label_create(admin_pw_dialog_);
+    lv_obj_add_style(admin_pw_title_label_, &style_text_main_, 0);
+    lv_label_set_text(admin_pw_title_label_, "Admin Login");
+    lv_obj_set_width(admin_pw_title_label_, LV_PCT(100));
+
+    // Password input
+    admin_pw_input_ = lv_textarea_create(admin_pw_dialog_);
+    lv_obj_set_size(admin_pw_input_, LV_PCT(100), 22);
+    lv_obj_set_style_text_color(admin_pw_input_, lv_color_hex(0xE8F1FF), 0);
+    lv_obj_set_style_bg_color(admin_pw_input_, lv_color_hex(0x102B61), 0);
+    lv_obj_set_style_bg_opa(admin_pw_input_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(admin_pw_input_, 1, 0);
+    lv_obj_set_style_border_color(admin_pw_input_, lv_color_hex(0x4C76BA), 0);
+    lv_obj_set_style_pad_top(admin_pw_input_, 1, 0);
+    lv_obj_set_style_pad_bottom(admin_pw_input_, 1, 0);
+    lv_obj_set_style_pad_left(admin_pw_input_, 3, 0);
+    lv_obj_set_style_pad_right(admin_pw_input_, 3, 0);
+    lv_textarea_set_one_line(admin_pw_input_, true);
+    lv_textarea_set_max_length(admin_pw_input_, 15);
+    lv_textarea_set_placeholder_text(admin_pw_input_, "Password");
+    lv_textarea_set_password_mode(admin_pw_input_, true);
+    lv_obj_add_event_cb(admin_pw_input_, onAdminPwEvent, LV_EVENT_KEY, this);
+    // One-line textareas raise LV_EVENT_READY when Enter is pressed; listen for it
+    // so non-Heltec keyboards can submit the password directly from the input field.
+    lv_obj_add_event_cb(admin_pw_input_, onAdminPwEvent, LV_EVENT_READY, this);
+    if (kUseOnscreenKeyboard) {
+      lv_obj_add_event_cb(admin_pw_input_, onAdminPwEvent, LV_EVENT_CLICKED, this);
+      lv_obj_add_event_cb(admin_pw_input_, onAdminPwEvent, LV_EVENT_FOCUSED, this);
+    }
+
+    // Save password toggle row
+    lv_obj_t* save_row = lv_obj_create(admin_pw_dialog_);
+    lv_obj_set_size(save_row, LV_PCT(100), 22);
+    lv_obj_set_style_bg_opa(save_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(save_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(save_row, 0, LV_PART_MAIN);
+    lv_obj_set_layout(save_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(save_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(save_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(save_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    admin_pw_save_btn_ = lv_btn_create(save_row);
+    lv_obj_set_size(admin_pw_save_btn_, LV_SIZE_CONTENT, 18);
+    lv_obj_set_style_pad_hor(admin_pw_save_btn_, 4, LV_PART_MAIN);
+    lv_obj_add_style(admin_pw_save_btn_, &style_button_, 0);
+    lv_obj_add_style(admin_pw_save_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(admin_pw_save_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(admin_pw_save_btn_, onAdminPwEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(admin_pw_save_btn_, onAdminPwEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(admin_pw_save_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+    admin_pw_save_label_ = lv_label_create(admin_pw_save_btn_);
+    lv_obj_add_style(admin_pw_save_label_, &style_text_main_, 0);
+    lv_label_set_text(admin_pw_save_label_, "Save: OFF");
+    lv_obj_center(admin_pw_save_label_);
+
+    // OK / Cancel button row
+    lv_obj_t* btn_row = lv_obj_create(admin_pw_dialog_);
+    lv_obj_set_size(btn_row, LV_PCT(100), 22);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_layout(btn_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    admin_pw_ok_btn_ = lv_btn_create(btn_row);
+    lv_obj_set_size(admin_pw_ok_btn_, LV_PCT(49), 22);
+    lv_obj_add_style(admin_pw_ok_btn_, &style_button_, 0);
+    lv_obj_add_style(admin_pw_ok_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(admin_pw_ok_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(admin_pw_ok_btn_, onAdminPwEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(admin_pw_ok_btn_, onAdminPwEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(admin_pw_ok_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_t* ok_label = lv_label_create(admin_pw_ok_btn_);
+    lv_obj_add_style(ok_label, &style_text_main_, 0);
+    lv_label_set_text(ok_label, "OK");
+    lv_obj_center(ok_label);
+
+    admin_pw_cancel_btn_ = lv_btn_create(btn_row);
+    lv_obj_set_size(admin_pw_cancel_btn_, LV_PCT(49), 22);
+    lv_obj_add_style(admin_pw_cancel_btn_, &style_button_, 0);
+    lv_obj_add_style(admin_pw_cancel_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(admin_pw_cancel_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(admin_pw_cancel_btn_, onAdminPwEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(admin_pw_cancel_btn_, onAdminPwEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(admin_pw_cancel_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_t* cancel_label = lv_label_create(admin_pw_cancel_btn_);
+    lv_obj_add_style(cancel_label, &style_text_main_, 0);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_center(cancel_label);
+
+#if defined(LV_USE_KEYBOARD) && LV_USE_KEYBOARD
+    if (kUseOnscreenKeyboard) {
+      admin_pw_keyboard_ = lv_keyboard_create(root_);
+      if (admin_pw_keyboard_) {
+        const lv_coord_t screen_h = lv_disp_get_ver_res(nullptr);
+        const lv_coord_t kb_h = clampCoord(static_cast<lv_coord_t>(screen_h / 2), 90, 160);
+        lv_obj_set_size(admin_pw_keyboard_, LV_PCT(100), kb_h);
+        lv_obj_align(admin_pw_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_add_style(admin_pw_keyboard_, &style_panel_, LV_PART_MAIN);
+        lv_obj_clear_flag(admin_pw_keyboard_, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_event_cb(admin_pw_keyboard_, onAdminPwEvent, LV_EVENT_READY, this);
+        lv_obj_add_event_cb(admin_pw_keyboard_, onAdminPwEvent, LV_EVENT_CANCEL, this);
+        lv_obj_add_flag(admin_pw_keyboard_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(admin_pw_keyboard_, LV_OBJ_FLAG_CLICKABLE);
+      }
+    }
+#endif
+
+    if (key_group_ && !kUseOnscreenKeyboard) {
+      lv_group_add_obj(key_group_, admin_pw_input_);
+      lv_group_add_obj(key_group_, admin_pw_save_btn_);
+      lv_group_add_obj(key_group_, admin_pw_ok_btn_);
+      lv_group_add_obj(key_group_, admin_pw_cancel_btn_);
+    }
+  }
+
+  // Set title with contact name
+  char title[48] = {};
+  snprintf(title, sizeof(title), "Admin: %s", admin_target_name_[0] ? admin_target_name_ : "?");
+  lv_label_set_text(admin_pw_title_label_, title);
+
+  // Load saved password
+  char saved_pw[16] = {};
+  loadAdminPassword(admin_target_key_, saved_pw, sizeof(saved_pw));
+  lv_textarea_set_text(admin_pw_input_, saved_pw);
+
+  // Set save toggle based on whether a password was already saved
+  admin_pw_save_ = (saved_pw[0] != '\0');
+  if (admin_pw_save_label_) {
+    lv_label_set_text(admin_pw_save_label_, admin_pw_save_ ? "Save: ON" : "Save: OFF");
+  }
+
+#if defined(LV_USE_KEYBOARD) && LV_USE_KEYBOARD
+  if (kUseOnscreenKeyboard && admin_pw_keyboard_ && lv_obj_is_valid(admin_pw_keyboard_)) {
+    lv_keyboard_set_textarea(admin_pw_keyboard_, admin_pw_input_);
+    hideAdminPasswordKeyboard();
+  }
+#endif
+
+  lv_obj_clear_flag(admin_pw_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(admin_pw_dialog_);
+  admin_pw_open_ = true;
+
+  if (key_group_ && !kUseOnscreenKeyboard && admin_pw_input_) {
+    lv_group_focus_obj(admin_pw_input_);
+  }
+}
+
+void StandaloneUi::closeAdminPasswordDialog() {
+  hideAdminPasswordKeyboard();
+
+  if (admin_pw_dialog_) {
+    lv_obj_add_flag(admin_pw_dialog_, LV_OBJ_FLAG_HIDDEN);
+  }
+  admin_pw_open_ = false;
+
+  if (contacts_open_) {
+    resetPointerInputState();
+    focusCurrentZoneObject();
+  }
+}
+
+void StandaloneUi::submitAdminPassword() {
+  if (!admin_pw_input_) return;
+  const char* pw = lv_textarea_get_text(admin_pw_input_);
+  if (!pw) pw = "";
+
+  // Save toggle: ON saves, OFF explicitly removes any prior saved password.
+  if (admin_pw_save_) {
+    saveAdminPassword(admin_target_key_, pw);
+  } else {
+    saveAdminPassword(admin_target_key_, nullptr);
+  }
+
+  // Reset prior login result state before sending.
+  admin_is_admin_ = false;
+  admin_login_acl_ = 0;
+  admin_login_fw_ver_ = 0;
+  admin_login_state_ = AdminLoginState::Sending;
+
+  bool ok = false;
+  if (mesh_adapter_) {
+    ok = mesh_adapter_->sendLogin(admin_target_key_, pw);
+  }
+
+  admin_login_state_ = ok ? AdminLoginState::Pending : AdminLoginState::Failed;
+
+  closeAdminPasswordDialog();
+  openAdminScreen(admin_target_name_);
+}
+
+// ---------------------------------------------------------------------------
+// Admin screen
+// ---------------------------------------------------------------------------
+
+void StandaloneUi::openAdminScreen(const char* contact_name) {
+  if (!admin_screen_dialog_) {
+    admin_screen_dialog_ = lv_obj_create(root_);
+    if (!admin_screen_dialog_) return;
+    lv_obj_add_style(admin_screen_dialog_, &style_panel_, 0);
+    lv_obj_set_size(admin_screen_dialog_, LV_PCT(90), LV_PCT(90));
+    lv_obj_align(admin_screen_dialog_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_pad_all(admin_screen_dialog_, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(admin_screen_dialog_, 3, LV_PART_MAIN);
+    lv_obj_set_flex_flow(admin_screen_dialog_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(admin_screen_dialog_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(admin_screen_dialog_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(admin_screen_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(admin_screen_dialog_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(admin_screen_dialog_, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    // Title row
+    lv_obj_t* title_row = lv_obj_create(admin_screen_dialog_);
+    lv_obj_set_size(title_row, LV_PCT(100), 22);
+    lv_obj_set_style_bg_opa(title_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(title_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(title_row, 0, LV_PART_MAIN);
+    lv_obj_set_layout(title_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(title_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(title_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    admin_screen_title_label_ = lv_label_create(title_row);
+    lv_obj_add_style(admin_screen_title_label_, &style_text_main_, 0);
+    lv_label_set_text(admin_screen_title_label_, "Admin");
+    lv_obj_set_flex_grow(admin_screen_title_label_, 1);
+
+    admin_screen_auth_label_ = lv_label_create(title_row);
+    lv_obj_add_style(admin_screen_auth_label_, &style_text_main_, 0);
+    lv_obj_set_style_text_color(admin_screen_auth_label_, lv_palette_lighten(LV_PALETTE_GREEN, 2), 0);
+    lv_obj_set_style_text_font(admin_screen_auth_label_, compactUiFont(), 0);
+    lv_label_set_text(admin_screen_auth_label_, "(auth)");
+    lv_obj_add_flag(admin_screen_auth_label_, LV_OBJ_FLAG_HIDDEN);
+
+    admin_screen_close_btn_ = lv_btn_create(title_row);
+    lv_obj_set_size(admin_screen_close_btn_, 40, 18);
+    lv_obj_add_style(admin_screen_close_btn_, &style_button_, 0);
+    lv_obj_add_style(admin_screen_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(admin_screen_close_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(admin_screen_close_btn_, onAdminScreenEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(admin_screen_close_btn_, onAdminScreenEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(admin_screen_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_t* close_lbl = lv_label_create(admin_screen_close_btn_);
+    lv_obj_add_style(close_lbl, &style_text_main_, 0);
+    lv_label_set_text(close_lbl, "Close");
+    lv_obj_center(close_lbl);
+
+    if (key_group_ && !kUseOnscreenKeyboard) {
+      lv_group_add_obj(key_group_, admin_screen_close_btn_);
+    }
+
+    // Status label (login progress / outcome) below the title row.
+    admin_screen_status_label_ = lv_label_create(admin_screen_dialog_);
+    lv_obj_add_style(admin_screen_status_label_, &style_text_main_, 0);
+    lv_obj_set_width(admin_screen_status_label_, LV_PCT(100));
+    lv_obj_set_style_text_font(admin_screen_status_label_, compactUiFont(), 0);
+    lv_obj_set_style_text_line_space(admin_screen_status_label_, 0, 0);
+    lv_label_set_long_mode(admin_screen_status_label_, LV_LABEL_LONG_DOT);
+    lv_label_set_text(admin_screen_status_label_, "");
+
+    admin_screen_history_panel_ = lv_obj_create(admin_screen_dialog_);
+    lv_obj_set_width(admin_screen_history_panel_, LV_PCT(100));
+    lv_obj_set_flex_grow(admin_screen_history_panel_, 1);
+    lv_obj_set_style_bg_color(admin_screen_history_panel_, lv_color_hex(0x0F2538), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(admin_screen_history_panel_, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(admin_screen_history_panel_, lv_color_hex(0x2F5A78), LV_PART_MAIN);
+    lv_obj_set_style_border_width(admin_screen_history_panel_, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(admin_screen_history_panel_, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(admin_screen_history_panel_, 1, LV_PART_MAIN);
+    lv_obj_set_layout(admin_screen_history_panel_, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(admin_screen_history_panel_, LV_FLEX_FLOW_COLUMN);
+
+    admin_screen_history_label_ = lv_label_create(admin_screen_history_panel_);
+    lv_obj_add_style(admin_screen_history_label_, &style_text_main_, 0);
+    lv_obj_set_width(admin_screen_history_label_, LV_PCT(100));
+    lv_obj_set_style_text_font(admin_screen_history_label_, compactUiFont(), 0);
+    lv_obj_set_style_text_line_space(admin_screen_history_label_, 0, 0);
+    lv_label_set_long_mode(admin_screen_history_label_, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(admin_screen_history_label_, "No commands yet.");
+
+    admin_screen_hint_label_ = lv_label_create(admin_screen_dialog_);
+    lv_obj_add_style(admin_screen_hint_label_, &style_text_dim_, 0);
+    lv_obj_set_width(admin_screen_hint_label_, LV_PCT(100));
+    lv_obj_set_style_text_font(admin_screen_hint_label_, compactUiFont(), 0);
+    lv_obj_set_style_text_align(admin_screen_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(admin_screen_hint_label_, "Press Enter to run a command");
+  }
+
+  char title[48] = {};
+  snprintf(title, sizeof(title), "Admin: %s", contact_name && contact_name[0] ? contact_name : "?");
+  lv_label_set_text(admin_screen_title_label_, title);
+
+  refreshAdminStatusLabel();
+  refreshAdminCommandHistoryLabel();
+
+  lv_obj_clear_flag(admin_screen_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(admin_screen_dialog_);
+  admin_screen_open_ = true;
+  admin_screen_key_guard_until_ms_ = millis() + 250;
+
+  if (key_group_ && !kUseOnscreenKeyboard && admin_screen_close_btn_) {
+    lv_group_focus_obj(admin_screen_close_btn_);
+  }
+}
+
+void StandaloneUi::refreshAdminStatusLabel() {
+  if (!admin_screen_status_label_) return;
+  const char* msg = "";
+  lv_color_t color = lv_color_white();
+  bool show_auth_badge = false;
+  switch (admin_login_state_) {
+    case AdminLoginState::Idle:
+      msg = "";
+      break;
+    case AdminLoginState::Sending:
+      msg = "Sending login...";
+      break;
+    case AdminLoginState::Pending:
+      msg = "Logging in...";
+      break;
+    case AdminLoginState::Success: {
+      msg = "";
+      show_auth_badge = true;
+      break;
+    }
+    case AdminLoginState::Failed:
+      msg = "Login failed";
+      color = lv_palette_lighten(LV_PALETTE_RED, 2);
+      break;
+    case AdminLoginState::TimedOut:
+      msg = "Login timed out";
+      color = lv_palette_lighten(LV_PALETTE_ORANGE, 2);
+      break;
+  }
+  lv_label_set_text(admin_screen_status_label_, msg);
+  lv_obj_set_style_text_color(admin_screen_status_label_, color, LV_PART_MAIN);
+  if (msg[0] != '\0') {
+    lv_obj_clear_flag(admin_screen_status_label_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(admin_screen_status_label_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (admin_screen_auth_label_) {
+    if (show_auth_badge) {
+      lv_obj_clear_flag(admin_screen_auth_label_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(admin_screen_auth_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+}
+
+void StandaloneUi::appendAdminCommandHistory(const char* command, const char* result, bool pending) {
+  if (!command || command[0] == '\0') {
+    return;
+  }
+
+  if (admin_cmd_history_count_ == kAdminCmdHistoryMax) {
+    for (uint8_t i = 1; i < kAdminCmdHistoryMax; i++) {
+      admin_cmd_history_[i - 1] = admin_cmd_history_[i];
+    }
+    admin_cmd_history_count_ = static_cast<uint8_t>(kAdminCmdHistoryMax - 1);
+  }
+
+  AdminCmdHistoryEntry& entry = admin_cmd_history_[admin_cmd_history_count_++];
+  strncpy(entry.command, command, sizeof(entry.command) - 1);
+  entry.command[sizeof(entry.command) - 1] = '\0';
+  for (size_t i = 0; entry.command[i] != '\0'; i++) {
+    if (entry.command[i] == '\n' || entry.command[i] == '\r') {
+      entry.command[i] = ' ';
+    }
+  }
+  if (result && result[0] != '\0') {
+    strncpy(entry.result, result, sizeof(entry.result) - 1);
+    entry.result[sizeof(entry.result) - 1] = '\0';
+    for (size_t i = 0; entry.result[i] != '\0'; i++) {
+      if (entry.result[i] == '\n' || entry.result[i] == '\r') {
+        entry.result[i] = ' ';
+      }
+    }
+  } else {
+    entry.result[0] = '\0';
+  }
+  entry.pending = pending;
+}
+
+void StandaloneUi::refreshAdminCommandHistoryLabel() {
+  if (!admin_screen_history_label_) {
+    return;
+  }
+
+  admin_cmd_history_render_[0] = '\0';
+
+  if (admin_cmd_history_count_ == 0) {
+    strncat(admin_cmd_history_render_, "No commands yet.",
+            sizeof(admin_cmd_history_render_) - strlen(admin_cmd_history_render_) - 1);
+    lv_label_set_text(admin_screen_history_label_, admin_cmd_history_render_);
+    return;
+  }
+
+  for (uint8_t i = 0; i < admin_cmd_history_count_; i++) {
+    const AdminCmdHistoryEntry& entry = admin_cmd_history_[i];
+    char line[220] = {};
+    if (entry.pending) {
+      snprintf(line, sizeof(line), "> %s\n< (waiting...)", entry.command);
+    } else if (entry.result[0] != '\0') {
+      snprintf(line, sizeof(line), "> %s\n< %s", entry.command, entry.result);
+    } else {
+      snprintf(line, sizeof(line), "> %s\n< (no response)", entry.command);
+    }
+    if (i > 0) {
+      strncat(admin_cmd_history_render_, "\n",
+              sizeof(admin_cmd_history_render_) - strlen(admin_cmd_history_render_) - 1);
+    }
+    strncat(admin_cmd_history_render_, line,
+            sizeof(admin_cmd_history_render_) - strlen(admin_cmd_history_render_) - 1);
+  }
+
+  lv_label_set_text(admin_screen_history_label_, admin_cmd_history_render_);
+}
+
+void StandaloneUi::openAdminCommandDialog() {
+  if (!admin_screen_open_) {
+    return;
+  }
+
+  if (!admin_cmd_dialog_) {
+    admin_cmd_dialog_ = lv_obj_create(root_);
+    if (!admin_cmd_dialog_) {
+      return;
+    }
+    lv_obj_add_style(admin_cmd_dialog_, &style_panel_, 0);
+    lv_obj_set_size(admin_cmd_dialog_, dialogMaxW(230, 250), LV_SIZE_CONTENT);
+    lv_obj_align(admin_cmd_dialog_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_pad_all(admin_cmd_dialog_, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(admin_cmd_dialog_, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(admin_cmd_dialog_, 3, LV_PART_MAIN);
+    lv_obj_set_flex_flow(admin_cmd_dialog_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(admin_cmd_dialog_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(admin_cmd_dialog_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(admin_cmd_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(admin_cmd_dialog_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(admin_cmd_dialog_, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    admin_cmd_title_label_ = lv_label_create(admin_cmd_dialog_);
+    lv_obj_add_style(admin_cmd_title_label_, &style_text_main_, 0);
+    lv_obj_set_width(admin_cmd_title_label_, LV_PCT(100));
+    lv_label_set_text(admin_cmd_title_label_, "Run Admin Command");
+
+    admin_cmd_input_ = lv_textarea_create(admin_cmd_dialog_);
+    lv_obj_set_size(admin_cmd_input_, LV_PCT(100), 24);
+    lv_obj_set_style_text_color(admin_cmd_input_, lv_color_hex(0xE8F1FF), 0);
+    lv_obj_set_style_bg_color(admin_cmd_input_, lv_color_hex(0x102B61), 0);
+    lv_obj_set_style_bg_opa(admin_cmd_input_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(admin_cmd_input_, 1, 0);
+    lv_obj_set_style_border_color(admin_cmd_input_, lv_color_hex(0x4C76BA), 0);
+    lv_obj_set_style_pad_left(admin_cmd_input_, 3, 0);
+    lv_obj_set_style_pad_right(admin_cmd_input_, 3, 0);
+    lv_textarea_set_one_line(admin_cmd_input_, true);
+    lv_textarea_set_max_length(admin_cmd_input_, 63);
+    lv_textarea_set_placeholder_text(admin_cmd_input_, "Command");
+    lv_obj_add_event_cb(admin_cmd_input_, onAdminCmdEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(admin_cmd_input_, onAdminCmdEvent, LV_EVENT_READY, this);
+
+    lv_obj_t* btn_row = lv_obj_create(admin_cmd_dialog_);
+    lv_obj_set_size(btn_row, LV_PCT(100), 22);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_layout(btn_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    admin_cmd_run_btn_ = lv_btn_create(btn_row);
+    lv_obj_set_size(admin_cmd_run_btn_, LV_PCT(49), 22);
+    lv_obj_add_style(admin_cmd_run_btn_, &style_button_, 0);
+    lv_obj_add_style(admin_cmd_run_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(admin_cmd_run_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(admin_cmd_run_btn_, onAdminCmdEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(admin_cmd_run_btn_, onAdminCmdEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(admin_cmd_run_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_t* run_label = lv_label_create(admin_cmd_run_btn_);
+    lv_obj_add_style(run_label, &style_text_main_, 0);
+    lv_label_set_text(run_label, "Run");
+    lv_obj_center(run_label);
+
+    admin_cmd_cancel_btn_ = lv_btn_create(btn_row);
+    lv_obj_set_size(admin_cmd_cancel_btn_, LV_PCT(49), 22);
+    lv_obj_add_style(admin_cmd_cancel_btn_, &style_button_, 0);
+    lv_obj_add_style(admin_cmd_cancel_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(admin_cmd_cancel_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(admin_cmd_cancel_btn_, onAdminCmdEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(admin_cmd_cancel_btn_, onAdminCmdEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(admin_cmd_cancel_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_t* cancel_label = lv_label_create(admin_cmd_cancel_btn_);
+    lv_obj_add_style(cancel_label, &style_text_main_, 0);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_center(cancel_label);
+
+    if (key_group_ && !kUseOnscreenKeyboard) {
+      lv_group_add_obj(key_group_, admin_cmd_input_);
+      lv_group_add_obj(key_group_, admin_cmd_run_btn_);
+      lv_group_add_obj(key_group_, admin_cmd_cancel_btn_);
+    }
+  }
+
+  lv_textarea_set_text(admin_cmd_input_, "");
+  lv_obj_clear_flag(admin_cmd_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(admin_cmd_dialog_);
+  admin_cmd_open_ = true;
+
+  if (key_group_ && !kUseOnscreenKeyboard && admin_cmd_input_) {
+    lv_group_focus_obj(admin_cmd_input_);
+  }
+}
+
+void StandaloneUi::closeAdminCommandDialog() {
+  if (admin_cmd_dialog_) {
+    lv_obj_add_flag(admin_cmd_dialog_, LV_OBJ_FLAG_HIDDEN);
+  }
+  admin_cmd_open_ = false;
+  admin_screen_key_guard_until_ms_ = millis() + 150;
+
+  if (admin_screen_open_ && key_group_ && !kUseOnscreenKeyboard && admin_screen_close_btn_) {
+    lv_group_focus_obj(admin_screen_close_btn_);
+  }
+}
+
+void StandaloneUi::submitAdminCommand() {
+  if (!admin_cmd_open_ || !admin_cmd_input_ || admin_target_key_[0] == '\0') {
+    return;
+  }
+
+  const char* cmd = lv_textarea_get_text(admin_cmd_input_);
+  if (!cmd || cmd[0] == '\0') {
+    closeAdminCommandDialog();
+    return;
+  }
+
+  bool sent = false;
+  if (mesh_adapter_) {
+    sent = mesh_adapter_->sendAdminCommand(admin_target_key_, cmd);
+  }
+
+  appendAdminCommandHistory(cmd, sent ? "" : "send failed", sent);
+  refreshAdminCommandHistoryLabel();
+  closeAdminCommandDialog();
+}
+
+void StandaloneUi::applyAdminLoginEvent(const mesh::MeshEvent& event) {
+  // Only apply if the event matches the contact we are currently authenticating against.
+  if (admin_target_key_[0] == '\0') return;
+  if (strcasecmp(event.peer_key, admin_target_key_) != 0) return;
+
+  switch (event.type) {
+    case mesh::MeshEventType::LoginSuccess:
+      admin_login_state_ = AdminLoginState::Success;
+      admin_is_admin_ = (event.login_perm != 0);
+      admin_login_acl_ = event.login_acl_perm;
+      admin_login_fw_ver_ = event.login_fw_ver;
+      break;
+    case mesh::MeshEventType::LoginFail:
+      admin_login_state_ = AdminLoginState::Failed;
+      admin_is_admin_ = false;
+      break;
+    case mesh::MeshEventType::LoginTimeout:
+      admin_login_state_ = AdminLoginState::TimedOut;
+      admin_is_admin_ = false;
+      break;
+    default:
+      return;
+  }
+
+  if (admin_screen_open_) {
+    refreshAdminStatusLabel();
+  }
+}
+
+void StandaloneUi::applyAdminCommandEvent(const mesh::MeshEvent& event) {
+  if (admin_target_key_[0] == '\0') {
+    return;
+  }
+  if (strcasecmp(event.peer_key, admin_target_key_) != 0) {
+    return;
+  }
+
+  for (uint8_t i = 0; i < admin_cmd_history_count_; i++) {
+    AdminCmdHistoryEntry& entry = admin_cmd_history_[i];
+    if (entry.pending) {
+      strncpy(entry.result, event.text, sizeof(entry.result) - 1);
+      entry.result[sizeof(entry.result) - 1] = '\0';
+      entry.pending = false;
+      if (admin_screen_open_) {
+        refreshAdminCommandHistoryLabel();
+      }
+      return;
+    }
+  }
+
+  appendAdminCommandHistory("(remote)", event.text, false);
+  if (admin_screen_open_) {
+    refreshAdminCommandHistoryLabel();
+  }
+}
+
+void StandaloneUi::closeAdminScreen() {
+  if (admin_cmd_open_) {
+    closeAdminCommandDialog();
+  }
+
+  if (admin_screen_dialog_) {
+    lv_obj_add_flag(admin_screen_dialog_, LV_OBJ_FLAG_HIDDEN);
+  }
+  admin_screen_open_ = false;
+  admin_screen_key_guard_until_ms_ = 0;
+  admin_login_state_ = AdminLoginState::Idle;
+
+  if (contacts_open_) {
+    resetPointerInputState();
+    focusCurrentZoneObject();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin static event handlers
+// ---------------------------------------------------------------------------
+
+void StandaloneUi::onAdminPwEvent(lv_event_t* e) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(e));
+  if (!ui) return;
+  const lv_event_code_t code = lv_event_get_code(e);
+  lv_obj_t* target = lv_event_get_target(e);
+
+  if (code == LV_EVENT_CLICKED) {
+    if (target == ui->admin_pw_input_ && kUseOnscreenKeyboard) {
+      ui->showAdminPasswordKeyboard();
+      return;
+    }
+    if (target == ui->admin_pw_save_btn_) {
+      ui->admin_pw_save_ = !ui->admin_pw_save_;
+      if (ui->admin_pw_save_label_) {
+        lv_label_set_text(ui->admin_pw_save_label_, ui->admin_pw_save_ ? "Save: ON" : "Save: OFF");
+      }
+      return;
+    }
+    if (target == ui->admin_pw_ok_btn_) {
+      ui->submitAdminPassword();
+      return;
+    }
+    if (target == ui->admin_pw_cancel_btn_) {
+      ui->closeAdminPasswordDialog();
+      return;
+    }
+  }
+
+  if (code == LV_EVENT_FOCUSED) {
+    if (target == ui->admin_pw_input_ && kUseOnscreenKeyboard) {
+      ui->showAdminPasswordKeyboard();
+      return;
+    }
+  }
+
+  if (code == LV_EVENT_KEY) {
+    const uint32_t key = lv_event_get_key(e);
+    if (key == LV_KEY_ENTER) {
+      ui->submitAdminPassword();
+      return;
+    }
+    if (key == LV_KEY_ESC) {
+      ui->closeAdminPasswordDialog();
+      return;
+    }
+  }
+
+  if (code == LV_EVENT_CANCEL) {
+    if (target == ui->admin_pw_keyboard_) {
+      ui->hideAdminPasswordKeyboard();
+      return;
+    }
+  }
+
+  if (code == LV_EVENT_READY) {
+    if (target == ui->admin_pw_keyboard_) {
+      ui->submitAdminPassword();
+      return;
+    }
+    // Emitted by one-line lv_textarea when Enter is pressed while the input is focused.
+    if (target == ui->admin_pw_input_) {
+      ui->submitAdminPassword();
+      return;
+    }
+  }
+}
+
+void StandaloneUi::onAdminScreenEvent(lv_event_t* e) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(e));
+  if (!ui) return;
+  const lv_event_code_t code = lv_event_get_code(e);
+  lv_obj_t* target = lv_event_get_target(e);
+
+  if (code == LV_EVENT_CLICKED) {
+    if (target == ui->admin_screen_close_btn_) {
+      if (static_cast<int32_t>(millis() - ui->admin_screen_key_guard_until_ms_) < 0) {
+        return;
+      }
+      ui->closeAdminScreen();
+      return;
+    }
+  }
+  if (code == LV_EVENT_KEY) {
+    if (static_cast<int32_t>(millis() - ui->admin_screen_key_guard_until_ms_) < 0) {
+      return;
+    }
+    const uint32_t key = lv_event_get_key(e);
+    if (key == LV_KEY_ENTER) {
+      ui->openAdminCommandDialog();
+      ui->admin_screen_key_guard_until_ms_ = millis() + 150;
+      return;
+    }
+    if (key == LV_KEY_ESC || key == LV_KEY_BACKSPACE) {
+      ui->closeAdminScreen();
+      return;
+    }
+  }
+}
+
+void StandaloneUi::onAdminCmdEvent(lv_event_t* e) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(e));
+  if (!ui) return;
+
+  const lv_event_code_t code = lv_event_get_code(e);
+  lv_obj_t* target = lv_event_get_target(e);
+
+  if (code == LV_EVENT_CLICKED) {
+    if (target == ui->admin_cmd_run_btn_) {
+      ui->submitAdminCommand();
+      return;
+    }
+    if (target == ui->admin_cmd_cancel_btn_) {
+      ui->closeAdminCommandDialog();
+      return;
+    }
+  }
+
+  if (code == LV_EVENT_KEY) {
+    const uint32_t key = lv_event_get_key(e);
+    if (key == LV_KEY_ENTER) {
+      ui->submitAdminCommand();
+      return;
+    }
+    if (key == LV_KEY_ESC || key == LV_KEY_BACKSPACE) {
+      ui->closeAdminCommandDialog();
+      return;
+    }
+  }
+
+  if (code == LV_EVENT_READY && target == ui->admin_cmd_input_) {
+    ui->submitAdminCommand();
+  }
 }
 
 void StandaloneUi::refreshCfgDialog() {
@@ -5043,6 +6048,7 @@ void StandaloneUi::refreshHeaderVisuals() {
 #else
   const bool hide_battery_pct = contacts_open_;
 #endif
+  const bool hide_battery_bar = contacts_open_;
 
   if (hide_battery_pct) {
     lv_obj_add_flag(battery_pct_label_, LV_OBJ_FLAG_HIDDEN);
@@ -5066,12 +6072,18 @@ void StandaloneUi::refreshHeaderVisuals() {
     lv_obj_clear_flag(time_label_, LV_OBJ_FLAG_HIDDEN);
   }
 
+  if (hide_battery_bar) {
+    lv_obj_add_flag(battery_bar_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(battery_bar_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(battery_bar_, LV_ALIGN_RIGHT_MID, kHeaderBatteryBarX, 0);
+  }
+
   if (!hide_wireless_icons) {
     lv_obj_align_to(gps_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
     lv_obj_align_to(wifi_label_, gps_label_, LV_ALIGN_OUT_RIGHT_MID, kHeaderIconsGap, 0);
     lv_obj_align_to(wifi_ap_badge_label_, wifi_label_, LV_ALIGN_TOP_RIGHT, 4, -4);
   }
-  lv_obj_align(battery_bar_, LV_ALIGN_RIGHT_MID, kHeaderBatteryBarX, 0);
   if (!hide_time_label) {
     const lv_coord_t left_anchor_right_x = hide_wireless_icons
         ? static_cast<lv_coord_t>(lv_obj_get_x(channel_selector_btn_) + lv_obj_get_width(channel_selector_btn_))
@@ -7042,6 +8054,46 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
+  if (admin_pw_open_) {
+    if (norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127) {
+      closeAdminPasswordDialog();
+      return;
+    }
+    if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      submitAdminPassword();
+      return;
+    }
+    return;
+  }
+
+  if (admin_cmd_open_) {
+    if (norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127) {
+      closeAdminCommandDialog();
+      return;
+    }
+    if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      submitAdminCommand();
+      return;
+    }
+    return;
+  }
+
+  if (admin_screen_open_) {
+    if (static_cast<int32_t>(millis() - admin_screen_key_guard_until_ms_) < 0) {
+      return;
+    }
+    if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      openAdminCommandDialog();
+      return;
+    }
+    if (norm_key == LV_KEY_ESC || norm_key == 'q' || norm_key == LV_KEY_BACKSPACE || norm_key == 8 ||
+        norm_key == 127) {
+      closeAdminScreen();
+      return;
+    }
+    return;
+  }
+
   if (contacts_open_) {
     const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
 
@@ -7049,13 +8101,17 @@ void StandaloneUi::handleKey(uint32_t key) {
       activateContactsAction(0);
       return;
     }
-    if (kKeyboardNavEnabled && (norm_key == 'd' || norm_key == 'm')) {
+    if (kKeyboardNavEnabled && norm_key == 'a') {
       activateContactsAction(1);
+      return;
+    }
+    if (kKeyboardNavEnabled && (norm_key == 'd' || norm_key == 'm')) {
+      activateContactsAction(2);
       return;
     }
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (kKeyboardNavEnabled && norm_key == 'c') {
-      activateContactsAction(2);
+      activateContactsAction(3);
       return;
     }
 #endif
@@ -8042,6 +9098,18 @@ void StandaloneUi::setWifiState(bool config_server_on, bool sta_connected, bool 
 
 void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   if (!started_) {
+    return;
+  }
+
+  if (event.type == mesh::MeshEventType::LoginSuccess ||
+      event.type == mesh::MeshEventType::LoginFail ||
+      event.type == mesh::MeshEventType::LoginTimeout) {
+    applyAdminLoginEvent(event);
+    return;
+  }
+
+  if (event.type == mesh::MeshEventType::AdminCommandResponse) {
+    applyAdminCommandEvent(event);
     return;
   }
 

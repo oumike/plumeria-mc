@@ -803,10 +803,14 @@ class StandaloneChatMesh : public BaseChatMesh {
 
   void onCommandDataRecv(const ContactInfo& contact, ::mesh::Packet* packet, uint32_t sender_timestamp,
                          const char* text) override {
-    (void)contact;
-    (void)packet;
     (void)sender_timestamp;
-    (void)text;
+    if (!regionMatches(packet)) {
+      return;
+    }
+    if (!adapter_) {
+      return;
+    }
+    adapter_->handleCommandData(static_cast<const void*>(&contact), text ? text : "");
   }
 
   void onSignedMessageRecv(const ContactInfo& contact, ::mesh::Packet* packet, uint32_t sender_timestamp,
@@ -881,9 +885,9 @@ class StandaloneChatMesh : public BaseChatMesh {
   }
 
   void onContactResponse(const ContactInfo& contact, const uint8_t* data, uint8_t len) override {
-    (void)contact;
-    (void)data;
-    (void)len;
+    if (adapter_) {
+      adapter_->handleLoginResponse(static_cast<const void*>(&contact), data, len);
+    }
   }
 
   uint32_t calcFloodTimeoutMillisFor(uint32_t pkt_airtime_millis) const override {
@@ -1236,6 +1240,7 @@ void MeshAdapter::loop() {
   runtime_->rtc_clock.tick();
 
   const uint32_t now = millis();
+  checkLoginTimeout(now);
   if (adverts_unlocked_for_boot_ && now - last_advert_ms_ >= auto_advert_interval_ms_) {
     runtime_->mesh->broadcastSelfAdvert();
     runtime_->mesh->broadcastSelfAdvertFlood();
@@ -1728,6 +1733,120 @@ bool MeshAdapter::removeContactByPublicKeyHex(const char* public_key_hex) {
   return true;
 }
 
+bool MeshAdapter::sendLogin(const char* public_key_hex, const char* password) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !public_key_hex || !password) {
+    return false;
+  }
+  uint8_t pub_key[PUB_KEY_SIZE] = {};
+  if (!hexToBytes(public_key_hex, pub_key, sizeof(pub_key))) {
+    return false;
+  }
+  ContactInfo* contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (!contact) {
+    return false;
+  }
+  uint32_t est_timeout = 0;
+  int result = runtime_->mesh->sendLogin(*contact, password, est_timeout);
+  if (result == MSG_SEND_FAILED) {
+    return false;
+  }
+
+  // Track pending login so the response handler / timeout can fire UI events.
+  memcpy(pending_login_pubkey_, contact->id.pub_key, kPubKeySize);
+  const char* nm = (contact->name[0] != '\0') ? contact->name : "(unnamed)";
+  strncpy(pending_login_name_, nm, sizeof(pending_login_name_) - 1);
+  pending_login_name_[sizeof(pending_login_name_) - 1] = '\0';
+
+  uint32_t window = est_timeout;
+  if (window < 3000) window = 3000;
+  if (window > 30000) window = 30000;
+  pending_login_deadline_ms_ = millis() + window + 1000;  // small grace beyond MeshCore estimate
+  pending_login_active_ = true;
+  return true;
+}
+
+bool MeshAdapter::sendAdminCommand(const char* public_key_hex, const char* command) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !public_key_hex || !command || command[0] == '\0') {
+    return false;
+  }
+
+  uint8_t pub_key[PUB_KEY_SIZE] = {};
+  if (!hexToBytes(public_key_hex, pub_key, sizeof(pub_key))) {
+    return false;
+  }
+
+  ContactInfo* contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (!contact) {
+    return false;
+  }
+
+  uint32_t est_timeout = 0;
+  const uint32_t ts = runtime_->rtc_clock.getCurrentTimeUnique();
+  return runtime_->mesh->sendCommandData(*contact, ts, 0, command, est_timeout) != MSG_SEND_FAILED;
+}
+
+void MeshAdapter::handleLoginResponse(const void* contact_ptr, const uint8_t* data, uint8_t len) {
+  if (!pending_login_active_ || !contact_ptr || !data || len < 5) {
+    return;
+  }
+  const ContactInfo* contact = static_cast<const ContactInfo*>(contact_ptr);
+  // MeshCore matches login responses by the first 4 bytes of the contact pubkey.
+  if (memcmp(contact->id.pub_key, pending_login_pubkey_, 4) != 0) {
+    return;
+  }
+
+  uint8_t perm = 0;
+  uint8_t acl = 0;
+  uint8_t fw = 0;
+  MeshEventType result = MeshEventType::LoginFail;
+
+  // Legacy repeater reply: ascii "OK" at data[4..5].
+  if (len >= 6 && data[4] == 'O' && data[5] == 'K') {
+    result = MeshEventType::LoginSuccess;
+  } else if (data[4] == RESP_SERVER_LOGIN_OK) {
+    // New login response.
+    result = MeshEventType::LoginSuccess;
+    if (len >= 7) perm = data[6];
+    if (len >= 8) acl = data[7];
+    if (len >= 13) fw = data[12];
+  }
+
+  char msg[80] = {};
+  if (result == MeshEventType::LoginSuccess) {
+    snprintf(msg, sizeof(msg), "Logged in to %s%s", pending_login_name_,
+             perm ? " (admin)" : "");
+  } else {
+    snprintf(msg, sizeof(msg), "Login failed: %s", pending_login_name_);
+  }
+
+  queueLoginEvent(result, contact->id.pub_key, pending_login_name_, perm, acl, fw, msg);
+  pending_login_active_ = false;
+}
+
+void MeshAdapter::handleCommandData(const void* contact_ptr, const char* text) {
+  if (!contact_ptr || !text || text[0] == '\0') {
+    return;
+  }
+
+  const ContactInfo* contact = static_cast<const ContactInfo*>(contact_ptr);
+  const char* nm = (contact->name[0] != '\0') ? contact->name : "(unnamed)";
+  queueAdminCommandResponse(contact->id.pub_key, nm, text);
+}
+
+void MeshAdapter::checkLoginTimeout(uint32_t now_ms) {
+  if (!pending_login_active_) {
+    return;
+  }
+  if (static_cast<int32_t>(now_ms - pending_login_deadline_ms_) < 0) {
+    return;
+  }
+  char msg[80] = {};
+  snprintf(msg, sizeof(msg), "Login timed out: %s", pending_login_name_);
+  queueLoginEvent(MeshEventType::LoginTimeout, pending_login_pubkey_, pending_login_name_,
+                  0, 0, 0, msg);
+  pending_login_active_ = false;
+}
+
 bool MeshAdapter::addChannel(const char* channel_name, const char* psk_base64) {
   if (!ready_ || !runtime_ || !runtime_->mesh || !channel_name || channel_name[0] == '\0') {
     return false;
@@ -1826,6 +1945,10 @@ void MeshAdapter::queueInfo(const char* text) {
   evt.peer_key[0] = '\0';
   strncpy(evt.text, text, sizeof(evt.text) - 1);
   evt.text[sizeof(evt.text) - 1] = '\0';
+  evt.ack_count = 0;
+  evt.login_perm = 0;
+  evt.login_acl_perm = 0;
+  evt.login_fw_ver = 0;
 
   event_head_ = (event_head_ + 1) % kMaxQueuedEvents;
   event_count_++;
@@ -1848,6 +1971,10 @@ void MeshAdapter::queueChannelMessage(const char* channel_name, const char* text
   evt.peer_key[0] = '\0';
   strncpy(evt.text, text, sizeof(evt.text) - 1);
   evt.text[sizeof(evt.text) - 1] = '\0';
+  evt.ack_count = 0;
+  evt.login_perm = 0;
+  evt.login_acl_perm = 0;
+  evt.login_fw_ver = 0;
 
   event_head_ = (event_head_ + 1) % kMaxQueuedEvents;
   event_count_++;
@@ -1877,6 +2004,10 @@ void MeshAdapter::queueDirectMessage(const char* contact_name, const char* conta
   }
   strncpy(evt.text, text, sizeof(evt.text) - 1);
   evt.text[sizeof(evt.text) - 1] = '\0';
+  evt.ack_count = 0;
+  evt.login_perm = 0;
+  evt.login_acl_perm = 0;
+  evt.login_fw_ver = 0;
 
   event_head_ = (event_head_ + 1) % kMaxQueuedEvents;
   event_count_++;
@@ -1902,6 +2033,64 @@ void MeshAdapter::queueAckReceived(const char* contact_name, const char* contact
   strncpy(evt.text, sent_text ? sent_text : "", sizeof(evt.text) - 1);
   evt.text[sizeof(evt.text) - 1] = '\0';
   evt.ack_count = ack_count;
+  evt.login_perm = 0;
+  evt.login_acl_perm = 0;
+  evt.login_fw_ver = 0;
+
+  event_head_ = (event_head_ + 1) % kMaxQueuedEvents;
+  event_count_++;
+}
+
+void MeshAdapter::queueLoginEvent(MeshEventType type, const uint8_t* pub_key, const char* contact_name,
+                                  uint8_t perm, uint8_t acl_perm, uint8_t fw_ver, const char* text) {
+  if (event_count_ == kMaxQueuedEvents) {
+    event_tail_ = (event_tail_ + 1) % kMaxQueuedEvents;
+    event_count_--;
+  }
+
+  MeshEvent& evt = event_queue_[event_head_];
+  evt.type = type;
+  const char* nm = (contact_name && contact_name[0] != '\0') ? contact_name : "(unnamed)";
+  strncpy(evt.channel_name, nm, sizeof(evt.channel_name) - 1);
+  evt.channel_name[sizeof(evt.channel_name) - 1] = '\0';
+  if (pub_key) {
+    bytesToHex(pub_key, kPubKeySize, evt.peer_key, sizeof(evt.peer_key));
+  } else {
+    evt.peer_key[0] = '\0';
+  }
+  strncpy(evt.text, text ? text : "", sizeof(evt.text) - 1);
+  evt.text[sizeof(evt.text) - 1] = '\0';
+  evt.ack_count = 0;
+  evt.login_perm = perm;
+  evt.login_acl_perm = acl_perm;
+  evt.login_fw_ver = fw_ver;
+
+  event_head_ = (event_head_ + 1) % kMaxQueuedEvents;
+  event_count_++;
+}
+
+void MeshAdapter::queueAdminCommandResponse(const uint8_t* pub_key, const char* contact_name, const char* text) {
+  if (!pub_key || !text || text[0] == '\0') {
+    return;
+  }
+
+  if (event_count_ == kMaxQueuedEvents) {
+    event_tail_ = (event_tail_ + 1) % kMaxQueuedEvents;
+    event_count_--;
+  }
+
+  MeshEvent& evt = event_queue_[event_head_];
+  evt.type = MeshEventType::AdminCommandResponse;
+  const char* nm = (contact_name && contact_name[0] != '\0') ? contact_name : "(unnamed)";
+  strncpy(evt.channel_name, nm, sizeof(evt.channel_name) - 1);
+  evt.channel_name[sizeof(evt.channel_name) - 1] = '\0';
+  bytesToHex(pub_key, kPubKeySize, evt.peer_key, sizeof(evt.peer_key));
+  strncpy(evt.text, text, sizeof(evt.text) - 1);
+  evt.text[sizeof(evt.text) - 1] = '\0';
+  evt.ack_count = 0;
+  evt.login_perm = 0;
+  evt.login_acl_perm = 0;
+  evt.login_fw_ver = 0;
 
   event_head_ = (event_head_ + 1) % kMaxQueuedEvents;
   event_count_++;
