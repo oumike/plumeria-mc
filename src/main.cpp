@@ -381,12 +381,29 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
   // max_files override. On boards without PSRAM (e.g. Cardputer) the FATFS
   // context allocates from fragmented internal DRAM, so the fewer
   // allocations we trigger before the mount, the more likely it succeeds.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  // Cardputer path: explicitly set SPI pins before SD.begin; Arduino SD can
+  // otherwise probe using default bus pins and fail with cmd 0x00.
+  SPI.begin(sd_sck, sd_miso, sd_mosi);
+  delay(2);
+
+  // Keep FATFS allocation small and retry once after clearing stale VFS.
+  bool mounted = SD.begin(sd_cs, SPI, 1000000UL, "/sd", 1);
+  if (!mounted) {
+    SD.end();
+    clearSdVfsRegistration();
+    SPI.begin(sd_sck, sd_miso, sd_mosi);
+    delay(2);
+    mounted = SD.begin(sd_cs, SPI, 400000UL, "/sd", 1);
+  }
+#else
   SPI.begin(sd_sck, sd_miso, sd_mosi);
   delay(8);
   bool mounted = SD.begin(sd_cs, SPI, 4000000UL);
   if (!mounted) {
     mounted = SD.begin(sd_cs, SPI, 1000000UL);
   }
+#endif
   if (!mounted) {
     setErrText(out_err, out_err_size, "SD mount failed");
     return false;
@@ -589,6 +606,7 @@ void setup() {
 
   bool first_install_identity_prompt = false;
   if (mesh_ready && !g_mesh.identityLoadedFromNvs()) {
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
     String cfg_text;
     if (loadConfigTextFromSd(&cfg_text) && configHasIdentityKeys(cfg_text)) {
       char err[96] = {};
@@ -597,6 +615,7 @@ void setup() {
         ESP.restart();
       }
     }
+#endif
 
     if (!g_mesh.identityLoadedFromNvs()) {
       first_install_identity_prompt = true;

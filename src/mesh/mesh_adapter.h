@@ -87,6 +87,9 @@ class MeshAdapter {
   int exportChannels(char names[][32], int max_names);
   int exportChannelConfigs(MeshChannelConfig configs[], int max_configs) const;
   int exportContacts(MeshContactSummary contacts[], int max_contacts) const;
+  bool importContactByPublicKeyHex(const char* public_key_hex, const char* contact_name,
+                                   uint8_t contact_type = 0);
+  bool importFavoriteContactByPublicKeyHex(const char* public_key_hex);
   bool setContactFavoriteByPublicKeyHex(const char* public_key_hex, bool favorite);
   bool removeContactByPublicKeyHex(const char* public_key_hex);
   bool sendLogin(const char* public_key_hex, const char* password);
@@ -128,6 +131,8 @@ class MeshAdapter {
   void markChannelsDirty();
   void noteContactAdvertTelemetry(const uint8_t* pub_key, uint8_t advert_type, uint16_t feat1, uint16_t feat2);
   bool loadContactTelemetry(const uint8_t* pub_key, MeshContactSummary* out_summary) const;
+  bool loadContactTelemetryFromFs();
+  bool saveContactTelemetryToFs();
   bool loadContactsFromFs();
   bool saveContactsToFs();
   bool loadChannelsFromFs();
@@ -155,6 +160,7 @@ class MeshAdapter {
   bool adverts_unlocked_for_boot_ = false;
   bool contacts_dirty_ = false;
   bool channels_dirty_ = false;
+  bool telemetry_dirty_ = false;
   bool ready_ = false;
 
   // Pending login tracking (single-flight).

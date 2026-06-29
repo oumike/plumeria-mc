@@ -712,7 +712,7 @@ const char* EnvironmentSensorManager::getSettingValue(int i) const {
 
 bool EnvironmentSensorManager::setSettingValue(const char* name, const char* value) {
   #if ENV_INCLUDE_GPS
-  if (gps_detected && strcmp(name, "gps") == 0) {
+  if (strcmp(name, "gps") == 0) {
     if (strcmp(value, "0") == 0) {
       stop_gps();
     } else {
@@ -732,7 +732,9 @@ bool EnvironmentSensorManager::setSettingValue(const char* name, const char* val
 #if ENV_INCLUDE_GPS
 void EnvironmentSensorManager::initBasicGPS() {
 
-  Serial1.setPins(PIN_GPS_TX, PIN_GPS_RX);
+  // ESP32 HardwareSerial::setPins expects (rx, tx).
+  Serial1.setPins(PIN_GPS_RX, PIN_GPS_TX);
+  MESH_DEBUG_PRINTLN("GPS serial pins rx=%d tx=%d", PIN_GPS_RX, PIN_GPS_TX);
 
   #ifdef GPS_BAUD_RATE
   Serial1.begin(GPS_BAUD_RATE);
@@ -776,7 +778,9 @@ void EnvironmentSensorManager::initBasicGPS() {
 #ifdef RAK_WISBLOCK_GPS
 void EnvironmentSensorManager::rakGPSInit(){
 
-  Serial1.setPins(PIN_GPS_TX, PIN_GPS_RX);
+  // ESP32 HardwareSerial::setPins expects (rx, tx).
+  Serial1.setPins(PIN_GPS_RX, PIN_GPS_TX);
+  MESH_DEBUG_PRINTLN("GPS serial pins rx=%d tx=%d", PIN_GPS_RX, PIN_GPS_TX);
 
   #ifdef GPS_BAUD_RATE
   Serial1.begin(GPS_BAUD_RATE);

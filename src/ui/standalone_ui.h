@@ -40,12 +40,12 @@ class StandaloneUi {
 
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 4;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
   static constexpr uint8_t kCfgRowCount = 7;
 #else
   static constexpr uint8_t kCfgRowCount = 10;
 #endif
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
   static constexpr uint8_t kContactActionCount = 4;  // Fav, Admin, DM, Close
 #else
   static constexpr uint8_t kContactActionCount = 3;  // Fav, Admin, DM
@@ -80,6 +80,13 @@ class StandaloneUi {
   void refreshCfgDialog();
   void moveCfgSelection(int delta);
   void activateCfgSelection();
+  bool ensureCfgConfirmDialogBuilt();
+  bool cfgActionNeedsConfirm(uint8_t row) const;
+  const char* cfgConfirmActionText(uint8_t row) const;
+  void openCfgConfirmDialog(uint8_t row);
+  void closeCfgConfirmDialog();
+  void acceptCfgConfirmDialog();
+  void performCfgConfirmedAction(uint8_t row);
   bool openContactsDialog();
   bool ensureContactsDialogBuilt();
   void closeContactsDialog(bool focus_chat = false);
@@ -230,6 +237,14 @@ class StandaloneUi {
   lv_obj_t* cfg_content_panel_ = nullptr;
   lv_obj_t* cfg_rows_[kCfgRowCount]{};
   lv_obj_t* cfg_row_labels_[kCfgRowCount]{};
+  lv_obj_t* cfg_confirm_backdrop_ = nullptr;
+  lv_obj_t* cfg_confirm_dialog_ = nullptr;
+  lv_obj_t* cfg_confirm_title_label_ = nullptr;
+  lv_obj_t* cfg_confirm_action_label_ = nullptr;
+  lv_obj_t* cfg_confirm_yes_btn_ = nullptr;
+  lv_obj_t* cfg_confirm_yes_label_ = nullptr;
+  lv_obj_t* cfg_confirm_no_btn_ = nullptr;
+  lv_obj_t* cfg_confirm_no_label_ = nullptr;
   lv_obj_t* contacts_dialog_ = nullptr;
   lv_obj_t* contacts_status_label_ = nullptr;
   lv_obj_t* contacts_detail_panel_ = nullptr;
@@ -401,19 +416,23 @@ class StandaloneUi {
   bool has_unread_dm_ = false;
   bool contacts_nav_focused_ = false;
   bool contacts_dm_open_ = false;
-  bool cfg_import_confirm_armed_ = false;
-  bool cfg_delete_confirm_armed_ = false;
+  bool cfg_confirm_open_ = false;
   bool first_install_identity_prompt_ = false;
   bool first_install_auto_export_pending_ = false;
   bool identity_prompt_open_ = false;
   uint8_t pending_chat_focus_attempts_ = 0;
   uint8_t dropdown_highlight_channel_ = 0;
   uint8_t cfg_selected_row_ = 0;
+  uint8_t cfg_confirm_pending_row_ = 0xFF;
+  uint32_t cfg_confirm_guard_until_ms_ = 0;
+  bool cfg_confirm_swallow_first_click_ = false;
   uint8_t contacts_selected_index_ = 0;
   uint8_t contacts_action_index_ = 0;
   uint8_t contacts_count_ = 0;
   uint32_t compose_opened_ms_ = 0;
   uint32_t last_selector_action_ms_ = 0;
+  uint32_t last_cfg_action_ms_ = 0;
+  uint8_t last_cfg_action_row_ = 0xFF;
   uint32_t last_dropdown_open_ms_ = 0;
   uint32_t contacts_dropdown_guard_until_ms_ = 0;
   uint32_t advert_popup_deadline_ms_ = 0;

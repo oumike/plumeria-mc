@@ -952,8 +952,38 @@ uint32_t dequeueCardputerKey() {
 void pumpCardputerKeys() {
   M5Cardputer.update();
   auto& status = M5Cardputer.Keyboard.keysState();
-  const bool changed = M5Cardputer.Keyboard.isChange();
+  bool changed = M5Cardputer.Keyboard.isChange();
   const bool pressed = M5Cardputer.Keyboard.isPressed();
+
+  // Some M5Cardputer library versions can report isChange()==false while
+  // keys are still being typed. Synthesize a change signal from a lightweight
+  // snapshot so keyboard input remains usable.
+  static uint32_t prev_hid_hash = 0;
+  static char prev_word[32] = {};
+  static bool prev_del = false;
+
+  uint32_t hid_hash = 0;
+  for (uint8_t hid_key : status.hid_keys) {
+    hid_hash = (hid_hash * 131u) + hid_key;
+  }
+
+  char word_buf[32] = {};
+  size_t word_len = 0;
+  for (char key : status.word) {
+    if (key == '\r' || key == '\n') {
+      continue;
+    }
+    if (word_len + 1 < sizeof(word_buf)) {
+      word_buf[word_len++] = key;
+    }
+  }
+  word_buf[word_len] = '\0';
+
+  if (!changed) {
+    if (hid_hash != prev_hid_hash || strcmp(word_buf, prev_word) != 0 || status.del != prev_del) {
+      changed = true;
+    }
+  }
 
   bool enter_pressed = M5Cardputer.BtnA.isPressed() || status.enter;
   for (uint8_t hid_key : status.hid_keys) {
@@ -979,6 +1009,10 @@ void pumpCardputerKeys() {
   g_cardputer_enter_down = enter_pressed;
 
   if (!changed || !pressed) {
+    prev_hid_hash = hid_hash;
+    strncpy(prev_word, word_buf, sizeof(prev_word) - 1);
+    prev_word[sizeof(prev_word) - 1] = '\0';
+    prev_del = status.del;
     return;
   }
 
@@ -1014,12 +1048,14 @@ void pumpCardputerKeys() {
     enqueueCardputerKey(LV_KEY_BACKSPACE);
   }
 
-  for (char key : status.word) {
-    if (key == '\r' || key == '\n') {
-      continue;
-    }
-    enqueueCardputerKey(static_cast<uint8_t>(key));
+  for (size_t i = 0; i < word_len; i++) {
+    enqueueCardputerKey(static_cast<uint8_t>(word_buf[i]));
   }
+
+  prev_hid_hash = hid_hash;
+  strncpy(prev_word, word_buf, sizeof(prev_word) - 1);
+  prev_word[sizeof(prev_word) - 1] = '\0';
+  prev_del = status.del;
 }
 #endif
 

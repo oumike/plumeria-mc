@@ -11,6 +11,8 @@
 
 namespace {
 
+constexpr uint8_t kContactTypeRepeater = 2;
+
 constexpr uint32_t kStaConnectTimeoutMs = 10000;
 constexpr uint32_t kRebootDelayMs = 1500;
 constexpr uint32_t kNtpSyncTimeoutMs = 6000;
@@ -69,6 +71,7 @@ char g_channels_web_buf[40][32]{};
 plumeria::mesh::MeshContactSummary g_contacts_web_buf[160]{};
 plumeria::mesh::MeshChannelConfig g_imported_channels_buf[40]{};
 plumeria::mesh::MeshChannelConfig g_export_channels_buf[40]{};
+char g_imported_favorite_pubkeys[160][65]{};
 char g_existing_channels_buf[40][32]{};
 char g_export_identity_public_hex[193]{};
 char g_export_identity_private_hex[193]{};
@@ -82,6 +85,10 @@ bool contactSortBefore(const plumeria::mesh::MeshContactSummary& a,
     return a.lastmod > b.lastmod;
   }
   return strcmp(a.name, b.name) < 0;
+}
+
+const char* boolToText(bool value) {
+  return value ? "true" : "false";
 }
 
 void applyTimezoneOffsetFromSettings() {
@@ -238,7 +245,7 @@ String configSafeValue(const char* raw) {
 
 String buildConfigText() {
   String out;
-  out.reserve(4096);
+  out.reserve(6144);
   out += "plumeria_config_version: 1\n";
   out += "node_name: ";
   out += configSafeValue(g_settings.node_name);
@@ -321,6 +328,46 @@ String buildConfigText() {
       out += "\n";
     }
   }
+
+  out += "contacts:\n";
+  if (g_mesh) {
+    memset(g_contacts_web_buf, 0, sizeof(g_contacts_web_buf));
+    const int contact_count = g_mesh->exportContacts(g_contacts_web_buf, 160);
+    for (int i = 0; i < contact_count; i++) {
+      if (g_contacts_web_buf[i].public_key_hex[0] == '\0') {
+        continue;
+      }
+
+      String safe_name = configSafeValue(g_contacts_web_buf[i].name);
+      safe_name.replace("|", "/");
+
+      out += "contact: ";
+      out += g_contacts_web_buf[i].public_key_hex;
+      out += "|";
+      out += safe_name;
+      out += "|";
+      out += (g_contacts_web_buf[i].type == kContactTypeRepeater) ? "repeater" : "contact";
+      out += "\n";
+    }
+  }
+
+  out += "favorites:\n";
+  if (g_mesh) {
+    memset(g_contacts_web_buf, 0, sizeof(g_contacts_web_buf));
+    const int contact_count = g_mesh->exportContacts(g_contacts_web_buf, 160);
+    for (int i = 0; i < contact_count; i++) {
+      if (!g_contacts_web_buf[i].favorite) {
+        continue;
+      }
+      if (g_contacts_web_buf[i].public_key_hex[0] == '\0') {
+        continue;
+      }
+      out += "favorite_contact: ";
+      out += g_contacts_web_buf[i].public_key_hex;
+      out += "\n";
+    }
+  }
+
   return out;
 }
 
@@ -334,6 +381,9 @@ void setImportError(char* err, size_t err_size, const char* message) {
   }
   strncpy(err, message, err_size - 1);
   err[err_size - 1] = '\0';
+  if (message[0] != '\0') {
+    Serial.printf("[IMPORT] ERROR: %s\n", message);
+  }
 }
 
 bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, size_t err_size) {
@@ -342,14 +392,22 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
     return false;
   }
 
+  Serial.println("[IMPORT] ----- begin -----");
+  Serial.printf("[IMPORT] queue_reboot request: %s\n", boolToText(queue_reboot));
+  Serial.printf("[IMPORT] payload bytes: %u\n", static_cast<unsigned>(strlen(text)));
+
   plumeria::web::WebSettings imported = g_settings;
   bool saw_channels = false;
   int imported_channel_count = 0;
+  int imported_contact_count = 0;
+  int imported_favorite_count = 0;
   bool saw_identity_private_key = false;
   bool saw_identity_public_key = false;
   char imported_identity_public_hex[193] = {};
   char imported_identity_private_hex[193] = {};
   memset(g_imported_channels_buf, 0, sizeof(g_imported_channels_buf));
+  memset(g_contacts_web_buf, 0, sizeof(g_contacts_web_buf));
+  memset(g_imported_favorite_pubkeys, 0, sizeof(g_imported_favorite_pubkeys));
 
   String all(text);
   int start = 0;
@@ -529,6 +587,67 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
             g_imported_channels_buf[imported_channel_count]
           .psk_base64[sizeof(g_imported_channels_buf[imported_channel_count].psk_base64) - 1] = '\0';
       imported_channel_count++;
+    } else if (key.equals("contact")) {
+      value.trim();
+      if (value.length() == 0) {
+        continue;
+      }
+      if (imported_contact_count >= 160) {
+        continue;
+      }
+
+      int sep = value.indexOf('|');
+      String left = sep >= 0 ? value.substring(0, sep) : value;
+      String rest = sep >= 0 ? value.substring(sep + 1) : String("");
+      left.trim();
+      rest.trim();
+
+      sep = rest.indexOf('|');
+      String right = sep >= 0 ? rest.substring(0, sep) : rest;
+      String role = sep >= 0 ? rest.substring(sep + 1) : String("");
+      right.trim();
+      role.trim();
+
+      String pubkey;
+      String name;
+      if (left.length() == 64) {
+        pubkey = left;
+        name = right;
+      } else if (right.length() == 64) {
+        pubkey = right;
+        name = left;
+      } else {
+        setImportError(err, err_size, "contact must include a 64-char hex public key");
+        return false;
+      }
+
+      uint8_t contact_type = 0;
+      if (role.equalsIgnoreCase("repeater") || role.equals("2") || role.equalsIgnoreCase("type=2") ||
+          role.equalsIgnoreCase("repeater=true") || role.equalsIgnoreCase("is_repeater=true")) {
+        contact_type = kContactTypeRepeater;
+      }
+
+      copyString(g_contacts_web_buf[imported_contact_count].public_key_hex,
+             sizeof(g_contacts_web_buf[imported_contact_count].public_key_hex), pubkey.c_str());
+      copyString(g_contacts_web_buf[imported_contact_count].name,
+             sizeof(g_contacts_web_buf[imported_contact_count].name), name.c_str());
+      g_contacts_web_buf[imported_contact_count].type = contact_type;
+      imported_contact_count++;
+    } else if (key.equals("favorite_contact")) {
+      value.trim();
+      if (value.length() == 0) {
+        continue;
+      }
+      if (value.length() != 64) {
+        setImportError(err, err_size, "favorite_contact must be a 64-char hex public key");
+        return false;
+      }
+      if (imported_favorite_count >= 160) {
+        continue;
+      }
+      copyString(g_imported_favorite_pubkeys[imported_favorite_count],
+                 sizeof(g_imported_favorite_pubkeys[imported_favorite_count]), value.c_str());
+      imported_favorite_count++;
     }
   }
 
@@ -541,6 +660,45 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
       (g_settings.lora_sf != imported.lora_sf) || (g_settings.lora_cr != imported.lora_cr) ||
       (g_settings.lora_tx_power_dbm != imported.lora_tx_power_dbm);
   bool identity_changed = false;
+
+  Serial.printf("[IMPORT] node_name=%s\n", imported.node_name);
+  Serial.printf("[IMPORT] node_lat=%.6f\n", imported.node_latitude);
+  Serial.printf("[IMPORT] node_lon=%.6f\n", imported.node_longitude);
+  Serial.printf("[IMPORT] send_loc_adv=%s\n", boolToText(imported.send_location_in_advert));
+  Serial.printf("[IMPORT] wifi_ssid=%s\n", imported.wifi_ssid[0] ? imported.wifi_ssid : "(empty)");
+  Serial.printf("[IMPORT] wifi_pass_len=%u\n", static_cast<unsigned>(strlen(imported.wifi_pass)));
+  Serial.printf("[IMPORT] timezone=%s\n", imported.timezone);
+  Serial.printf("[IMPORT] tz_offset=%d\n", static_cast<int>(imported.timezone_offset_minutes));
+  Serial.printf("[IMPORT] region=%s\n", imported.region);
+  Serial.printf("[IMPORT] freq=%.3f\n", imported.lora_freq_mhz);
+  Serial.printf("[IMPORT] bw=%.1f\n", imported.lora_bw_khz);
+  Serial.printf("[IMPORT] sf=%u\n", static_cast<unsigned>(imported.lora_sf));
+  Serial.printf("[IMPORT] cr=%u\n", static_cast<unsigned>(imported.lora_cr));
+  Serial.printf("[IMPORT] pwr=%d\n", static_cast<int>(imported.lora_tx_power_dbm));
+  Serial.printf("[IMPORT] advert_interval_minutes=%u\n", static_cast<unsigned>(imported.advert_interval_minutes));
+  Serial.printf("[IMPORT] path_hash_mode=%u\n", static_cast<unsigned>(imported.path_hash_mode));
+  Serial.printf("[IMPORT] mesh_region=%s\n", imported.mesh_region[0] ? imported.mesh_region : "(empty)");
+  Serial.printf("[IMPORT] screen_timeout_seconds=%u\n", static_cast<unsigned>(imported.screen_timeout_seconds));
+  Serial.printf("[IMPORT] identity_public_key_present=%s\n", boolToText(saw_identity_public_key));
+  Serial.printf("[IMPORT] identity_private_key_present=%s\n", boolToText(saw_identity_private_key));
+  Serial.printf("[IMPORT] channels_section=%s count=%d\n", boolToText(saw_channels), imported_channel_count);
+  for (int i = 0; i < imported_channel_count; i++) {
+    const bool has_psk = g_imported_channels_buf[i].psk_base64[0] != '\0';
+    Serial.printf("[IMPORT] channel[%d] name=%s psk_present=%s\n", i,
+                  g_imported_channels_buf[i].name,
+                  boolToText(has_psk));
+  }
+  Serial.printf("[IMPORT] contacts_count=%d\n", imported_contact_count);
+  for (int i = 0; i < imported_contact_count; i++) {
+    Serial.printf("[IMPORT] contact[%d] key=%s name=%s repeater=%s\n", i,
+                  g_contacts_web_buf[i].public_key_hex,
+                  g_contacts_web_buf[i].name[0] ? g_contacts_web_buf[i].name : "(empty)",
+                  boolToText(g_contacts_web_buf[i].type == kContactTypeRepeater));
+  }
+  Serial.printf("[IMPORT] favorites_count=%d\n", imported_favorite_count);
+  for (int i = 0; i < imported_favorite_count; i++) {
+    Serial.printf("[IMPORT] favorite_contact[%d]=%s\n", i, g_imported_favorite_pubkeys[i]);
+  }
 
   if (saw_identity_public_key != saw_identity_private_key) {
     setImportError(err, err_size, "Both identity_public_key and identity_private_key are required");
@@ -555,7 +713,9 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   g_settings = imported;
 
   if (g_mesh) {
+    Serial.println("[IMPORT] applying to mesh adapter");
     if (saw_identity_private_key) {
+      Serial.println("[IMPORT] applying identity keys");
       if (!g_mesh->importIdentityKeysHex(imported_identity_public_hex, imported_identity_private_hex)) {
         setImportError(err, err_size, "Failed to import identity keys");
         return false;
@@ -563,22 +723,33 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
       identity_changed = true;
     }
 
+    Serial.printf("[IMPORT] setNodeName(%s)\n", g_settings.node_name);
     g_mesh->setNodeName(g_settings.node_name);
+    Serial.printf("[IMPORT] setAdvertLocation(enabled=%s lat=%.6f lon=%.6f)\n",
+                  boolToText(g_settings.send_location_in_advert), g_settings.node_latitude,
+                  g_settings.node_longitude);
     if (!g_mesh->setAdvertLocation(g_settings.send_location_in_advert, g_settings.node_latitude,
                                    g_settings.node_longitude)) {
       setImportError(err, err_size, "Failed to apply advert location");
       return false;
     }
+    Serial.printf("[IMPORT] setGpsEnabled(%s)\n", boolToText(!g_settings.send_location_in_advert));
     g_mesh->setGpsEnabled(!g_settings.send_location_in_advert);
+    Serial.printf("[IMPORT] setAutoAdvertIntervalMinutes(%u)\n",
+                  static_cast<unsigned>(g_settings.advert_interval_minutes));
     g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
+    Serial.printf("[IMPORT] setPathHashMode(%u)\n", static_cast<unsigned>(g_settings.path_hash_mode));
     g_mesh->setPathHashMode(g_settings.path_hash_mode);
+    Serial.printf("[IMPORT] setMeshRegion(%s)\n", g_settings.mesh_region[0] ? g_settings.mesh_region : "");
     g_mesh->setMeshRegion(g_settings.mesh_region);
 
     if (saw_channels) {
+      Serial.println("[IMPORT] replacing channels");
       memset(g_existing_channels_buf, 0, sizeof(g_existing_channels_buf));
       const int existing_count = g_mesh->exportChannels(g_existing_channels_buf, 40);
       for (int i = 0; i < existing_count; i++) {
         if (strcmp(g_existing_channels_buf[i], "Public") != 0) {
+          Serial.printf("[IMPORT] removeChannel(%s)\n", g_existing_channels_buf[i]);
           g_mesh->removeChannel(g_existing_channels_buf[i]);
         }
       }
@@ -590,6 +761,9 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
           setImportError(err, err_size, "Non-# channel missing PSK");
           return false;
         }
+        Serial.printf("[IMPORT] addChannel(%s, psk_present=%s)\n",
+                      g_imported_channels_buf[i].name,
+                      boolToText(psk_ptr != nullptr));
         if (!g_mesh->addChannel(g_imported_channels_buf[i].name, psk_ptr)) {
           setImportError(err, err_size, "Failed to apply channels");
           return false;
@@ -597,18 +771,78 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
       }
     }
 
+    if (imported_contact_count > 0) {
+      int contacts_applied = 0;
+      int contacts_failed = 0;
+      for (int i = 0; i < imported_contact_count; i++) {
+        if (g_contacts_web_buf[i].public_key_hex[0] == '\0') {
+          contacts_failed++;
+          continue;
+        }
+        const char* imported_name = g_contacts_web_buf[i].name[0] != '\0'
+                                        ? g_contacts_web_buf[i].name
+                                        : nullptr;
+        const bool is_repeater = g_contacts_web_buf[i].type == kContactTypeRepeater;
+        const bool ok = g_mesh->importContactByPublicKeyHex(g_contacts_web_buf[i].public_key_hex,
+                         imported_name,
+                         g_contacts_web_buf[i].type);
+        Serial.printf("[IMPORT] contact[%d] key=%s name=%s repeater=%s (%s)\n", i,
+                      g_contacts_web_buf[i].public_key_hex,
+                      imported_name ? imported_name : "(empty)",
+                boolToText(is_repeater),
+                      ok ? "applied_or_created" : "failed");
+        if (ok) {
+          contacts_applied++;
+        } else {
+          contacts_failed++;
+        }
+      }
+      Serial.printf("[IMPORT] contacts applied=%d failed=%d\n", contacts_applied, contacts_failed);
+    }
+
+    if (imported_favorite_count > 0) {
+      // Ensure listed contacts are favorited, creating placeholders when needed.
+      int fav_applied = 0;
+      int fav_skipped = 0;
+      for (int i = 0; i < imported_favorite_count; i++) {
+        if (g_imported_favorite_pubkeys[i][0] == '\0') {
+          fav_skipped++;
+          continue;
+        }
+        const bool ok = g_mesh->importFavoriteContactByPublicKeyHex(g_imported_favorite_pubkeys[i]);
+        Serial.printf("[IMPORT] favorite_contact[%d] %s (%s)\n", i,
+                g_imported_favorite_pubkeys[i], ok ? "applied_or_created" : "failed");
+        if (ok) {
+          fav_applied++;
+        } else {
+          fav_skipped++;
+        }
+      }
+      Serial.printf("[IMPORT] favorites applied=%d skipped=%d\n", fav_applied, fav_skipped);
+    }
+
+    Serial.println("[IMPORT] broadcastSelfAdvertNow()");
     g_mesh->broadcastSelfAdvertNow();
+  } else {
+    Serial.println("[IMPORT] mesh adapter not available; parsed settings saved only");
   }
 
   applyTimezoneOffsetFromSettings();
   saveSettings(g_settings);
 
+  Serial.printf("[IMPORT] wifi_changed=%s radio_changed=%s identity_changed=%s\n",
+                boolToText(wifi_changed), boolToText(radio_changed), boolToText(identity_changed));
+
   if (queue_reboot || wifi_changed || radio_changed || identity_changed) {
     g_reboot_pending = true;
     g_reboot_at_ms = millis() + kRebootDelayMs;
+    Serial.printf("[IMPORT] reboot queued in %u ms\n", static_cast<unsigned>(kRebootDelayMs));
+  } else {
+    Serial.println("[IMPORT] reboot not required");
   }
 
   setImportError(err, err_size, "");
+  Serial.println("[IMPORT] ----- success -----");
   return true;
 }
 
@@ -900,9 +1134,9 @@ function renderContacts(){const ul=document.getElementById('contacts');ul.innerH
 
 async function loadContacts(){const c=await jget('/api/contacts');contactsCache=Array.isArray(c.contacts)?c.contacts:[];contactsCache.sort((a,b)=>{if(!!a.favorite!==!!b.favorite)return a.favorite?-1:1;return Number(b.lastmod||0)-Number(a.lastmod||0);});renderContacts();}
 
-async function addChannel(){const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}const r=await jpost('/api/channels/add',{name,psk});if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();},mesh_region:document.getElementById('mesh_region').value
+async function addChannel(){const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}let r=null;try{r=await jpost('/api/channels/add',{name,psk});}catch(e){alert('Add channel request failed: '+(e&&e.message?e.message:String(e)));return;}if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}
 
-async function saveAll(){const tz=document.getElementById('timezone').value;const r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,tz_offset:String(tzOffsetMinutes(tz)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value});alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
+async function saveAll(){const tz=document.getElementById('timezone').value;let r=null;try{r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,tz_offset:String(tzOffsetMinutes(tz)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value,mesh_region:document.getElementById('mesh_region').value});}catch(e){alert('Save request failed: '+(e&&e.message?e.message:String(e)));return;}alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
 
 async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||((r&&r.error)||'done'));}
 async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||((r&&r.error)||'done'));}
@@ -1531,12 +1765,12 @@ void handleSaveAll() {
   if (screen_timeout_seconds < static_cast<int>(kMinScreenTimeoutSeconds) ||
       screen_timeout_seconds > static_cast<int>(kMaxScreenTimeoutSeconds)) {
     sendJsonError("Screen timeout out of range");
-   
+    return;
+  }
 
   if (mesh_region.length() >= static_cast<int>(sizeof(g_settings.mesh_region))) {
     sendJsonError("Mesh region too long");
     return;
-  } return;
   }
 
   const bool wifi_changed =
@@ -1974,7 +2208,10 @@ bool setNodeName(const char* node_name, char* err, size_t err_size) {
 bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size) {
   WebSettings next{};
   loadSettings(&next);
+  Serial.printf("[GPSDBG][WEB] setSendLocationInAdvert request=%d current=%d\n",
+                enabled ? 1 : 0, next.send_location_in_advert ? 1 : 0);
   if (next.send_location_in_advert == enabled) {
+    Serial.println("[GPSDBG][WEB] no-op (already requested state)");
     setImportError(err, err_size, "");
     return true;
   }
@@ -1984,14 +2221,18 @@ bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size) {
   if (g_mesh) {
     if (!g_mesh->setAdvertLocation(next.send_location_in_advert, next.node_latitude,
                                    next.node_longitude)) {
+      Serial.println("[GPSDBG][WEB] setAdvertLocation failed");
       setImportError(err, err_size, "Failed to apply advert location");
       return false;
     }
-    g_mesh->setGpsEnabled(!next.send_location_in_advert);
+    const bool gps_ok = g_mesh->setGpsEnabled(!next.send_location_in_advert);
+    Serial.printf("[GPSDBG][WEB] mesh setGpsEnabled(%d) => %d\n",
+                  next.send_location_in_advert ? 0 : 1, gps_ok ? 1 : 0);
     g_mesh->broadcastSelfAdvertNow();
   }
 
   saveSettings(next);
+  Serial.printf("[GPSDBG][WEB] saved send_loc_adv=%d\n", next.send_location_in_advert ? 1 : 0);
   if (g_running) {
     g_settings = next;
   }

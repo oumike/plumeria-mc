@@ -46,6 +46,26 @@ class MicroNMEALocationProvider : public LocationProvider {
     long time_valid = 0;
     unsigned long _last_time_sync = 0;
     static const unsigned long TIME_SYNC_INTERVAL = 1800000; // Re-sync every 30 minutes
+    static const long MIN_VALID_GPS_UNIX_TIME = 1577836800L; // 2020-01-01 UTC
+
+    bool hasSaneGpsDateTime() {
+        const int year = nmea.getYear();
+        const int month = nmea.getMonth();
+        const int day = nmea.getDay();
+        const int hour = nmea.getHour();
+        const int minute = nmea.getMinute();
+        const int second = nmea.getSecond();
+
+        if (year < 2020 || year > 2099) return false;
+        if (month < 1 || month > 12) return false;
+        if (day < 1 || day > 31) return false;
+        if (hour < 0 || hour > 23) return false;
+        if (minute < 0 || minute > 59) return false;
+        if (second < 0 || second > 59) return false;
+
+        const long ts = getTimestamp();
+        return ts >= MIN_VALID_GPS_UNIX_TIME;
+    }
 
 public :
     MicroNMEALocationProvider(Stream& ser, mesh::RTCClock* clock = NULL, int pin_reset = GPS_RESET, int pin_en = GPS_EN,RefCountedDigitalPin* peripher_power=NULL) :
@@ -141,7 +161,10 @@ public :
             nmea.process(c);
         }
 
-        if (!isValid()) time_valid = 0;
+        const bool has_fix = isValid() && satellitesCount() > 0;
+        if (!has_fix) {
+            time_valid = 0;
+        }
 
         if (millis() > next_check) {
             next_check = millis() + 1000;
@@ -149,14 +172,14 @@ public :
             if (!_time_sync_needed && _clock != NULL && (millis() - _last_time_sync) > TIME_SYNC_INTERVAL) {
                 _time_sync_needed = true;
             }
-            if (_time_sync_needed && time_valid > 2) {
+            if (_time_sync_needed && time_valid > 2 && hasSaneGpsDateTime()) {
                 if (_clock != NULL) {
                     _clock->setCurrentTime(getTimestamp());
                     _time_sync_needed = false;
                     _last_time_sync = millis();
                 }
             }
-            if (isValid()) {
+            if (has_fix) {
                 time_valid ++;
             }
         }

@@ -46,6 +46,7 @@ constexpr char kContactsCountKey[] = "contacts_cnt";
 constexpr char kContactsBlobKey[] = "contacts_blob";
 constexpr char kChannelsCountKey[] = "channels_cnt";
 constexpr char kChannelsBlobKey[] = "channels_blob";
+constexpr char kContactTelemetryBlobKey[] = "ctel_blob";
 
 struct PersistedContact {
   uint8_t pub_key[32];
@@ -1209,6 +1210,7 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
   }
 
   loadContactsFromFs();
+  loadContactTelemetryFromFs();
 
   // On fresh installs (no identity in NVS yet), avoid announcing a temporary
   // random identity before config import restores the intended keys.
@@ -1248,7 +1250,7 @@ void MeshAdapter::loop() {
     queueInfo("Broadcast self advert (zero+flood)");
   }
 
-  if ((contacts_dirty_ || channels_dirty_) && now - last_persist_flush_ms_ >= kPersistFlushMs) {
+  if ((contacts_dirty_ || channels_dirty_ || telemetry_dirty_) && now - last_persist_flush_ms_ >= kPersistFlushMs) {
     if (contacts_dirty_) {
       saveContactsToFs();
       contacts_dirty_ = false;
@@ -1256,6 +1258,10 @@ void MeshAdapter::loop() {
     if (channels_dirty_) {
       saveChannelsToFs();
       channels_dirty_ = false;
+    }
+    if (telemetry_dirty_) {
+      saveContactTelemetryToFs();
+      telemetry_dirty_ = false;
     }
     last_persist_flush_ms_ = now;
   }
@@ -1415,9 +1421,14 @@ bool MeshAdapter::identityLoadedFromNvs() const {
 bool MeshAdapter::setGpsEnabled(bool enabled) {
 #if defined(ENV_INCLUDE_GPS) && (ENV_INCLUDE_GPS == 1)
   if (!ready_ || !runtime_) {
+    Serial.printf("[GPSDBG][MESH] setGpsEnabled(%d) rejected ready=%d runtime=%p\n",
+                  enabled ? 1 : 0, ready_ ? 1 : 0, static_cast<void*>(runtime_));
     return false;
   }
-  return runtime_->sensors.setSettingValue("gps", enabled ? "1" : "0");
+  const bool ok = runtime_->sensors.setSettingValue("gps", enabled ? "1" : "0");
+  Serial.printf("[GPSDBG][MESH] sensors.setSettingValue(gps=%d) => %d\n",
+                enabled ? 1 : 0, ok ? 1 : 0);
+  return ok;
 #else
   (void)enabled;
   return false;
@@ -1665,6 +1676,104 @@ int MeshAdapter::exportContacts(MeshContactSummary contacts[], int max_contacts)
   return exported;
 }
 
+bool MeshAdapter::importContactByPublicKeyHex(const char* public_key_hex, const char* contact_name,
+                                              uint8_t contact_type) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !public_key_hex) {
+    return false;
+  }
+
+  uint8_t pub_key[PUB_KEY_SIZE] = {};
+  if (!hexToBytes(public_key_hex, pub_key, sizeof(pub_key))) {
+    return false;
+  }
+
+  char resolved_name[32] = {};
+  if (contact_name && contact_name[0] != '\0') {
+    strncpy(resolved_name, contact_name, sizeof(resolved_name) - 1);
+    resolved_name[sizeof(resolved_name) - 1] = '\0';
+  }
+
+  ContactInfo* contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (!contact) {
+    ContactInfo created{};
+    created.id = ::mesh::Identity(pub_key);
+    if (resolved_name[0] != '\0') {
+      strncpy(created.name, resolved_name, sizeof(created.name) - 1);
+      created.name[sizeof(created.name) - 1] = '\0';
+    } else {
+      snprintf(created.name, sizeof(created.name), "fav-%.8s", public_key_hex);
+    }
+    created.type = contact_type;
+    created.flags = 0;
+    created.out_path_len = 0;
+    memset(created.out_path, 0, sizeof(created.out_path));
+    created.last_advert_timestamp = 0;
+    created.lastmod = runtime_->rtc_clock.getCurrentTimeUnique();
+    created.gps_lat = 0;
+    created.gps_lon = 0;
+    created.sync_since = 0;
+    created.shared_secret_valid = false;
+
+    if (!runtime_->mesh->addContact(created)) {
+      return false;
+    }
+
+    contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+    if (!contact) {
+      return false;
+    }
+  } else {
+    if (resolved_name[0] != '\0') {
+      strncpy(contact->name, resolved_name, sizeof(contact->name) - 1);
+      contact->name[sizeof(contact->name) - 1] = '\0';
+    }
+    if (contact_type != 0) {
+      contact->type = contact_type;
+    }
+  }
+
+  contact->lastmod = runtime_->rtc_clock.getCurrentTimeUnique();
+
+  markContactsDirty();
+  if (!saveContactsToFs()) {
+    return false;
+  }
+  contacts_dirty_ = false;
+  return true;
+}
+
+bool MeshAdapter::importFavoriteContactByPublicKeyHex(const char* public_key_hex) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !public_key_hex) {
+    return false;
+  }
+
+  uint8_t pub_key[PUB_KEY_SIZE] = {};
+  if (!hexToBytes(public_key_hex, pub_key, sizeof(pub_key))) {
+    return false;
+  }
+
+  ContactInfo* contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (!contact) {
+    if (!importContactByPublicKeyHex(public_key_hex, nullptr, 0)) {
+      return false;
+    }
+    contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+    if (!contact) {
+      return false;
+    }
+  }
+
+  contact->flags |= 0x01U;
+  contact->lastmod = runtime_->rtc_clock.getCurrentTimeUnique();
+
+  markContactsDirty();
+  if (!saveContactsToFs()) {
+    return false;
+  }
+  contacts_dirty_ = false;
+  return true;
+}
+
 bool MeshAdapter::setContactFavoriteByPublicKeyHex(const char* public_key_hex, bool favorite) {
   if (!ready_ || !runtime_ || !runtime_->mesh || !public_key_hex) {
     return false;
@@ -1714,6 +1823,7 @@ bool MeshAdapter::removeContactByPublicKeyHex(const char* public_key_hex) {
     return false;
   }
 
+  bool telemetry_cleared = false;
   for (size_t i = 0; i < kMaxContactTelemetry; i++) {
     ContactTelemetrySnapshot& slot = contact_telemetry_[i];
     if (!slot.used) {
@@ -1721,6 +1831,7 @@ bool MeshAdapter::removeContactByPublicKeyHex(const char* public_key_hex) {
     }
     if (memcmp(slot.pub_key, pub_key, kPubKeySize) == 0) {
       memset(&slot, 0, sizeof(slot));
+      telemetry_cleared = true;
       break;
     }
   }
@@ -1729,6 +1840,15 @@ bool MeshAdapter::removeContactByPublicKeyHex(const char* public_key_hex) {
   if (!saveContactsToFs()) {
     return false;
   }
+
+  if (telemetry_cleared) {
+    telemetry_dirty_ = true;
+    if (!saveContactTelemetryToFs()) {
+      return false;
+    }
+    telemetry_dirty_ = false;
+  }
+
   contacts_dirty_ = false;
   return true;
 }
@@ -2143,12 +2263,18 @@ void MeshAdapter::noteContactAdvertTelemetry(const uint8_t* pub_key, uint8_t adv
   }
 
   ContactTelemetrySnapshot& slot = contact_telemetry_[target];
+  const bool same_entry = slot.used && memcmp(slot.pub_key, pub_key, kPubKeySize) == 0;
+  const bool changed = !same_entry || slot.advert_type != advert_type || slot.feat1 != feat1 || slot.feat2 != feat2;
   memcpy(slot.pub_key, pub_key, kPubKeySize);
   slot.advert_type = advert_type;
   slot.feat1 = feat1;
   slot.feat2 = feat2;
   slot.last_update_ms = millis();
   slot.used = true;
+
+  if (changed) {
+    telemetry_dirty_ = true;
+  }
 }
 
 bool MeshAdapter::loadContactTelemetry(const uint8_t* pub_key, MeshContactSummary* out_summary) const {
@@ -2170,6 +2296,67 @@ bool MeshAdapter::loadContactTelemetry(const uint8_t* pub_key, MeshContactSummar
   }
 
   return false;
+}
+
+bool MeshAdapter::loadContactTelemetryFromFs() {
+  memset(contact_telemetry_, 0, sizeof(contact_telemetry_));
+
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, false)) {
+    return false;
+  }
+
+  if (!prefs.isKey(kContactTelemetryBlobKey)) {
+    prefs.end();
+    telemetry_dirty_ = false;
+    return false;
+  }
+
+  const size_t blob_len = prefs.getBytesLength(kContactTelemetryBlobKey);
+  if (blob_len == 0) {
+    prefs.end();
+    telemetry_dirty_ = false;
+    return false;
+  }
+
+  const size_t to_read = blob_len < sizeof(contact_telemetry_) ? blob_len : sizeof(contact_telemetry_);
+  const size_t got = prefs.getBytes(kContactTelemetryBlobKey, contact_telemetry_, to_read);
+  prefs.end();
+
+  if (got != to_read) {
+    memset(contact_telemetry_, 0, sizeof(contact_telemetry_));
+    telemetry_dirty_ = false;
+    return false;
+  }
+
+  telemetry_dirty_ = false;
+  return true;
+}
+
+bool MeshAdapter::saveContactTelemetryToFs() {
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, false)) {
+    return false;
+  }
+
+  bool any_used = false;
+  for (size_t i = 0; i < kMaxContactTelemetry; i++) {
+    if (contact_telemetry_[i].used) {
+      any_used = true;
+      break;
+    }
+  }
+
+  bool ok = true;
+  if (any_used) {
+    const size_t wrote = prefs.putBytes(kContactTelemetryBlobKey, contact_telemetry_, sizeof(contact_telemetry_));
+    ok = (wrote == sizeof(contact_telemetry_));
+  } else if (prefs.isKey(kContactTelemetryBlobKey)) {
+    ok = prefs.remove(kContactTelemetryBlobKey);
+  }
+
+  prefs.end();
+  return ok;
 }
 
 bool MeshAdapter::loadContactsFromFs() {

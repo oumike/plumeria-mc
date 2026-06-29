@@ -109,6 +109,10 @@ constexpr lv_coord_t kHeaderIconsToBatteryGap = 10;
 constexpr lv_coord_t kHeaderIconsToBatteryGap = 18;
 #endif
 constexpr lv_coord_t kHeaderIconsGap = 10;
+constexpr lv_coord_t kChannelSelectorRightBuffer = 8;
+constexpr lv_coord_t kContactsSelectorRightBuffer = 10;
+constexpr lv_coord_t kSelectorLabelHorizontalPad = 4;
+constexpr lv_coord_t kContactsSelectorLabelHorizontalPad = 6;
 constexpr lv_coord_t kComposeDialogMinW = 160;
 constexpr lv_coord_t kComposeDialogMaxW = 236;
 constexpr lv_coord_t kComposeDialogH = 90;
@@ -125,6 +129,7 @@ constexpr lv_coord_t kModalVerticalNudgeY = 4;
 constexpr lv_coord_t kModalVerticalNudgeY = 0;
 #endif
 constexpr uint32_t kNavDebounceMs = 120;
+constexpr uint32_t kCfgActionRepeatGuardMs = 700;
 #if defined(DEVICE_TLORA_PAGER_TFT)
 constexpr uint32_t kContactsDropdownEnterGuardMs = 800;
 #else
@@ -148,7 +153,6 @@ constexpr char kDmHistoryCountKey[] = "dm_count";
 constexpr char kCfgSdDir[] = "/plumeria";
 constexpr char kCfgSdPath[] = "/plumeria/plumeria-config.yaml";
 constexpr char kCfgSdPathFallback[] = "/plumeria-config.yaml";
-constexpr uint32_t kCfgSdClockHz = 800000UL;
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 constexpr bool kPagerWideDialogLayout = true;
@@ -324,7 +328,7 @@ const char* kCfgRowLabels[] = {
   "Multipaths",
   "Multi-ACK",
   "Mesh Region",
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   "Export Config",
   "Import Config",
   "Delete Config",
@@ -338,7 +342,7 @@ constexpr uint8_t kCfgRowGps = 3;
 constexpr uint8_t kCfgRowMultipaths = 4;
 constexpr uint8_t kCfgRowMultiAck = 5;
 constexpr uint8_t kCfgRowMeshRegion = 6;
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
 constexpr uint8_t kCfgRowExportConfig = 7;
 constexpr uint8_t kCfgRowImportConfig = 8;
 constexpr uint8_t kCfgRowDeleteConfig = 9;
@@ -1163,6 +1167,7 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
     return true;
   }
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
   SD.end();
   clearSdVfsRegistration();
   SPI.end();
@@ -1170,8 +1175,6 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
   SPI.begin(sd_sck, sd_miso, sd_mosi);
 
   static const char* kMountpoints[] = {"/sd", "/sdcard"};
-
-#if defined(DEVICE_TLORA_PAGER_TFT)
   static const int kProfiles[] = {3, 2, 0, 1, 4};
   static const uint32_t kSpeeds[] = {4000000UL, 1000000UL, 400000UL};
   for (size_t pi = 0; pi < (sizeof(kProfiles) / sizeof(kProfiles[0])); pi++) {
@@ -1230,43 +1233,35 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
   setErrText(out_err, out_err_size, "SD mount failed");
   return false;
 #else
-  bool mounted = false;
-  for (size_t mi = 0; mi < (sizeof(kMountpoints) / sizeof(kMountpoints[0])); mi++) {
-    if (SD.begin(sd_cs, SPI, kCfgSdClockHz, kMountpoints[mi], 2)) {
-      mounted = true;
-      break;
-    }
-    SD.end();
-    clearSdVfsRegistration();
-    delay(2);
-  }
+  // Cardputer / T-Deck path. Keep this sequence simple to avoid repeated
+  // APB callback registration and VFS mount churn when users hit SD actions
+  // from the Config dialog.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  // Cardputer path: explicitly set SPI pins before SD.begin; Arduino SD can
+  // otherwise probe using default bus pins and fail with cmd 0x00.
+  SPI.begin(sd_sck, sd_miso, sd_mosi);
+  delay(2);
 
+  // Keep FATFS allocation small and retry once after clearing stale VFS.
+  bool mounted = SD.begin(sd_cs, SPI, 1000000UL, "/sd", 1);
   if (!mounted) {
-    // Recover from stale mount state by tearing down and retrying once.
     SD.end();
     clearSdVfsRegistration();
-    SPI.end();
-    delay(6);
     SPI.begin(sd_sck, sd_miso, sd_mosi);
-
-    for (size_t mi = 0; mi < (sizeof(kMountpoints) / sizeof(kMountpoints[0])); mi++) {
-      if (SD.begin(sd_cs, SPI, kCfgSdClockHz, kMountpoints[mi], 2)) {
-        mounted = true;
-        break;
-      }
-      SD.end();
-      clearSdVfsRegistration();
-      delay(2);
-    }
-
-    if (!mounted) {
-      SD.end();
-      clearSdVfsRegistration();
-      SPI.end();
-      delay(6);
-      setErrText(out_err, out_err_size, "SD mount failed");
-      return false;
-    }
+    delay(2);
+    mounted = SD.begin(sd_cs, SPI, 400000UL, "/sd", 1);
+  }
+#else
+  SPI.begin(sd_sck, sd_miso, sd_mosi);
+  delay(8);
+  bool mounted = SD.begin(sd_cs, SPI, 4000000UL);
+  if (!mounted) {
+    mounted = SD.begin(sd_cs, SPI, 1000000UL);
+  }
+#endif
+  if (!mounted) {
+    setErrText(out_err, out_err_size, "SD mount failed");
+    return false;
   }
 #endif
 
@@ -1525,7 +1520,11 @@ void StandaloneUi::attachMeshAdapter(mesh::MeshAdapter* adapter) {
 
 void StandaloneUi::setFirstInstallIdentityPrompt(bool enabled) {
   first_install_identity_prompt_ = enabled;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  first_install_auto_export_pending_ = false;
+#else
   first_install_auto_export_pending_ = enabled;
+#endif
 }
 
 bool StandaloneUi::ensureContactsDialogBuilt() {
@@ -1860,6 +1859,7 @@ void StandaloneUi::buildLayout() {
   channel_selector_label_ = lv_label_create(channel_selector_btn_);
   lv_obj_add_style(channel_selector_label_, &style_text_main_, 0);
   lv_obj_set_style_text_font(channel_selector_label_, header_font, 0);
+  lv_label_set_long_mode(channel_selector_label_, LV_LABEL_LONG_DOT);
   lv_obj_align(channel_selector_label_, LV_ALIGN_LEFT_MID, 0, 0);
 
   channel_selector_caret_ = lv_label_create(channel_selector_btn_);
@@ -1919,12 +1919,12 @@ void StandaloneUi::buildLayout() {
   gps_label_ = lv_label_create(header_bar_);
   lv_obj_add_style(gps_label_, &style_text_dim_, 0);
   lv_obj_set_style_text_font(gps_label_, header_font, 0);
-  lv_obj_align_to(gps_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
 
   wifi_label_ = lv_label_create(header_bar_);
   lv_obj_add_style(wifi_label_, &style_text_dim_, 0);
   lv_obj_set_style_text_font(wifi_label_, header_font, 0);
-  lv_obj_align_to(wifi_label_, gps_label_, LV_ALIGN_OUT_RIGHT_MID, kHeaderIconsGap, 0);
+  lv_obj_align_to(wifi_label_, battery_pct_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
+  lv_obj_align_to(gps_label_, wifi_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsGap, 0);
 
   wifi_ap_badge_label_ = lv_label_create(header_bar_);
   lv_obj_add_style(wifi_ap_badge_label_, &style_text_main_, 0);
@@ -1941,6 +1941,7 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_style_border_width(battery_bar_, 1, LV_PART_MAIN);
   lv_obj_set_style_bg_color(battery_bar_, lv_color_hex(0x59D8A0), LV_PART_INDICATOR);
   lv_obj_set_style_pad_all(battery_bar_, 0, LV_PART_MAIN);
+  lv_obj_align_to(wifi_label_, battery_bar_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
 
   time_label_ = lv_label_create(header_bar_);
   lv_obj_add_style(time_label_, &style_text_main_, 0);
@@ -2275,6 +2276,16 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_style_border_width(cfg_divider, 0, 0);
   lv_obj_set_style_radius(cfg_divider, 0, 0);
   lv_obj_clear_flag(cfg_divider, LV_OBJ_FLAG_CLICKABLE);
+
+  // Built lazily on first confirm action to keep startup allocations light.
+  cfg_confirm_backdrop_ = nullptr;
+  cfg_confirm_dialog_ = nullptr;
+  cfg_confirm_title_label_ = nullptr;
+  cfg_confirm_action_label_ = nullptr;
+  cfg_confirm_yes_btn_ = nullptr;
+  cfg_confirm_yes_label_ = nullptr;
+  cfg_confirm_no_btn_ = nullptr;
+  cfg_confirm_no_label_ = nullptr;
 
   contacts_dialog_ = nullptr;
   contacts_status_label_ = nullptr;
@@ -2782,6 +2793,12 @@ void StandaloneUi::bindInputGroup() {
   if (cfg_close_btn_) {
     lv_group_add_obj(key_group_, cfg_close_btn_);
   }
+  if (cfg_confirm_no_btn_) {
+    lv_group_add_obj(key_group_, cfg_confirm_no_btn_);
+  }
+  if (cfg_confirm_yes_btn_) {
+    lv_group_add_obj(key_group_, cfg_confirm_yes_btn_);
+  }
   for (uint8_t i = 0; i < kShortcutCount; i++) {
     lv_group_add_obj(key_group_, shortcut_btns_[i]);
   }
@@ -3058,26 +3075,55 @@ void StandaloneUi::showSplash(const char* node_name, uint32_t duration_ms) {
 #else
   const char* version_str = "dev";
 #endif
-  lv_obj_t* subtitle = lv_label_create(card);
+  lv_obj_t* subtitle_parent = card;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  subtitle_parent = overlay;
+#endif
+  lv_obj_t* subtitle = lv_label_create(subtitle_parent);
   lv_label_set_text(subtitle, version_str);
   lv_obj_set_style_text_color(subtitle, lv_color_hex(kSplashSubtitle), LV_PART_MAIN);
   const lv_font_t* subtitle_font = &lv_font_montserrat_14;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  subtitle_font = &lv_font_montserrat_10;
+#elif defined(LV_FONT_MONTSERRAT_8) && LV_FONT_MONTSERRAT_8
+  subtitle_font = &lv_font_montserrat_8;
+#elif defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  subtitle_font = &lv_font_montserrat_12;
+#endif
+#else
 #if defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
   subtitle_font = &lv_font_montserrat_12;
 #elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
   subtitle_font = &lv_font_montserrat_10;
 #endif
+#endif
   lv_obj_set_style_text_font(subtitle, subtitle_font, LV_PART_MAIN);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  lv_obj_set_style_text_align(subtitle, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+  lv_obj_align(subtitle, LV_ALIGN_TOP_RIGHT, -12, 4);
+#else
   lv_obj_align_to(subtitle, title, LV_ALIGN_OUT_BOTTOM_MID, 0, tiny ? 2 : 6);
+#endif
 
   // Node name (if available) in the same font/size as the version, pinned
   // toward the bottom of the card.
   if (node_name && node_name[0] != '\0') {
     lv_obj_t* node_label = lv_label_create(card);
+    const lv_font_t* node_font = subtitle_font;
+  #if defined(DEVICE_CARDPUTER_LORA_HAT)
+  #if defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+    node_font = &lv_font_montserrat_12;
+  #elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+    node_font = &lv_font_montserrat_10;
+  #else
+    node_font = &lv_font_montserrat_14;
+  #endif
+  #endif
     lv_label_set_long_mode(node_label, LV_LABEL_LONG_DOT);
     lv_obj_set_width(node_label, static_cast<lv_coord_t>(card_w - (tiny ? 12 : 24)));
     lv_obj_set_style_text_color(node_label, lv_color_hex(kSplashSubtitle), LV_PART_MAIN);
-    lv_obj_set_style_text_font(node_label, subtitle_font, LV_PART_MAIN);
+    lv_obj_set_style_text_font(node_label, node_font, LV_PART_MAIN);
     lv_obj_set_style_text_align(node_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(node_label, node_name);
     lv_obj_align(node_label, LV_ALIGN_BOTTOM_MID, 0, -(tiny ? 4 : 10));
@@ -3265,73 +3311,86 @@ void StandaloneUi::refreshSelectorVisuals() {
 
   const bool contacts_mode = contacts_open_;
   const char* active_name = "-";
-  size_t selector_char_cap = 1;
 
   if (contacts_mode) {
     if (contacts_count_ > 0) {
       const uint8_t selected = contacts_selected_index_ < contacts_count_ ? contacts_selected_index_ : 0;
       active_name = contacts_cache_[selected].name;
-      selector_char_cap = strlen(active_name);
-      if (selector_char_cap == 0) {
-        selector_char_cap = 1;
-      }
-      if (channel_dropdown_open_) {
-        selector_char_cap = 1;
-        for (uint8_t i = 0; i < contacts_count_; i++) {
-          const size_t display_len = strlen(contacts_cache_[i].name);
-          if (display_len > selector_char_cap) {
-            selector_char_cap = display_len;
-          }
-        }
-      }
     }
   } else {
     active_name = (configured_channel_count_ > 0) ? configured_channel_names_[active_channel_] : "-";
-    selector_char_cap = channelDisplayLenForDropdown(active_name);
-    if (channel_dropdown_open_) {
-      selector_char_cap = 1;
-      for (uint8_t i = 0; i < configured_channel_count_; i++) {
-        const size_t display_len = channelDisplayLenForDropdown(configured_channel_names_[i]);
-        if (display_len > selector_char_cap) {
-          selector_char_cap = display_len;
-        }
-      }
-    }
   }
 
   char selector_text[48] = {};
-  formatChannelLabelForSelector(active_name, selector_char_cap, selector_text, sizeof(selector_text));
-  lv_label_set_text(channel_selector_label_, selector_text);
-  lv_label_set_text(channel_selector_caret_, "");
-
   lv_coord_t selector_max_w = kSelectorMaxW;
-  if (contacts_mode && header_bar_) {
+  const lv_coord_t selector_min_w = contacts_mode ? kSelectorMinW : static_cast<lv_coord_t>(kSelectorMinW + 8);
+  if (header_bar_) {
     const lv_coord_t header_w = lv_obj_get_width(header_bar_);
-    // Keep symmetric edge spacing: selector is aligned at x=+2, so cap width
-    // to leave ~2px on the right side as well.
-    const lv_coord_t contacts_cap_w = static_cast<lv_coord_t>(header_w - 4);
-    if (contacts_cap_w > kSelectorMinW) {
-      selector_max_w = contacts_cap_w;
+    if (contacts_mode) {
+      // Contacts mode: cap selector to 3/4 of header and keep a right-side
+      // buffer so the control does not crowd adjacent header content.
+      const lv_coord_t contacts_cap_w =
+          static_cast<lv_coord_t>((header_w * 3) / 4 - kContactsSelectorRightBuffer);
+      if (contacts_cap_w > selector_min_w) {
+        selector_max_w = contacts_cap_w;
+      }
+    } else {
+      // Channel mode: allow selector growth up to half of header width.
+      const lv_coord_t channels_cap_w =
+          static_cast<lv_coord_t>((header_w / 2) - kChannelSelectorRightBuffer);
+      selector_max_w = channels_cap_w > selector_min_w ? channels_cap_w : selector_min_w;
     }
   }
 
-    const lv_coord_t selector_hpad = contacts_mode ? 24 : 18;
-    const size_t max_chars_for_width =
-      selector_max_w > selector_hpad
-        ? static_cast<size_t>((selector_max_w - selector_hpad) / 7)
-        : static_cast<size_t>(1);
-  if (selector_char_cap > max_chars_for_width) {
-    selector_char_cap = max_chars_for_width;
-    formatChannelLabelForSelector(active_name, selector_char_cap, selector_text, sizeof(selector_text));
+  const lv_coord_t selector_hpad = contacts_mode ? 8 : 18;
+  const lv_coord_t selector_label_pad =
+      contacts_mode ? kContactsSelectorLabelHorizontalPad : kSelectorLabelHorizontalPad;
+  lv_coord_t selector_w = selector_min_w;
+  if (contacts_mode) {
+    // Contacts mode: render full selected name and size button from measured
+    // text width, then cap at 3/4 header width.
+    formatChannelLabelForSelector(active_name, 0, selector_text, sizeof(selector_text));
     lv_label_set_text(channel_selector_label_, selector_text);
+
+    const lv_font_t* selector_font =
+        reinterpret_cast<const lv_font_t*>(lv_obj_get_style_text_font(channel_selector_label_, LV_PART_MAIN));
+    lv_point_t txt_size{};
+    lv_txt_get_size(&txt_size, selector_text, selector_font,
+                    lv_obj_get_style_text_letter_space(channel_selector_label_, LV_PART_MAIN),
+                    lv_obj_get_style_text_line_space(channel_selector_label_, LV_PART_MAIN), LV_COORD_MAX,
+                    LV_TEXT_FLAG_NONE);
+
+    const lv_coord_t desired_w =
+      static_cast<lv_coord_t>(txt_size.x + selector_hpad + (selector_label_pad * 2));
+    selector_w = clampCoord(desired_w, selector_min_w, selector_max_w);
+  } else {
+    // Channel mode: size from full selected channel name and cap at half header.
+    formatChannelLabelForSelector(active_name, 0, selector_text, sizeof(selector_text));
+    lv_label_set_text(channel_selector_label_, selector_text);
+
+    const lv_font_t* selector_font =
+        reinterpret_cast<const lv_font_t*>(lv_obj_get_style_text_font(channel_selector_label_, LV_PART_MAIN));
+    lv_point_t txt_size{};
+    lv_txt_get_size(&txt_size, selector_text, selector_font,
+                    lv_obj_get_style_text_letter_space(channel_selector_label_, LV_PART_MAIN),
+                    lv_obj_get_style_text_line_space(channel_selector_label_, LV_PART_MAIN), LV_COORD_MAX,
+                    LV_TEXT_FLAG_NONE);
+
+    const lv_coord_t desired_w =
+        static_cast<lv_coord_t>(txt_size.x + selector_hpad + (selector_label_pad * 2));
+    selector_w = clampCoord(desired_w, selector_min_w, selector_max_w);
   }
 
-  const lv_coord_t selector_w = clampCoord(static_cast<lv_coord_t>(selector_char_cap * 7 + selector_hpad),
-                                           kSelectorMinW, selector_max_w);
+  lv_label_set_text(channel_selector_caret_, "");
   const lv_coord_t dropdown_min_w =
       static_cast<lv_coord_t>((kDropdownNameMaxChars + 3) * 7 + 16);
   lv_obj_set_width(channel_selector_btn_, selector_w);
   lv_obj_align(channel_selector_btn_, LV_ALIGN_LEFT_MID, 2, 0);
+  lv_obj_set_width(channel_selector_label_,
+                   static_cast<lv_coord_t>(selector_w > (selector_label_pad * 2)
+                                                ? selector_w - (selector_label_pad * 2)
+                                                : 1));
+  lv_obj_align(channel_selector_label_, LV_ALIGN_LEFT_MID, selector_label_pad, 0);
   lv_obj_set_width(channel_dropdown_panel_, clampCoord(dropdown_min_w, selector_w, selector_max_w) + 12);
 
   bool has_unread_channel = false;
@@ -5527,12 +5586,10 @@ void StandaloneUi::refreshCfgDialog() {
   snprintf(row_text, sizeof(row_text), "Mesh Region: %s",
            web_settings.mesh_region[0] ? web_settings.mesh_region : "(unfiltered)");
   lv_label_set_text(cfg_row_labels_[kCfgRowMeshRegion], row_text);
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   lv_label_set_text(cfg_row_labels_[kCfgRowExportConfig], "Export Config to SD");
-  lv_label_set_text(cfg_row_labels_[kCfgRowImportConfig], cfg_import_confirm_armed_ ? "Import Config [PRESS ENTER AGAIN]"
-                                                                                      : "Import Config to SD");
-  lv_label_set_text(cfg_row_labels_[kCfgRowDeleteConfig], cfg_delete_confirm_armed_ ? "Delete Config [PRESS ENTER AGAIN]"
-                                                                                      : "Delete Config from SD");
+  lv_label_set_text(cfg_row_labels_[kCfgRowImportConfig], "Import Config from SD");
+  lv_label_set_text(cfg_row_labels_[kCfgRowDeleteConfig], "Delete Config from SD");
 #endif
 
   for (uint8_t i = 0; i < kCfgRowCount; i++) {
@@ -5556,11 +5613,14 @@ void StandaloneUi::openCfgDialog() {
   }
   cfg_open_ = true;
   cfg_selected_row_ = 0;
-  cfg_import_confirm_armed_ = false;
-  cfg_delete_confirm_armed_ = false;
+  cfg_confirm_open_ = false;
+  cfg_confirm_pending_row_ = 0xFF;
   cfg_action_text_[0] = '\0';
   cfg_status_text_[0] = '\0';
   lv_obj_clear_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
+  if (cfg_confirm_backdrop_) {
+    lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  }
   if (shortcut_strip_) {
     lv_obj_add_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
   }
@@ -5575,9 +5635,8 @@ void StandaloneUi::closeCfgDialog(bool focus_chat) {
   if (!cfg_open_ || !cfg_dialog_) {
     return;
   }
+  closeCfgConfirmDialog();
   cfg_open_ = false;
-  cfg_import_confirm_armed_ = false;
-  cfg_delete_confirm_armed_ = false;
   lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
   if (shortcut_strip_) {
     lv_obj_clear_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
@@ -5600,14 +5659,6 @@ void StandaloneUi::moveCfgSelection(int delta) {
     next = 0;
   }
   cfg_selected_row_ = static_cast<uint8_t>(next);
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (cfg_selected_row_ != kCfgRowImportConfig) {
-    cfg_import_confirm_armed_ = false;
-  }
-  if (cfg_selected_row_ != kCfgRowDeleteConfig) {
-    cfg_delete_confirm_armed_ = false;
-  }
-#endif
   refreshCfgDialog();
   if (key_group_ && cfg_rows_[cfg_selected_row_]) {
     lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
@@ -5666,17 +5717,24 @@ bool StandaloneUi::setGpsEnabled(bool enabled) {
   plumeria::web::loadSettings(&web_settings);
   // In this screen, GPS ON means use live GPS; GPS OFF means use default coords.
   const bool use_default_location = !enabled;
+  Serial.printf("[GPSDBG][UI] setGpsEnabled request enabled=%d use_default_location=%d current_send_loc_adv=%d\n",
+                enabled ? 1 : 0, use_default_location ? 1 : 0,
+                web_settings.send_location_in_advert ? 1 : 0);
   if (web_settings.send_location_in_advert == use_default_location) {
+    Serial.println("[GPSDBG][UI] setGpsEnabled no-op (already requested state)");
     return true;
   }
 
   // Apply immediately to runtime mesh even when web config is currently disabled.
   if (mesh_adapter_ &&
       !mesh_adapter_->setAdvertLocation(use_default_location, web_settings.node_latitude, web_settings.node_longitude)) {
+    Serial.println("[GPSDBG][UI] setAdvertLocation failed");
     return false;
   }
+  bool mesh_gps_ok = true;
   if (mesh_adapter_) {
-    mesh_adapter_->setGpsEnabled(enabled);
+    mesh_gps_ok = mesh_adapter_->setGpsEnabled(enabled);
+    Serial.printf("[GPSDBG][UI] mesh setGpsEnabled(%d) => %d\n", enabled ? 1 : 0, mesh_gps_ok ? 1 : 0);
   }
   if (mesh_adapter_) {
     mesh_adapter_->broadcastSelfAdvertNow();
@@ -5684,6 +5742,13 @@ bool StandaloneUi::setGpsEnabled(bool enabled) {
 
   char err[96] = {};
   const bool ok = plumeria::web::setSendLocationInAdvert(use_default_location, err, sizeof(err));
+  Serial.printf("[GPSDBG][UI] web setSendLocationInAdvert(%d) => %d err=%s\n",
+                use_default_location ? 1 : 0, ok ? 1 : 0, err[0] ? err : "(none)");
+  plumeria::web::WebSettings verify{};
+  plumeria::web::loadSettings(&verify);
+  Serial.printf("[GPSDBG][UI] persisted send_loc_adv=%d => gps_enabled=%d\n",
+                verify.send_location_in_advert ? 1 : 0,
+                verify.send_location_in_advert ? 0 : 1);
   if (ok && started_) {
     refreshHeaderVisuals();
   }
@@ -5765,15 +5830,507 @@ bool StandaloneUi::deleteConfigFromSd() {
   return true;
 }
 
-void StandaloneUi::activateCfgSelection() {
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (cfg_selected_row_ != kCfgRowImportConfig) {
-    cfg_import_confirm_armed_ = false;
+bool StandaloneUi::ensureCfgConfirmDialogBuilt() {
+  if (cfg_confirm_backdrop_ && cfg_confirm_dialog_ && cfg_confirm_action_label_ &&
+      cfg_confirm_yes_btn_ && cfg_confirm_no_btn_) {
+    return true;
   }
-  if (cfg_selected_row_ != kCfgRowDeleteConfig) {
-    cfg_delete_confirm_armed_ = false;
+  if (!root_) {
+    return false;
   }
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  if (!cfg_dialog_) {
+    return false;
+  }
+
+  // Cardputer: compact in-dialog modal to minimize allocations and avoid
+  // full-screen overlay creation failures.
+  cfg_confirm_backdrop_ = lv_obj_create(cfg_dialog_);
+  if (!cfg_confirm_backdrop_) {
+    return false;
+  }
+  cfg_confirm_dialog_ = cfg_confirm_backdrop_;
+  lv_obj_set_size(cfg_confirm_backdrop_, LV_PCT(95), LV_SIZE_CONTENT);
+  lv_obj_align(cfg_confirm_backdrop_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(cfg_confirm_backdrop_, lv_color_hex(0x0E285B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(cfg_confirm_backdrop_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(cfg_confirm_backdrop_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(cfg_confirm_backdrop_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(cfg_confirm_backdrop_, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(cfg_confirm_backdrop_, 6, LV_PART_MAIN);
+  lv_obj_set_flex_flow(cfg_confirm_backdrop_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(cfg_confirm_backdrop_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_event_cb(cfg_confirm_backdrop_, onFocusableEvent, LV_EVENT_CLICKED, this);
+
+  cfg_confirm_title_label_ = lv_label_create(cfg_confirm_backdrop_);
+  if (!cfg_confirm_title_label_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    return false;
+  }
+  lv_obj_set_width(cfg_confirm_title_label_, LV_PCT(100));
+  lv_obj_set_style_text_align(cfg_confirm_title_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(cfg_confirm_title_label_, lv_color_hex(0xD9E8FF), LV_PART_MAIN);
+  lv_label_set_text(cfg_confirm_title_label_, "Confirm?");
+
+  cfg_confirm_action_label_ = lv_label_create(cfg_confirm_backdrop_);
+  if (!cfg_confirm_action_label_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_width(cfg_confirm_action_label_, LV_PCT(100));
+  lv_obj_set_style_text_align(cfg_confirm_action_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(cfg_confirm_action_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(cfg_confirm_action_label_, &lv_font_montserrat_10, LV_PART_MAIN);
 #endif
+  lv_label_set_long_mode(cfg_confirm_action_label_, LV_LABEL_LONG_WRAP);
+  lv_label_set_text(cfg_confirm_action_label_, "Action");
+
+  lv_obj_t* cfg_confirm_btn_row = lv_obj_create(cfg_confirm_backdrop_);
+  if (!cfg_confirm_btn_row) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_width(cfg_confirm_btn_row, LV_PCT(100));
+  lv_obj_set_height(cfg_confirm_btn_row, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(cfg_confirm_btn_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_opa(cfg_confirm_btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(cfg_confirm_btn_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(cfg_confirm_btn_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(cfg_confirm_btn_row, 6, LV_PART_MAIN);
+  lv_obj_set_flex_flow(cfg_confirm_btn_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(cfg_confirm_btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  cfg_confirm_no_btn_ = lv_btn_create(cfg_confirm_btn_row);
+  if (!cfg_confirm_no_btn_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_height(cfg_confirm_no_btn_, 30);
+  lv_obj_set_style_min_width(cfg_confirm_no_btn_, 70, LV_PART_MAIN);
+  lv_obj_add_style(cfg_confirm_no_btn_, &style_button_, 0);
+  lv_obj_add_style(cfg_confirm_no_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_set_style_bg_color(cfg_confirm_no_btn_, lv_color_hex(0x6B3030), LV_PART_MAIN);
+  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  cfg_confirm_no_label_ = lv_label_create(cfg_confirm_no_btn_);
+  if (!cfg_confirm_no_label_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    cfg_confirm_no_btn_ = nullptr;
+    return false;
+  }
+  lv_obj_set_style_text_color(cfg_confirm_no_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(cfg_confirm_no_label_, "(N)o");
+  lv_obj_center(cfg_confirm_no_label_);
+
+  cfg_confirm_yes_btn_ = lv_btn_create(cfg_confirm_btn_row);
+  if (!cfg_confirm_yes_btn_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    cfg_confirm_no_btn_ = nullptr;
+    cfg_confirm_no_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_height(cfg_confirm_yes_btn_, 30);
+  lv_obj_set_style_min_width(cfg_confirm_yes_btn_, 70, LV_PART_MAIN);
+  lv_obj_add_style(cfg_confirm_yes_btn_, &style_button_, 0);
+  lv_obj_add_style(cfg_confirm_yes_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_set_style_bg_color(cfg_confirm_yes_btn_, lv_color_hex(0x2F6B30), LV_PART_MAIN);
+  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  cfg_confirm_yes_label_ = lv_label_create(cfg_confirm_yes_btn_);
+  if (!cfg_confirm_yes_label_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    cfg_confirm_no_btn_ = nullptr;
+    cfg_confirm_no_label_ = nullptr;
+    cfg_confirm_yes_btn_ = nullptr;
+    return false;
+  }
+  lv_obj_set_style_text_color(cfg_confirm_yes_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(cfg_confirm_yes_label_, "(Y)es");
+  lv_obj_center(cfg_confirm_yes_label_);
+
+  if (key_group_) {
+    lv_group_add_obj(key_group_, cfg_confirm_no_btn_);
+    lv_group_add_obj(key_group_, cfg_confirm_yes_btn_);
+  }
+
+  return true;
+#else
+
+  lv_coord_t main_w = lv_obj_get_width(main_panel_ ? main_panel_ : root_);
+  lv_coord_t main_h = lv_obj_get_height(main_panel_ ? main_panel_ : root_);
+  if (main_w <= 0) {
+    main_w = lv_obj_get_width(root_);
+  }
+  if (main_h <= 0) {
+    main_h = lv_obj_get_height(root_);
+  }
+
+  cfg_confirm_backdrop_ = lv_obj_create(root_);
+  if (!cfg_confirm_backdrop_) {
+    return false;
+  }
+  lv_obj_set_size(cfg_confirm_backdrop_, LV_PCT(100), LV_PCT(100));
+  lv_obj_align(cfg_confirm_backdrop_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(cfg_confirm_backdrop_, lv_color_hex(0x000000), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(cfg_confirm_backdrop_, LV_OPA_40, LV_PART_MAIN);
+  lv_obj_set_style_border_width(cfg_confirm_backdrop_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(cfg_confirm_backdrop_, 0, LV_PART_MAIN);
+  lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_event_cb(cfg_confirm_backdrop_, onFocusableEvent, LV_EVENT_CLICKED, this);
+
+  cfg_confirm_dialog_ = lv_obj_create(cfg_confirm_backdrop_);
+  if (!cfg_confirm_dialog_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    return false;
+  }
+  lv_obj_set_size(cfg_confirm_dialog_, clampCoord(main_w - 20, 160, 300), LV_SIZE_CONTENT);
+  lv_obj_align(cfg_confirm_dialog_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(cfg_confirm_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(cfg_confirm_dialog_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(cfg_confirm_dialog_, lv_color_hex(0x0E285B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(cfg_confirm_dialog_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(cfg_confirm_dialog_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(cfg_confirm_dialog_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(cfg_confirm_dialog_, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(cfg_confirm_dialog_, 10, LV_PART_MAIN);
+  lv_obj_set_flex_flow(cfg_confirm_dialog_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(cfg_confirm_dialog_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_event_cb(cfg_confirm_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+
+  cfg_confirm_title_label_ = lv_label_create(cfg_confirm_dialog_);
+  if (!cfg_confirm_title_label_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    return false;
+  }
+  lv_obj_set_width(cfg_confirm_title_label_, LV_PCT(100));
+  lv_obj_set_style_text_align(cfg_confirm_title_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+#if defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
+  lv_obj_set_style_text_font(cfg_confirm_title_label_, &lv_font_montserrat_16, LV_PART_MAIN);
+#endif
+  lv_obj_set_style_text_color(cfg_confirm_title_label_, lv_color_hex(0xD9E8FF), LV_PART_MAIN);
+  lv_label_set_text(cfg_confirm_title_label_, "Confirm?");
+
+  lv_obj_t* cfg_confirm_action_box = lv_obj_create(cfg_confirm_dialog_);
+  if (!cfg_confirm_action_box) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_width(cfg_confirm_action_box, LV_PCT(100));
+  lv_obj_set_height(cfg_confirm_action_box, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(cfg_confirm_action_box, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_color(cfg_confirm_action_box, lv_color_hex(0x123266), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(cfg_confirm_action_box, LV_OPA_60, LV_PART_MAIN);
+  lv_obj_set_style_border_width(cfg_confirm_action_box, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(cfg_confirm_action_box, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_left(cfg_confirm_action_box, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(cfg_confirm_action_box, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(cfg_confirm_action_box, 4, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(cfg_confirm_action_box, 4, LV_PART_MAIN);
+  lv_obj_add_event_cb(cfg_confirm_action_box, onFocusableEvent, LV_EVENT_CLICKED, this);
+
+  cfg_confirm_action_label_ = lv_label_create(cfg_confirm_action_box);
+  if (!cfg_confirm_action_label_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_width(cfg_confirm_action_label_, LV_PCT(100));
+  lv_obj_set_style_text_align(cfg_confirm_action_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(cfg_confirm_action_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+#if defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  lv_obj_set_style_text_font(cfg_confirm_action_label_, &lv_font_montserrat_12, LV_PART_MAIN);
+#endif
+  lv_label_set_long_mode(cfg_confirm_action_label_, LV_LABEL_LONG_WRAP);
+  lv_label_set_text(cfg_confirm_action_label_, "Action");
+
+  lv_obj_t* cfg_confirm_btn_row = lv_obj_create(cfg_confirm_dialog_);
+  if (!cfg_confirm_btn_row) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_width(cfg_confirm_btn_row, LV_PCT(100));
+  lv_obj_set_height(cfg_confirm_btn_row, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(cfg_confirm_btn_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_opa(cfg_confirm_btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(cfg_confirm_btn_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(cfg_confirm_btn_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(cfg_confirm_btn_row, 10, LV_PART_MAIN);
+  lv_obj_set_flex_flow(cfg_confirm_btn_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(cfg_confirm_btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  cfg_confirm_no_btn_ = lv_btn_create(cfg_confirm_btn_row);
+  if (!cfg_confirm_no_btn_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_height(cfg_confirm_no_btn_, 34);
+  lv_obj_set_style_min_width(cfg_confirm_no_btn_, 84, LV_PART_MAIN);
+  lv_obj_add_style(cfg_confirm_no_btn_, &style_button_, 0);
+  lv_obj_add_style(cfg_confirm_no_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_set_style_bg_color(cfg_confirm_no_btn_, lv_color_hex(0x6B3030), LV_PART_MAIN);
+  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  cfg_confirm_no_label_ = lv_label_create(cfg_confirm_no_btn_);
+  if (!cfg_confirm_no_label_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    cfg_confirm_no_btn_ = nullptr;
+    return false;
+  }
+  lv_obj_set_style_text_color(cfg_confirm_no_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(cfg_confirm_no_label_, "(N)o");
+  lv_obj_center(cfg_confirm_no_label_);
+
+  cfg_confirm_yes_btn_ = lv_btn_create(cfg_confirm_btn_row);
+  if (!cfg_confirm_yes_btn_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    cfg_confirm_no_btn_ = nullptr;
+    cfg_confirm_no_label_ = nullptr;
+    return false;
+  }
+  lv_obj_set_height(cfg_confirm_yes_btn_, 34);
+  lv_obj_set_style_min_width(cfg_confirm_yes_btn_, 84, LV_PART_MAIN);
+  lv_obj_add_style(cfg_confirm_yes_btn_, &style_button_, 0);
+  lv_obj_add_style(cfg_confirm_yes_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_set_style_bg_color(cfg_confirm_yes_btn_, lv_color_hex(0x2F6B30), LV_PART_MAIN);
+  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  cfg_confirm_yes_label_ = lv_label_create(cfg_confirm_yes_btn_);
+  if (!cfg_confirm_yes_label_) {
+    lv_obj_del(cfg_confirm_backdrop_);
+    cfg_confirm_backdrop_ = nullptr;
+    cfg_confirm_dialog_ = nullptr;
+    cfg_confirm_title_label_ = nullptr;
+    cfg_confirm_action_label_ = nullptr;
+    cfg_confirm_no_btn_ = nullptr;
+    cfg_confirm_no_label_ = nullptr;
+    cfg_confirm_yes_btn_ = nullptr;
+    return false;
+  }
+  lv_obj_set_style_text_color(cfg_confirm_yes_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(cfg_confirm_yes_label_, "(Y)es");
+  lv_obj_center(cfg_confirm_yes_label_);
+
+  if (key_group_) {
+    lv_group_add_obj(key_group_, cfg_confirm_no_btn_);
+    lv_group_add_obj(key_group_, cfg_confirm_yes_btn_);
+  }
+
+  return true;
+#endif
+}
+
+bool StandaloneUi::cfgActionNeedsConfirm(uint8_t row) const {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+  return row == kCfgRowExportConfig || row == kCfgRowImportConfig || row == kCfgRowDeleteConfig;
+#else
+  (void)row;
+  return false;
+#endif
+}
+
+const char* StandaloneUi::cfgConfirmActionText(uint8_t row) const {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+  switch (row) {
+    case kCfgRowExportConfig:
+      return "Export config to SD";
+    case kCfgRowImportConfig:
+      return "Import config from SD";
+    case kCfgRowDeleteConfig:
+      return "Delete config from SD";
+    default:
+      break;
+  }
+#else
+  (void)row;
+#endif
+  return "Run action";
+}
+
+void StandaloneUi::openCfgConfirmDialog(uint8_t row) {
+  if (!cfg_dialog_) {
+    return;
+  }
+  if (!ensureCfgConfirmDialogBuilt()) {
+    strncpy(cfg_status_text_, "Confirm dialog unavailable", sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    strncpy(cfg_action_text_, "Action blocked", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    refreshCfgDialog();
+    return;
+  }
+
+  cfg_confirm_pending_row_ = row;
+  cfg_confirm_open_ = true;
+  cfg_confirm_swallow_first_click_ = true;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  cfg_confirm_guard_until_ms_ = millis() + 1200;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+  cfg_confirm_guard_until_ms_ = millis() + 550;
+#else
+  cfg_confirm_guard_until_ms_ = millis() + 250;
+#endif
+  lv_label_set_text_fmt(cfg_confirm_action_label_, "Action: %s", cfgConfirmActionText(row));
+  lv_obj_clear_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  if (cfg_dialog_) {
+    lv_obj_move_foreground(cfg_dialog_);
+  }
+  lv_obj_move_foreground(cfg_confirm_backdrop_);
+  if (key_group_ && cfg_confirm_no_btn_) {
+    lv_group_focus_obj(cfg_confirm_no_btn_);
+  }
+}
+
+void StandaloneUi::closeCfgConfirmDialog() {
+  cfg_confirm_open_ = false;
+  cfg_confirm_pending_row_ = 0xFF;
+  cfg_confirm_guard_until_ms_ = 0;
+  cfg_confirm_swallow_first_click_ = false;
+  if (cfg_confirm_backdrop_) {
+    lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (cfg_open_ && key_group_ && cfg_rows_[cfg_selected_row_]) {
+    lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
+  }
+}
+
+void StandaloneUi::performCfgConfirmedAction(uint8_t row) {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+  switch (row) {
+    case kCfgRowExportConfig:
+      if (exportConfigToSd()) {
+        strncpy(cfg_action_text_, "Config exported", sizeof(cfg_action_text_) - 1);
+      } else {
+        if (cfg_status_text_[0] == '\0') {
+          strncpy(cfg_status_text_, "Export failed", sizeof(cfg_status_text_) - 1);
+        }
+        strncpy(cfg_action_text_, "Export failed", sizeof(cfg_action_text_) - 1);
+      }
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      break;
+    case kCfgRowImportConfig:
+      if (importConfigFromSd()) {
+        strncpy(cfg_status_text_, "Import applied. Rebooting...", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Config imported", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+        refreshCfgDialog();
+        delay(120);
+        ESP.restart();
+      } else {
+        strncpy(cfg_action_text_, "Import failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+      break;
+    case kCfgRowDeleteConfig:
+      if (deleteConfigFromSd()) {
+        strncpy(cfg_action_text_, "Config deleted", sizeof(cfg_action_text_) - 1);
+      } else {
+        strncpy(cfg_action_text_, "Delete failed", sizeof(cfg_action_text_) - 1);
+      }
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      break;
+    default:
+      break;
+  }
+#else
+  (void)row;
+#endif
+}
+
+void StandaloneUi::acceptCfgConfirmDialog() {
+  if (!cfg_confirm_open_) {
+    return;
+  }
+  const uint8_t row = cfg_confirm_pending_row_;
+  closeCfgConfirmDialog();
+  performCfgConfirmedAction(row);
+  refreshCfgDialog();
+}
+
+void StandaloneUi::activateCfgSelection() {
+  const uint32_t now = millis();
+  if (cfg_selected_row_ == last_cfg_action_row_ &&
+      now - last_cfg_action_ms_ < kCfgActionRepeatGuardMs) {
+    Serial.printf("[GPSDBG][CFG] debounce row=%u now=%lu last=%lu\n",
+                  static_cast<unsigned>(cfg_selected_row_), static_cast<unsigned long>(now),
+                  static_cast<unsigned long>(last_cfg_action_ms_));
+    return;
+  }
+  last_cfg_action_ms_ = now;
+  last_cfg_action_row_ = cfg_selected_row_;
+
+  Serial.printf("[GPSDBG][CFG] activate row=%u at=%lu\n", static_cast<unsigned>(cfg_selected_row_),
+                static_cast<unsigned long>(now));
+
+  if (cfgActionNeedsConfirm(cfg_selected_row_)) {
+    openCfgConfirmDialog(cfg_selected_row_);
+    return;
+  }
 
   switch (cfg_selected_row_) {
     case kCfgRowNodeName:
@@ -5817,14 +6374,19 @@ void StandaloneUi::activateCfgSelection() {
       plumeria::web::loadSettings(&web_settings);
       const bool gps_enabled = !web_settings.send_location_in_advert;
       const bool next_enabled = !gps_enabled;
+      Serial.printf("[GPSDBG][CFG] row_gps current_enabled=%d send_loc_adv=%d next_enabled=%d\n",
+                    gps_enabled ? 1 : 0, web_settings.send_location_in_advert ? 1 : 0,
+                    next_enabled ? 1 : 0);
       if (setGpsEnabled(next_enabled)) {
         strncpy(cfg_status_text_, next_enabled ? "GPS enabled" : "GPS disabled (using default location)",
                 sizeof(cfg_status_text_) - 1);
         strncpy(cfg_action_text_, next_enabled ? "GPS turned on" : "GPS turned off",
                 sizeof(cfg_action_text_) - 1);
+        Serial.printf("[GPSDBG][CFG] row_gps result=ok next_enabled=%d\n", next_enabled ? 1 : 0);
       } else {
         strncpy(cfg_status_text_, "GPS toggle failed", sizeof(cfg_status_text_) - 1);
         strncpy(cfg_action_text_, "GPS toggle failed", sizeof(cfg_action_text_) - 1);
+        Serial.printf("[GPSDBG][CFG] row_gps result=fail next_enabled=%d\n", next_enabled ? 1 : 0);
       }
       cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
       cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
@@ -5868,56 +6430,15 @@ void StandaloneUi::activateCfgSelection() {
       }
       break;
     }
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     case kCfgRowExportConfig:
-      if (exportConfigToSd()) {
-        strncpy(cfg_action_text_, "Config exported", sizeof(cfg_action_text_) - 1);
-      } else {
-        if (cfg_status_text_[0] == '\0') {
-          strncpy(cfg_status_text_, "Export failed", sizeof(cfg_status_text_) - 1);
-        }
-        strncpy(cfg_action_text_, "Export failed", sizeof(cfg_action_text_) - 1);
-      }
-      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      openCfgConfirmDialog(cfg_selected_row_);
       break;
     case kCfgRowImportConfig:
-      if (!cfg_import_confirm_armed_) {
-        cfg_import_confirm_armed_ = true;
-        strncpy(cfg_status_text_, "Press Enter again to confirm import", sizeof(cfg_status_text_) - 1);
-        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-        strncpy(cfg_action_text_, "Import armed", sizeof(cfg_action_text_) - 1);
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-      } else if (importConfigFromSd()) {
-        cfg_import_confirm_armed_ = false;
-        strncpy(cfg_status_text_, "Import applied. Rebooting...", sizeof(cfg_status_text_) - 1);
-        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-        strncpy(cfg_action_text_, "Config imported", sizeof(cfg_action_text_) - 1);
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-        refreshCfgDialog();
-        delay(120);
-        ESP.restart();
-      } else {
-        strncpy(cfg_action_text_, "Import failed", sizeof(cfg_action_text_) - 1);
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-      }
+      openCfgConfirmDialog(cfg_selected_row_);
       break;
     case kCfgRowDeleteConfig:
-      if (!cfg_delete_confirm_armed_) {
-        cfg_delete_confirm_armed_ = true;
-        strncpy(cfg_status_text_, "Press Enter again to confirm delete", sizeof(cfg_status_text_) - 1);
-        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-        strncpy(cfg_action_text_, "Delete armed", sizeof(cfg_action_text_) - 1);
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-      } else {
-        cfg_delete_confirm_armed_ = false;
-        if (deleteConfigFromSd()) {
-          strncpy(cfg_action_text_, "Config deleted", sizeof(cfg_action_text_) - 1);
-        } else {
-          strncpy(cfg_action_text_, "Delete failed", sizeof(cfg_action_text_) - 1);
-        }
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-      }
+      openCfgConfirmDialog(cfg_selected_row_);
       break;
 #endif
     default:
@@ -6080,16 +6601,23 @@ void StandaloneUi::refreshHeaderVisuals() {
   }
 
   if (!hide_wireless_icons) {
-    lv_obj_align_to(gps_label_, channel_selector_btn_, LV_ALIGN_OUT_RIGHT_MID, kHeaderTimeGap, 0);
-    lv_obj_align_to(wifi_label_, gps_label_, LV_ALIGN_OUT_RIGHT_MID, kHeaderIconsGap, 0);
+    if (!hide_battery_pct) {
+      lv_obj_align_to(wifi_label_, battery_pct_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
+    } else if (!hide_battery_bar) {
+      lv_obj_align_to(wifi_label_, battery_bar_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
+    } else {
+      lv_obj_align(wifi_label_, LV_ALIGN_RIGHT_MID, -kHeaderIconsToBatteryGap, 0);
+    }
+    lv_obj_align_to(gps_label_, wifi_label_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsGap, 0);
     lv_obj_align_to(wifi_ap_badge_label_, wifi_label_, LV_ALIGN_TOP_RIGHT, 4, -4);
   }
   if (!hide_time_label) {
-    const lv_coord_t left_anchor_right_x = hide_wireless_icons
-        ? static_cast<lv_coord_t>(lv_obj_get_x(channel_selector_btn_) + lv_obj_get_width(channel_selector_btn_))
-        : static_cast<lv_coord_t>(lv_obj_get_x(wifi_label_) + lv_obj_get_width(wifi_label_));
-    const lv_coord_t batt_left_x = static_cast<lv_coord_t>(lv_obj_get_x(battery_bar_));
-    const lv_coord_t time_center_x = static_cast<lv_coord_t>((left_anchor_right_x + batt_left_x) / 2);
+    const lv_coord_t selector_right_x =
+        static_cast<lv_coord_t>(lv_obj_get_x(channel_selector_btn_) + lv_obj_get_width(channel_selector_btn_));
+    const lv_coord_t right_anchor_x = hide_wireless_icons
+      ? static_cast<lv_coord_t>(lv_obj_get_x(battery_bar_))
+      : static_cast<lv_coord_t>(lv_obj_get_x(gps_label_));
+    const lv_coord_t time_center_x = static_cast<lv_coord_t>((selector_right_x + right_anchor_x) / 2);
     const lv_coord_t time_x = static_cast<lv_coord_t>(time_center_x - (lv_obj_get_width(time_label_) / 2));
     lv_obj_align(time_label_, LV_ALIGN_LEFT_MID, time_x, 0);
   }
@@ -7773,6 +8301,13 @@ void StandaloneUi::handleKey(uint32_t key) {
   if (cfg_open_ && (!cfg_dialog_ || lv_obj_has_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     cfg_open_ = false;
   }
+  if (cfg_confirm_open_ &&
+      (!cfg_open_ || !cfg_confirm_backdrop_ || lv_obj_has_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN))) {
+    cfg_confirm_open_ = false;
+    cfg_confirm_pending_row_ = 0xFF;
+    cfg_confirm_guard_until_ms_ = 0;
+    cfg_confirm_swallow_first_click_ = false;
+  }
   if (help_open_ && (!help_dialog_ || lv_obj_has_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     help_open_ = false;
   }
@@ -7980,6 +8515,37 @@ void StandaloneUi::handleKey(uint32_t key) {
   }
 
   if (cfg_open_) {
+    if (cfg_confirm_open_) {
+      if (static_cast<int32_t>(millis() - cfg_confirm_guard_until_ms_) < 0) {
+        return;
+      }
+      if (norm_key == 'y' || norm_key == 'Y') {
+        acceptCfgConfirmDialog();
+      } else if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        // Cardputer action key can auto-repeat; require explicit Y/N.
+        return;
+#else
+        // Enter follows focus: default is No, so accidental Enter cancels.
+        if (focused == cfg_confirm_yes_btn_) {
+          acceptCfgConfirmDialog();
+        } else {
+          closeCfgConfirmDialog();
+          strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
+          cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+          refreshCfgDialog();
+        }
+#endif
+      } else if (norm_key == 'n' || norm_key == 'N' || norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE ||
+                 norm_key == 8 || norm_key == 127) {
+        closeCfgConfirmDialog();
+        strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+        refreshCfgDialog();
+      }
+      return;
+    }
+
     lv_obj_t* focused = key_group_ ? lv_group_get_focused(key_group_) : nullptr;
     if (focused == cfg_close_btn_ &&
         (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r' || norm_key == LV_KEY_ESC ||
@@ -8408,6 +8974,13 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   if (cfg_open_ && (!cfg_dialog_ || lv_obj_has_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     cfg_open_ = false;
   }
+  if (cfg_confirm_open_ &&
+      (!cfg_open_ || !cfg_confirm_backdrop_ || lv_obj_has_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN))) {
+    cfg_confirm_open_ = false;
+    cfg_confirm_pending_row_ = 0xFF;
+    cfg_confirm_guard_until_ms_ = 0;
+    cfg_confirm_swallow_first_click_ = false;
+  }
   if (help_open_ && (!help_dialog_ || lv_obj_has_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     help_open_ = false;
   }
@@ -8456,19 +9029,51 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
       return;
     }
 
+    if (cfg_confirm_open_) {
+      if (static_cast<int32_t>(millis() - cfg_confirm_guard_until_ms_) < 0) {
+        return;
+      }
+      if (cfg_confirm_swallow_first_click_) {
+        cfg_confirm_swallow_first_click_ = false;
+        return;
+      }
+      if ((target == cfg_confirm_yes_btn_) || (target == cfg_confirm_yes_label_) ||
+          hasAncestor(target, cfg_confirm_yes_btn_)) {
+        acceptCfgConfirmDialog();
+      } else if ((target == cfg_confirm_no_btn_) || (target == cfg_confirm_no_label_) ||
+                 hasAncestor(target, cfg_confirm_no_btn_) || target == cfg_confirm_backdrop_) {
+        closeCfgConfirmDialog();
+        strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+        refreshCfgDialog();
+      } else if (cfg_confirm_dialog_ && hasAncestor(target, cfg_confirm_dialog_)) {
+        // Clicks inside confirm dialog body should not leak to row handlers.
+        return;
+      }
+      return;
+    }
+
     for (uint8_t i = 0; i < kCfgRowCount; i++) {
       if (target == cfg_rows_[i] || target == cfg_row_labels_[i]) {
         cfg_selected_row_ = i;
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
-        if (cfg_selected_row_ != kCfgRowImportConfig) {
-          cfg_import_confirm_armed_ = false;
-        }
-        if (cfg_selected_row_ != kCfgRowDeleteConfig) {
-          cfg_delete_confirm_armed_ = false;
-        }
-#endif
         refreshCfgDialog();
-        if (kTouchDirectActivate) {
+        bool direct_activate = kTouchDirectActivate;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        // Cardputer has no touch UI path for config rows; treat row selection
+        // click as activation so confirm can open reliably.
+        direct_activate = true;
+#endif
+        if (!direct_activate) {
+          lv_indev_t* indev = lv_indev_get_act();
+          if (indev) {
+            const lv_indev_type_t indev_type = lv_indev_get_type(indev);
+            // Keyboard/encoder/button-driven click should behave like Enter.
+            if (indev_type != LV_INDEV_TYPE_POINTER) {
+              direct_activate = true;
+            }
+          }
+        }
+        if (direct_activate) {
           activateCfgSelection();
         }
         return;
@@ -8900,14 +9505,6 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
       for (uint8_t i = 0; i < kCfgRowCount; i++) {
         if (target == ui->cfg_rows_[i] || target == ui->cfg_row_labels_[i]) {
           ui->cfg_selected_row_ = i;
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
-          if (ui->cfg_selected_row_ != kCfgRowImportConfig) {
-            ui->cfg_import_confirm_armed_ = false;
-          }
-          if (ui->cfg_selected_row_ != kCfgRowDeleteConfig) {
-            ui->cfg_delete_confirm_armed_ = false;
-          }
-#endif
           break;
         }
       }
@@ -8940,6 +9537,15 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
       ui->refreshShortcutVisuals();
       break;
     case LV_EVENT_PRESSED:
+      // While config confirmation is open, ignore PRESSED to avoid
+      // key/touch double-dispatch (PRESSED+CLICKED) auto-triggering
+      // an immediate Yes/No on the modal buttons.
+      if (ui->cfg_confirm_open_) {
+        lv_indev_t* indev = lv_indev_get_act();
+        if (indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+          break;
+        }
+      }
       ui->handleClick(target);
       break;
     case LV_EVENT_CLICKED:
