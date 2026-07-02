@@ -315,7 +315,9 @@ const char* kHelpBodyText =
   "m = Compose to current room\n"
   "z = Advert zero-hop\n"
   "f = Advert flood\n"
-  "d = DM from Contacts\n"
+  "m = DM from Contacts\n"
+  "p = Path trace from Contacts\n"
+  "d = Delete contact (from Contacts)\n"
   "j = up, k = down (arrows also work)\n"
   "Backspace = close current dialog";
 #endif
@@ -328,6 +330,7 @@ const char* kCfgRowLabels[] = {
   "Multipaths",
   "Multi-ACK",
   "Mesh Region",
+  "Repeater",
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   "Export Config",
   "Import Config",
@@ -342,10 +345,11 @@ constexpr uint8_t kCfgRowGps = 3;
 constexpr uint8_t kCfgRowMultipaths = 4;
 constexpr uint8_t kCfgRowMultiAck = 5;
 constexpr uint8_t kCfgRowMeshRegion = 6;
+constexpr uint8_t kCfgRowRepeater = 7;
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
-constexpr uint8_t kCfgRowExportConfig = 7;
-constexpr uint8_t kCfgRowImportConfig = 8;
-constexpr uint8_t kCfgRowDeleteConfig = 9;
+constexpr uint8_t kCfgRowExportConfig = 8;
+constexpr uint8_t kCfgRowImportConfig = 9;
+constexpr uint8_t kCfgRowDeleteConfig = 10;
 #endif
 
 const char* radioPresetDisplayName(const char* region) {
@@ -782,6 +786,83 @@ void appendTelemetryToken(char* out, size_t out_size, const char* token) {
     return;
   }
   snprintf(out + used, out_size - used, " | %s", token);
+}
+
+void appendSafeText(char* out, size_t out_size, const char* text) {
+  if (!out || out_size == 0 || !text || text[0] == '\0') {
+    return;
+  }
+
+  const size_t used = strlen(out);
+  if (used >= out_size - 1) {
+    return;
+  }
+
+  strncat(out, text, out_size - used - 1);
+}
+
+void formatContactPathTrace(const mesh::MeshContactSummary& contact, char* out, size_t out_size) {
+  if (!out || out_size == 0) {
+    return;
+  }
+
+  out[0] = '\0';
+
+  char line[160] = {};
+  snprintf(line, sizeof(line), "Node: %s\n", contact.name[0] ? contact.name : "(unnamed)");
+  appendSafeText(out, out_size, line);
+  snprintf(line, sizeof(line), "Key: %s\n\n", contact.public_key_hex);
+  appendSafeText(out, out_size, line);
+
+  if (contact.out_path_len == 0xFF) {
+    appendSafeText(out, out_size,
+                   "Path: unknown\n"
+                   "No direct return path has been learned yet.\n");
+    return;
+  }
+
+  const uint8_t hash_size = static_cast<uint8_t>((contact.out_path_len >> 6) + 1);
+  uint8_t hop_count = static_cast<uint8_t>(contact.out_path_len & 0x3F);
+
+  if (hop_count == 0) {
+    appendSafeText(out, out_size,
+                   "Path: none\n"
+                   "Contact currently has no direct hop path cached.\n");
+    return;
+  }
+
+  uint16_t path_bytes = static_cast<uint16_t>(hop_count) * static_cast<uint16_t>(hash_size);
+  bool truncated = false;
+  if (path_bytes > sizeof(contact.out_path)) {
+    hop_count = static_cast<uint8_t>(sizeof(contact.out_path) / hash_size);
+    path_bytes = static_cast<uint16_t>(hop_count) * static_cast<uint16_t>(hash_size);
+    truncated = true;
+  }
+
+  snprintf(line, sizeof(line), "Hops: %u\nHash bytes per hop: %u\n\n",
+           static_cast<unsigned>(hop_count), static_cast<unsigned>(hash_size));
+  appendSafeText(out, out_size, line);
+  appendSafeText(out, out_size, "Route hashes:\n");
+
+  for (uint8_t i = 0; i < hop_count; i++) {
+    char hop_hex[24] = {};
+    size_t pos = 0;
+    for (uint8_t j = 0; j < hash_size && pos + 3 < sizeof(hop_hex); j++) {
+      const uint8_t b = contact.out_path[static_cast<size_t>(i) * hash_size + j];
+      pos += static_cast<size_t>(snprintf(hop_hex + pos, sizeof(hop_hex) - pos, "%02X", b));
+      if (j + 1 < hash_size && pos + 1 < sizeof(hop_hex)) {
+        hop_hex[pos++] = ':';
+        hop_hex[pos] = '\0';
+      }
+    }
+
+    snprintf(line, sizeof(line), "  %u) %s\n", static_cast<unsigned>(i + 1), hop_hex);
+    appendSafeText(out, out_size, line);
+  }
+
+  if (truncated) {
+    appendSafeText(out, out_size, "\nNote: path display truncated to 64 raw bytes.\n");
+  }
 }
 
 void formatContactTelemetry(const mesh::MeshContactSummary& contact, char* out, size_t out_size) {
@@ -1736,7 +1817,7 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
       "DM",         // index 2
       "CLOSE",      // index 3
     #else
-      "(D)M",       // index 2
+      "D(M)",       // index 2
     #endif
     };
     for (uint8_t i = 0; i < kContactActionCount; i++) {
@@ -1947,6 +2028,47 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_style(time_label_, &style_text_main_, 0);
   lv_obj_set_style_text_font(time_label_, header_font, 0);
   lv_obj_align_to(time_label_, battery_bar_, LV_ALIGN_OUT_LEFT_MID, -kHeaderIconsToBatteryGap, 0);
+
+  contacts_path_btn_ = lv_btn_create(header_bar_);
+  lv_obj_set_size(contacts_path_btn_, 58, selector_h);
+  lv_obj_align(contacts_path_btn_, LV_ALIGN_RIGHT_MID, -50, 0);
+  lv_obj_add_style(contacts_path_btn_, &style_button_, 0);
+  lv_obj_add_style(contacts_path_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(contacts_path_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(contacts_path_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(contacts_path_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(contacts_path_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  lv_obj_add_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
+
+  contacts_path_label_ = lv_label_create(contacts_path_btn_);
+  lv_obj_add_style(contacts_path_label_, &style_text_main_, 0);
+  lv_obj_set_style_text_font(contacts_path_label_, header_font, 0);
+  lv_label_set_text(contacts_path_label_, "(P)ath");
+  lv_obj_center(contacts_path_label_);
+
+  // Delete-contact button: lives in the header, right-aligned. Only shown while
+  // the Contacts screen is open (where the wireless/clock/battery cluster on the
+  // header's right side is hidden, leaving room). See refreshContactsDialog().
+  contacts_del_btn_ = lv_btn_create(header_bar_);
+  lv_obj_set_size(contacts_del_btn_, 46, selector_h);
+  lv_obj_align(contacts_del_btn_, LV_ALIGN_RIGHT_MID, -2, 0);
+  lv_obj_add_style(contacts_del_btn_, &style_button_, 0);
+  lv_obj_add_style(contacts_del_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(contacts_del_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(contacts_del_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(contacts_del_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(contacts_del_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  lv_obj_add_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
+
+  contacts_del_label_ = lv_label_create(contacts_del_btn_);
+  lv_obj_add_style(contacts_del_label_, &style_text_main_, 0);
+  lv_obj_set_style_text_font(contacts_del_label_, header_font, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  lv_label_set_text(contacts_del_label_, "Del");
+#else
+  lv_label_set_text(contacts_del_label_, "(D)el");
+#endif
+  lv_obj_center(contacts_del_label_);
 
   chat_panel_ = lv_obj_create(main_panel_);
   lv_obj_set_pos(chat_panel_, 0, chat_y);
@@ -2278,14 +2400,14 @@ void StandaloneUi::buildLayout() {
   lv_obj_clear_flag(cfg_divider, LV_OBJ_FLAG_CLICKABLE);
 
   // Built lazily on first confirm action to keep startup allocations light.
-  cfg_confirm_backdrop_ = nullptr;
-  cfg_confirm_dialog_ = nullptr;
-  cfg_confirm_title_label_ = nullptr;
-  cfg_confirm_action_label_ = nullptr;
-  cfg_confirm_yes_btn_ = nullptr;
-  cfg_confirm_yes_label_ = nullptr;
-  cfg_confirm_no_btn_ = nullptr;
-  cfg_confirm_no_label_ = nullptr;
+  confirm_backdrop_ = nullptr;
+  confirm_dialog_ = nullptr;
+  confirm_title_label_ = nullptr;
+  confirm_action_label_ = nullptr;
+  confirm_yes_btn_ = nullptr;
+  confirm_yes_label_ = nullptr;
+  confirm_no_btn_ = nullptr;
+  confirm_no_label_ = nullptr;
 
   contacts_dialog_ = nullptr;
   contacts_status_label_ = nullptr;
@@ -2793,11 +2915,11 @@ void StandaloneUi::bindInputGroup() {
   if (cfg_close_btn_) {
     lv_group_add_obj(key_group_, cfg_close_btn_);
   }
-  if (cfg_confirm_no_btn_) {
-    lv_group_add_obj(key_group_, cfg_confirm_no_btn_);
+  if (confirm_no_btn_) {
+    lv_group_add_obj(key_group_, confirm_no_btn_);
   }
-  if (cfg_confirm_yes_btn_) {
-    lv_group_add_obj(key_group_, cfg_confirm_yes_btn_);
+  if (confirm_yes_btn_) {
+    lv_group_add_obj(key_group_, confirm_yes_btn_);
   }
   for (uint8_t i = 0; i < kShortcutCount; i++) {
     lv_group_add_obj(key_group_, shortcut_btns_[i]);
@@ -3049,7 +3171,7 @@ void StandaloneUi::showSplash(const char* node_name, uint32_t duration_ms) {
 
   // Title + version.
   lv_obj_t* title = lv_label_create(card);
-  lv_label_set_text(title, "PLUMERIA-MC");
+  lv_label_set_text(title, "Plumeria for MeshCore");
   lv_obj_set_style_text_color(title, lv_color_hex(kSplashTitle), LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(title, 2, LV_PART_MAIN);
   const lv_font_t* title_font = nullptr;
@@ -4152,6 +4274,9 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
   }
 
   if (contacts_count_ == 0) {
+    if (contacts_path_open_) {
+      closeContactsPathDialog();
+    }
     contacts_dm_open_ = false;
     contacts_selected_index_ = 0;
   } else if (contacts_selected_index_ >= contacts_count_) {
@@ -4179,7 +4304,7 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
       lv_label_set_text(contacts_action_labels_[2], "DM");
 #else
-      lv_label_set_text(contacts_action_labels_[2], "(D)M");
+      lv_label_set_text(contacts_action_labels_[2], "D(M)");
 #endif
     }
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -4211,6 +4336,12 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     }
 #endif
     lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_path_btn_) {
+      lv_obj_add_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (contacts_del_btn_) {
+      lv_obj_add_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_add_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(contacts_status_label_, LV_OBJ_FLAG_HIDDEN);
     // Keep the node-detail panel empty when no contacts have been heard yet
@@ -4268,7 +4399,7 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_label_set_text(contacts_action_labels_[2], "DM");
 #else
-    lv_label_set_text(contacts_action_labels_[2], "(D)M");
+    lv_label_set_text(contacts_action_labels_[2], "D(M)");
 #endif
   }
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -4342,6 +4473,13 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     lv_obj_align(contacts_dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
     lv_obj_move_foreground(contacts_dm_new_btn_);
     lv_obj_add_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
+    // Hide Del in the DM sub-view; NEW owns the top-right there.
+    if (contacts_path_btn_) {
+      lv_obj_add_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (contacts_del_btn_) {
+      lv_obj_add_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
     rebuildContactsDmPanel();
   } else {
     lv_obj_add_flag(contacts_status_label_, LV_OBJ_FLAG_HIDDEN);
@@ -4353,6 +4491,15 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), dm_panel_collapsed_h);
     lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_path_btn_) {
+      lv_obj_clear_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(contacts_path_btn_);
+    }
+    // Show Del in the contact detail view (a contact is selected here).
+    if (contacts_del_btn_) {
+      lv_obj_clear_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(contacts_del_btn_);
+    }
   }
 
   char status_line[160] = {};
@@ -4470,6 +4617,148 @@ void StandaloneUi::startComposeForSelectedContact() {
   openComposeDialog();
 }
 
+void StandaloneUi::openContactsPathDialog() {
+  if (!contacts_open_ || contacts_count_ == 0 || contacts_selected_index_ >= contacts_count_ || !root_) {
+    return;
+  }
+
+  if (!contacts_path_dialog_) {
+    const lv_coord_t main_w = lv_obj_get_width(main_panel_);
+    const lv_coord_t main_h = lv_obj_get_height(main_panel_);
+    const lv_coord_t dialog_w = clampCoord(main_w - dialogInsetW(10, 2), 210, dialogMaxW(300, 340));
+    const lv_coord_t dialog_h = clampCoord(main_h - 16, 150, 220);
+
+    contacts_path_dialog_ = lv_obj_create(root_);
+    lv_obj_add_style(contacts_path_dialog_, &style_panel_, 0);
+    lv_obj_set_size(contacts_path_dialog_, dialog_w, dialog_h);
+    lv_obj_align(contacts_path_dialog_, LV_ALIGN_CENTER, 0, kModalVerticalNudgeY);
+    lv_obj_add_flag(contacts_path_dialog_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(contacts_path_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(contacts_path_dialog_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_border_width(contacts_path_dialog_, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(contacts_path_dialog_, kColorBorder, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(contacts_path_dialog_, LV_OPA_40, LV_PART_MAIN);
+    lv_obj_add_event_cb(contacts_path_dialog_, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(contacts_path_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(contacts_path_dialog_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+    contacts_path_title_label_ = lv_label_create(contacts_path_dialog_);
+    lv_obj_add_style(contacts_path_title_label_, &style_text_main_, 0);
+    lv_label_set_text(contacts_path_title_label_, "Path");
+    lv_obj_align(contacts_path_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
+
+    const lv_coord_t body_y = 18;
+    const lv_coord_t body_h = static_cast<lv_coord_t>(dialog_h - (kUseOnscreenKeyboard ? 44 : 24));
+
+    contacts_path_body_panel_ = lv_obj_create(contacts_path_dialog_);
+    lv_obj_set_pos(contacts_path_body_panel_, 2, body_y);
+    lv_obj_set_size(contacts_path_body_panel_, static_cast<lv_coord_t>(dialog_w - 4), body_h);
+    lv_obj_set_style_bg_opa(contacts_path_body_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(contacts_path_body_panel_, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(contacts_path_body_panel_, 0, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(contacts_path_body_panel_, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(contacts_path_body_panel_, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(contacts_path_body_panel_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(contacts_path_body_panel_, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(contacts_path_body_panel_, onFocusableEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(contacts_path_body_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+    contacts_path_body_label_ = lv_label_create(contacts_path_body_panel_);
+    lv_obj_add_style(contacts_path_body_label_, &style_text_dim_, 0);
+    lv_coord_t body_label_w = static_cast<lv_coord_t>(dialog_w - 12);
+    if (body_label_w < 40) {
+      body_label_w = 40;
+    }
+    lv_obj_set_width(contacts_path_body_label_, body_label_w);
+    lv_label_set_long_mode(contacts_path_body_label_, LV_LABEL_LONG_WRAP);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_obj_set_style_text_font(contacts_path_body_label_, compactUiFont(), 0);
+#elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+    if (!kPagerWideDialogLayout) {
+      lv_obj_set_style_text_font(contacts_path_body_label_, &lv_font_montserrat_10, 0);
+    }
+#endif
+    lv_obj_align(contacts_path_body_label_, LV_ALIGN_TOP_LEFT, 4, 0);
+
+    contacts_path_close_btn_ = lv_btn_create(contacts_path_dialog_);
+    lv_obj_set_size(contacts_path_close_btn_, LV_PCT(100), 22);
+    lv_obj_align(contacts_path_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_add_style(contacts_path_close_btn_, &style_button_, 0);
+    lv_obj_add_style(contacts_path_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_add_event_cb(contacts_path_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(contacts_path_close_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(contacts_path_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+    contacts_path_close_label_ = lv_label_create(contacts_path_close_btn_);
+    lv_obj_add_style(contacts_path_close_label_, &style_text_main_, 0);
+    lv_label_set_text(contacts_path_close_label_, "CLOSE");
+    lv_obj_center(contacts_path_close_label_);
+
+    if (!kUseOnscreenKeyboard) {
+      lv_obj_add_flag(contacts_path_close_btn_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_clear_flag(contacts_path_close_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
+  }
+
+  if (!contacts_path_dialog_ || !contacts_path_title_label_ || !contacts_path_body_label_) {
+    return;
+  }
+
+  const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+
+  char title[80] = {};
+  snprintf(title, sizeof(title), "Path: %s", selected.name[0] ? selected.name : "(unnamed)");
+  lv_label_set_text(contacts_path_title_label_, title);
+
+  char body[1024] = {};
+  formatContactPathTrace(selected, body, sizeof(body));
+  lv_label_set_text(contacts_path_body_label_, body);
+
+  if (contacts_path_close_btn_) {
+    if (kUseOnscreenKeyboard) {
+      lv_obj_clear_flag(contacts_path_close_btn_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(contacts_path_close_btn_, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_move_foreground(contacts_path_close_btn_);
+    } else {
+      lv_obj_add_flag(contacts_path_close_btn_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_clear_flag(contacts_path_close_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
+  }
+
+  contacts_path_open_ = true;
+  lv_obj_clear_flag(contacts_path_dialog_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(contacts_path_dialog_);
+  if (contacts_path_body_panel_) {
+    lv_obj_scroll_to_y(contacts_path_body_panel_, 0, LV_ANIM_OFF);
+  }
+
+  if (key_group_) {
+    if (!kUseOnscreenKeyboard && contacts_path_body_panel_) {
+      if (lv_obj_get_group(contacts_path_body_panel_) != key_group_) {
+        lv_group_add_obj(key_group_, contacts_path_body_panel_);
+      }
+      lv_group_focus_obj(contacts_path_body_panel_);
+    } else if (contacts_path_close_btn_) {
+      if (lv_obj_get_group(contacts_path_close_btn_) != key_group_) {
+        lv_group_add_obj(key_group_, contacts_path_close_btn_);
+      }
+      lv_group_focus_obj(contacts_path_close_btn_);
+    }
+  }
+}
+
+void StandaloneUi::closeContactsPathDialog() {
+  if (!contacts_path_open_) {
+    return;
+  }
+
+  contacts_path_open_ = false;
+  if (contacts_path_dialog_) {
+    lv_obj_add_flag(contacts_path_dialog_, LV_OBJ_FLAG_HIDDEN);
+  }
+  focusCurrentZoneObject();
+}
+
 bool StandaloneUi::openContactsDialog() {
   if (!kEnableContactsDialog) {
     return false;
@@ -4490,6 +4779,7 @@ bool StandaloneUi::openContactsDialog() {
   contacts_open_ = true;
   contacts_nav_focused_ = false;
   contacts_dm_open_ = false;
+  contacts_path_open_ = false;
   contacts_selected_index_ = 0;
   contacts_action_index_ = 0;
   contacts_status_text_[0] = '\0';
@@ -4527,6 +4817,12 @@ bool StandaloneUi::openContactsDialog() {
     }
     if (contacts_dm_new_btn_ && lv_obj_get_group(contacts_dm_new_btn_) != key_group_) {
       lv_group_add_obj(key_group_, contacts_dm_new_btn_);
+    }
+    if (contacts_del_btn_ && lv_obj_get_group(contacts_del_btn_) != key_group_) {
+      lv_group_add_obj(key_group_, contacts_del_btn_);
+    }
+    if (contacts_path_btn_ && lv_obj_get_group(contacts_path_btn_) != key_group_) {
+      lv_group_add_obj(key_group_, contacts_path_btn_);
     }
     if (contacts_detail_info_panel_ && lv_obj_get_group(contacts_detail_info_panel_) != key_group_) {
       lv_group_add_obj(key_group_, contacts_detail_info_panel_);
@@ -4571,6 +4867,7 @@ void StandaloneUi::closeContactsDialog(bool focus_chat) {
   contacts_open_ = false;
   contacts_nav_focused_ = false;
   contacts_dm_open_ = false;
+  closeContactsPathDialog();
   pending_contacts_show_ = false;
   pending_contacts_post_open_ = false;
   refreshHeaderVisuals();
@@ -5586,6 +5883,9 @@ void StandaloneUi::refreshCfgDialog() {
   snprintf(row_text, sizeof(row_text), "Mesh Region: %s",
            web_settings.mesh_region[0] ? web_settings.mesh_region : "(unfiltered)");
   lv_label_set_text(cfg_row_labels_[kCfgRowMeshRegion], row_text);
+
+  lv_label_set_text(cfg_row_labels_[kCfgRowRepeater],
+                    web_settings.repeater_mode ? "Repeater: ON" : "Repeater: OFF");
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   lv_label_set_text(cfg_row_labels_[kCfgRowExportConfig], "Export Config to SD");
   lv_label_set_text(cfg_row_labels_[kCfgRowImportConfig], "Import Config from SD");
@@ -5613,13 +5913,13 @@ void StandaloneUi::openCfgDialog() {
   }
   cfg_open_ = true;
   cfg_selected_row_ = 0;
-  cfg_confirm_open_ = false;
-  cfg_confirm_pending_row_ = 0xFF;
+  confirm_open_ = false;
+  confirm_pending_row_ = 0xFF;
   cfg_action_text_[0] = '\0';
   cfg_status_text_[0] = '\0';
   lv_obj_clear_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
-  if (cfg_confirm_backdrop_) {
-    lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  if (confirm_backdrop_) {
+    lv_obj_add_flag(confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
   }
   if (shortcut_strip_) {
     lv_obj_add_flag(shortcut_strip_, LV_OBJ_FLAG_HIDDEN);
@@ -5635,7 +5935,7 @@ void StandaloneUi::closeCfgDialog(bool focus_chat) {
   if (!cfg_open_ || !cfg_dialog_) {
     return;
   }
-  closeCfgConfirmDialog();
+  closeConfirmDialog();
   cfg_open_ = false;
   lv_obj_add_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN);
   if (shortcut_strip_) {
@@ -5830,9 +6130,9 @@ bool StandaloneUi::deleteConfigFromSd() {
   return true;
 }
 
-bool StandaloneUi::ensureCfgConfirmDialogBuilt() {
-  if (cfg_confirm_backdrop_ && cfg_confirm_dialog_ && cfg_confirm_action_label_ &&
-      cfg_confirm_yes_btn_ && cfg_confirm_no_btn_) {
+bool StandaloneUi::ensureConfirmDialogBuilt() {
+  if (confirm_backdrop_ && confirm_dialog_ && confirm_action_label_ &&
+      confirm_yes_btn_ && confirm_no_btn_) {
     return true;
   }
   if (!root_) {
@@ -5840,151 +6140,149 @@ bool StandaloneUi::ensureCfgConfirmDialogBuilt() {
   }
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-  if (!cfg_dialog_) {
+  // Cardputer: compact modal (a small centered box, no full-screen dim layer)
+  // to minimize allocations and avoid full-screen overlay creation failures.
+  // Parented to root_ (not a specific dialog) so it can overlay any screen
+  // that raises a confirmation (config, contacts, ...).
+  confirm_backdrop_ = lv_obj_create(root_);
+  if (!confirm_backdrop_) {
     return false;
   }
-
-  // Cardputer: compact in-dialog modal to minimize allocations and avoid
-  // full-screen overlay creation failures.
-  cfg_confirm_backdrop_ = lv_obj_create(cfg_dialog_);
-  if (!cfg_confirm_backdrop_) {
-    return false;
-  }
-  cfg_confirm_dialog_ = cfg_confirm_backdrop_;
-  lv_obj_set_size(cfg_confirm_backdrop_, LV_PCT(95), LV_SIZE_CONTENT);
-  lv_obj_align(cfg_confirm_backdrop_, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_clear_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_style_bg_color(cfg_confirm_backdrop_, lv_color_hex(0x0E285B), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(cfg_confirm_backdrop_, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_border_width(cfg_confirm_backdrop_, 1, LV_PART_MAIN);
-  lv_obj_set_style_border_color(cfg_confirm_backdrop_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
-  lv_obj_set_style_pad_all(cfg_confirm_backdrop_, 6, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(cfg_confirm_backdrop_, 6, LV_PART_MAIN);
-  lv_obj_set_flex_flow(cfg_confirm_backdrop_, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(cfg_confirm_backdrop_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+  confirm_dialog_ = confirm_backdrop_;
+  lv_obj_set_size(confirm_backdrop_, LV_PCT(95), LV_SIZE_CONTENT);
+  lv_obj_align(confirm_backdrop_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(confirm_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(confirm_backdrop_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(confirm_backdrop_, lv_color_hex(0x0E285B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(confirm_backdrop_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(confirm_backdrop_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(confirm_backdrop_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(confirm_backdrop_, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(confirm_backdrop_, 6, LV_PART_MAIN);
+  lv_obj_set_flex_flow(confirm_backdrop_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(confirm_backdrop_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
-  lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_event_cb(cfg_confirm_backdrop_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_flag(confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_event_cb(confirm_backdrop_, onFocusableEvent, LV_EVENT_CLICKED, this);
 
-  cfg_confirm_title_label_ = lv_label_create(cfg_confirm_backdrop_);
-  if (!cfg_confirm_title_label_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
+  confirm_title_label_ = lv_label_create(confirm_backdrop_);
+  if (!confirm_title_label_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
     return false;
   }
-  lv_obj_set_width(cfg_confirm_title_label_, LV_PCT(100));
-  lv_obj_set_style_text_align(cfg_confirm_title_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_style_text_color(cfg_confirm_title_label_, lv_color_hex(0xD9E8FF), LV_PART_MAIN);
-  lv_label_set_text(cfg_confirm_title_label_, "Confirm?");
+  lv_obj_set_width(confirm_title_label_, LV_PCT(100));
+  lv_obj_set_style_text_align(confirm_title_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(confirm_title_label_, lv_color_hex(0xD9E8FF), LV_PART_MAIN);
+  lv_label_set_text(confirm_title_label_, "Confirm?");
 
-  cfg_confirm_action_label_ = lv_label_create(cfg_confirm_backdrop_);
-  if (!cfg_confirm_action_label_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
+  confirm_action_label_ = lv_label_create(confirm_backdrop_);
+  if (!confirm_action_label_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
     return false;
   }
-  lv_obj_set_width(cfg_confirm_action_label_, LV_PCT(100));
-  lv_obj_set_style_text_align(cfg_confirm_action_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_style_text_color(cfg_confirm_action_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_width(confirm_action_label_, LV_PCT(100));
+  lv_obj_set_style_text_align(confirm_action_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(confirm_action_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
 #if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
-  lv_obj_set_style_text_font(cfg_confirm_action_label_, &lv_font_montserrat_10, LV_PART_MAIN);
+  lv_obj_set_style_text_font(confirm_action_label_, &lv_font_montserrat_10, LV_PART_MAIN);
 #endif
-  lv_label_set_long_mode(cfg_confirm_action_label_, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(cfg_confirm_action_label_, "Action");
+  lv_label_set_long_mode(confirm_action_label_, LV_LABEL_LONG_WRAP);
+  lv_label_set_text(confirm_action_label_, "Action");
 
-  lv_obj_t* cfg_confirm_btn_row = lv_obj_create(cfg_confirm_backdrop_);
-  if (!cfg_confirm_btn_row) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
+  lv_obj_t* confirm_btn_row = lv_obj_create(confirm_backdrop_);
+  if (!confirm_btn_row) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
     return false;
   }
-  lv_obj_set_width(cfg_confirm_btn_row, LV_PCT(100));
-  lv_obj_set_height(cfg_confirm_btn_row, LV_SIZE_CONTENT);
-  lv_obj_clear_flag(cfg_confirm_btn_row, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_style_bg_opa(cfg_confirm_btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(cfg_confirm_btn_row, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(cfg_confirm_btn_row, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_column(cfg_confirm_btn_row, 6, LV_PART_MAIN);
-  lv_obj_set_flex_flow(cfg_confirm_btn_row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(cfg_confirm_btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+  lv_obj_set_width(confirm_btn_row, LV_PCT(100));
+  lv_obj_set_height(confirm_btn_row, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(confirm_btn_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_opa(confirm_btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(confirm_btn_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(confirm_btn_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(confirm_btn_row, 6, LV_PART_MAIN);
+  lv_obj_set_flex_flow(confirm_btn_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(confirm_btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
 
-  cfg_confirm_no_btn_ = lv_btn_create(cfg_confirm_btn_row);
-  if (!cfg_confirm_no_btn_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
+  confirm_no_btn_ = lv_btn_create(confirm_btn_row);
+  if (!confirm_no_btn_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
     return false;
   }
-  lv_obj_set_height(cfg_confirm_no_btn_, 30);
-  lv_obj_set_style_min_width(cfg_confirm_no_btn_, 70, LV_PART_MAIN);
-  lv_obj_add_style(cfg_confirm_no_btn_, &style_button_, 0);
-  lv_obj_add_style(cfg_confirm_no_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_set_style_bg_color(cfg_confirm_no_btn_, lv_color_hex(0x6B3030), LV_PART_MAIN);
-  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-  cfg_confirm_no_label_ = lv_label_create(cfg_confirm_no_btn_);
-  if (!cfg_confirm_no_label_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
-    cfg_confirm_no_btn_ = nullptr;
+  lv_obj_set_height(confirm_no_btn_, 30);
+  lv_obj_set_style_min_width(confirm_no_btn_, 70, LV_PART_MAIN);
+  lv_obj_add_style(confirm_no_btn_, &style_button_, 0);
+  lv_obj_add_style(confirm_no_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_set_style_bg_color(confirm_no_btn_, lv_color_hex(0x6B3030), LV_PART_MAIN);
+  lv_obj_add_event_cb(confirm_no_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(confirm_no_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(confirm_no_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  confirm_no_label_ = lv_label_create(confirm_no_btn_);
+  if (!confirm_no_label_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
+    confirm_no_btn_ = nullptr;
     return false;
   }
-  lv_obj_set_style_text_color(cfg_confirm_no_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_label_set_text(cfg_confirm_no_label_, "(N)o");
-  lv_obj_center(cfg_confirm_no_label_);
+  lv_obj_set_style_text_color(confirm_no_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(confirm_no_label_, "(N)o");
+  lv_obj_center(confirm_no_label_);
 
-  cfg_confirm_yes_btn_ = lv_btn_create(cfg_confirm_btn_row);
-  if (!cfg_confirm_yes_btn_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
-    cfg_confirm_no_btn_ = nullptr;
-    cfg_confirm_no_label_ = nullptr;
+  confirm_yes_btn_ = lv_btn_create(confirm_btn_row);
+  if (!confirm_yes_btn_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
+    confirm_no_btn_ = nullptr;
+    confirm_no_label_ = nullptr;
     return false;
   }
-  lv_obj_set_height(cfg_confirm_yes_btn_, 30);
-  lv_obj_set_style_min_width(cfg_confirm_yes_btn_, 70, LV_PART_MAIN);
-  lv_obj_add_style(cfg_confirm_yes_btn_, &style_button_, 0);
-  lv_obj_add_style(cfg_confirm_yes_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_set_style_bg_color(cfg_confirm_yes_btn_, lv_color_hex(0x2F6B30), LV_PART_MAIN);
-  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-  cfg_confirm_yes_label_ = lv_label_create(cfg_confirm_yes_btn_);
-  if (!cfg_confirm_yes_label_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
-    cfg_confirm_no_btn_ = nullptr;
-    cfg_confirm_no_label_ = nullptr;
-    cfg_confirm_yes_btn_ = nullptr;
+  lv_obj_set_height(confirm_yes_btn_, 30);
+  lv_obj_set_style_min_width(confirm_yes_btn_, 70, LV_PART_MAIN);
+  lv_obj_add_style(confirm_yes_btn_, &style_button_, 0);
+  lv_obj_add_style(confirm_yes_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_set_style_bg_color(confirm_yes_btn_, lv_color_hex(0x2F6B30), LV_PART_MAIN);
+  lv_obj_add_event_cb(confirm_yes_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(confirm_yes_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(confirm_yes_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  confirm_yes_label_ = lv_label_create(confirm_yes_btn_);
+  if (!confirm_yes_label_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
+    confirm_no_btn_ = nullptr;
+    confirm_no_label_ = nullptr;
+    confirm_yes_btn_ = nullptr;
     return false;
   }
-  lv_obj_set_style_text_color(cfg_confirm_yes_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_label_set_text(cfg_confirm_yes_label_, "(Y)es");
-  lv_obj_center(cfg_confirm_yes_label_);
+  lv_obj_set_style_text_color(confirm_yes_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(confirm_yes_label_, "(Y)es");
+  lv_obj_center(confirm_yes_label_);
 
   if (key_group_) {
-    lv_group_add_obj(key_group_, cfg_confirm_no_btn_);
-    lv_group_add_obj(key_group_, cfg_confirm_yes_btn_);
+    lv_group_add_obj(key_group_, confirm_no_btn_);
+    lv_group_add_obj(key_group_, confirm_yes_btn_);
   }
 
   return true;
@@ -5999,184 +6297,184 @@ bool StandaloneUi::ensureCfgConfirmDialogBuilt() {
     main_h = lv_obj_get_height(root_);
   }
 
-  cfg_confirm_backdrop_ = lv_obj_create(root_);
-  if (!cfg_confirm_backdrop_) {
+  confirm_backdrop_ = lv_obj_create(root_);
+  if (!confirm_backdrop_) {
     return false;
   }
-  lv_obj_set_size(cfg_confirm_backdrop_, LV_PCT(100), LV_PCT(100));
-  lv_obj_align(cfg_confirm_backdrop_, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_clear_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_style_bg_color(cfg_confirm_backdrop_, lv_color_hex(0x000000), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(cfg_confirm_backdrop_, LV_OPA_40, LV_PART_MAIN);
-  lv_obj_set_style_border_width(cfg_confirm_backdrop_, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(cfg_confirm_backdrop_, 0, LV_PART_MAIN);
-  lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_event_cb(cfg_confirm_backdrop_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_set_size(confirm_backdrop_, LV_PCT(100), LV_PCT(100));
+  lv_obj_align(confirm_backdrop_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(confirm_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(confirm_backdrop_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(confirm_backdrop_, lv_color_hex(0x000000), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(confirm_backdrop_, LV_OPA_40, LV_PART_MAIN);
+  lv_obj_set_style_border_width(confirm_backdrop_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(confirm_backdrop_, 0, LV_PART_MAIN);
+  lv_obj_add_flag(confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_event_cb(confirm_backdrop_, onFocusableEvent, LV_EVENT_CLICKED, this);
 
-  cfg_confirm_dialog_ = lv_obj_create(cfg_confirm_backdrop_);
-  if (!cfg_confirm_dialog_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
+  confirm_dialog_ = lv_obj_create(confirm_backdrop_);
+  if (!confirm_dialog_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
     return false;
   }
-  lv_obj_set_size(cfg_confirm_dialog_, clampCoord(main_w - 20, 160, 300), LV_SIZE_CONTENT);
-  lv_obj_align(cfg_confirm_dialog_, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_clear_flag(cfg_confirm_dialog_, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(cfg_confirm_dialog_, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_style_bg_color(cfg_confirm_dialog_, lv_color_hex(0x0E285B), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(cfg_confirm_dialog_, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_border_width(cfg_confirm_dialog_, 1, LV_PART_MAIN);
-  lv_obj_set_style_border_color(cfg_confirm_dialog_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
-  lv_obj_set_style_pad_all(cfg_confirm_dialog_, 10, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(cfg_confirm_dialog_, 10, LV_PART_MAIN);
-  lv_obj_set_flex_flow(cfg_confirm_dialog_, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(cfg_confirm_dialog_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+  lv_obj_set_size(confirm_dialog_, clampCoord(main_w - 20, 160, 300), LV_SIZE_CONTENT);
+  lv_obj_align(confirm_dialog_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(confirm_dialog_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(confirm_dialog_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(confirm_dialog_, lv_color_hex(0x0E285B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(confirm_dialog_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(confirm_dialog_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(confirm_dialog_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(confirm_dialog_, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(confirm_dialog_, 10, LV_PART_MAIN);
+  lv_obj_set_flex_flow(confirm_dialog_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(confirm_dialog_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
-  lv_obj_add_event_cb(cfg_confirm_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(confirm_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
 
-  cfg_confirm_title_label_ = lv_label_create(cfg_confirm_dialog_);
-  if (!cfg_confirm_title_label_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
+  confirm_title_label_ = lv_label_create(confirm_dialog_);
+  if (!confirm_title_label_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
     return false;
   }
-  lv_obj_set_width(cfg_confirm_title_label_, LV_PCT(100));
-  lv_obj_set_style_text_align(cfg_confirm_title_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_width(confirm_title_label_, LV_PCT(100));
+  lv_obj_set_style_text_align(confirm_title_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 #if defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
-  lv_obj_set_style_text_font(cfg_confirm_title_label_, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(confirm_title_label_, &lv_font_montserrat_16, LV_PART_MAIN);
 #endif
-  lv_obj_set_style_text_color(cfg_confirm_title_label_, lv_color_hex(0xD9E8FF), LV_PART_MAIN);
-  lv_label_set_text(cfg_confirm_title_label_, "Confirm?");
+  lv_obj_set_style_text_color(confirm_title_label_, lv_color_hex(0xD9E8FF), LV_PART_MAIN);
+  lv_label_set_text(confirm_title_label_, "Confirm?");
 
-  lv_obj_t* cfg_confirm_action_box = lv_obj_create(cfg_confirm_dialog_);
-  if (!cfg_confirm_action_box) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
+  lv_obj_t* confirm_action_box = lv_obj_create(confirm_dialog_);
+  if (!confirm_action_box) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
     return false;
   }
-  lv_obj_set_width(cfg_confirm_action_box, LV_PCT(100));
-  lv_obj_set_height(cfg_confirm_action_box, LV_SIZE_CONTENT);
-  lv_obj_clear_flag(cfg_confirm_action_box, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_style_bg_color(cfg_confirm_action_box, lv_color_hex(0x123266), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(cfg_confirm_action_box, LV_OPA_60, LV_PART_MAIN);
-  lv_obj_set_style_border_width(cfg_confirm_action_box, 1, LV_PART_MAIN);
-  lv_obj_set_style_border_color(cfg_confirm_action_box, lv_color_hex(0x5C86C6), LV_PART_MAIN);
-  lv_obj_set_style_pad_left(cfg_confirm_action_box, 6, LV_PART_MAIN);
-  lv_obj_set_style_pad_right(cfg_confirm_action_box, 6, LV_PART_MAIN);
-  lv_obj_set_style_pad_top(cfg_confirm_action_box, 4, LV_PART_MAIN);
-  lv_obj_set_style_pad_bottom(cfg_confirm_action_box, 4, LV_PART_MAIN);
-  lv_obj_add_event_cb(cfg_confirm_action_box, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_set_width(confirm_action_box, LV_PCT(100));
+  lv_obj_set_height(confirm_action_box, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(confirm_action_box, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_color(confirm_action_box, lv_color_hex(0x123266), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(confirm_action_box, LV_OPA_60, LV_PART_MAIN);
+  lv_obj_set_style_border_width(confirm_action_box, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(confirm_action_box, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_left(confirm_action_box, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(confirm_action_box, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(confirm_action_box, 4, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(confirm_action_box, 4, LV_PART_MAIN);
+  lv_obj_add_event_cb(confirm_action_box, onFocusableEvent, LV_EVENT_CLICKED, this);
 
-  cfg_confirm_action_label_ = lv_label_create(cfg_confirm_action_box);
-  if (!cfg_confirm_action_label_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
+  confirm_action_label_ = lv_label_create(confirm_action_box);
+  if (!confirm_action_label_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
     return false;
   }
-  lv_obj_set_width(cfg_confirm_action_label_, LV_PCT(100));
-  lv_obj_set_style_text_align(cfg_confirm_action_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_style_text_color(cfg_confirm_action_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_width(confirm_action_label_, LV_PCT(100));
+  lv_obj_set_style_text_align(confirm_action_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(confirm_action_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
 #if defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
-  lv_obj_set_style_text_font(cfg_confirm_action_label_, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(confirm_action_label_, &lv_font_montserrat_12, LV_PART_MAIN);
 #endif
-  lv_label_set_long_mode(cfg_confirm_action_label_, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(cfg_confirm_action_label_, "Action");
+  lv_label_set_long_mode(confirm_action_label_, LV_LABEL_LONG_WRAP);
+  lv_label_set_text(confirm_action_label_, "Action");
 
-  lv_obj_t* cfg_confirm_btn_row = lv_obj_create(cfg_confirm_dialog_);
-  if (!cfg_confirm_btn_row) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
+  lv_obj_t* confirm_btn_row = lv_obj_create(confirm_dialog_);
+  if (!confirm_btn_row) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
     return false;
   }
-  lv_obj_set_width(cfg_confirm_btn_row, LV_PCT(100));
-  lv_obj_set_height(cfg_confirm_btn_row, LV_SIZE_CONTENT);
-  lv_obj_clear_flag(cfg_confirm_btn_row, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_style_bg_opa(cfg_confirm_btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(cfg_confirm_btn_row, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(cfg_confirm_btn_row, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_column(cfg_confirm_btn_row, 10, LV_PART_MAIN);
-  lv_obj_set_flex_flow(cfg_confirm_btn_row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(cfg_confirm_btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+  lv_obj_set_width(confirm_btn_row, LV_PCT(100));
+  lv_obj_set_height(confirm_btn_row, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(confirm_btn_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_opa(confirm_btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(confirm_btn_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(confirm_btn_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(confirm_btn_row, 10, LV_PART_MAIN);
+  lv_obj_set_flex_flow(confirm_btn_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(confirm_btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
 
-  cfg_confirm_no_btn_ = lv_btn_create(cfg_confirm_btn_row);
-  if (!cfg_confirm_no_btn_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
+  confirm_no_btn_ = lv_btn_create(confirm_btn_row);
+  if (!confirm_no_btn_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
     return false;
   }
-  lv_obj_set_height(cfg_confirm_no_btn_, 34);
-  lv_obj_set_style_min_width(cfg_confirm_no_btn_, 84, LV_PART_MAIN);
-  lv_obj_add_style(cfg_confirm_no_btn_, &style_button_, 0);
-  lv_obj_add_style(cfg_confirm_no_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_set_style_bg_color(cfg_confirm_no_btn_, lv_color_hex(0x6B3030), LV_PART_MAIN);
-  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(cfg_confirm_no_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-  cfg_confirm_no_label_ = lv_label_create(cfg_confirm_no_btn_);
-  if (!cfg_confirm_no_label_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
-    cfg_confirm_no_btn_ = nullptr;
+  lv_obj_set_height(confirm_no_btn_, 34);
+  lv_obj_set_style_min_width(confirm_no_btn_, 84, LV_PART_MAIN);
+  lv_obj_add_style(confirm_no_btn_, &style_button_, 0);
+  lv_obj_add_style(confirm_no_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_set_style_bg_color(confirm_no_btn_, lv_color_hex(0x6B3030), LV_PART_MAIN);
+  lv_obj_add_event_cb(confirm_no_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(confirm_no_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(confirm_no_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  confirm_no_label_ = lv_label_create(confirm_no_btn_);
+  if (!confirm_no_label_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
+    confirm_no_btn_ = nullptr;
     return false;
   }
-  lv_obj_set_style_text_color(cfg_confirm_no_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_label_set_text(cfg_confirm_no_label_, "(N)o");
-  lv_obj_center(cfg_confirm_no_label_);
+  lv_obj_set_style_text_color(confirm_no_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(confirm_no_label_, "(N)o");
+  lv_obj_center(confirm_no_label_);
 
-  cfg_confirm_yes_btn_ = lv_btn_create(cfg_confirm_btn_row);
-  if (!cfg_confirm_yes_btn_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
-    cfg_confirm_no_btn_ = nullptr;
-    cfg_confirm_no_label_ = nullptr;
+  confirm_yes_btn_ = lv_btn_create(confirm_btn_row);
+  if (!confirm_yes_btn_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
+    confirm_no_btn_ = nullptr;
+    confirm_no_label_ = nullptr;
     return false;
   }
-  lv_obj_set_height(cfg_confirm_yes_btn_, 34);
-  lv_obj_set_style_min_width(cfg_confirm_yes_btn_, 84, LV_PART_MAIN);
-  lv_obj_add_style(cfg_confirm_yes_btn_, &style_button_, 0);
-  lv_obj_add_style(cfg_confirm_yes_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_set_style_bg_color(cfg_confirm_yes_btn_, lv_color_hex(0x2F6B30), LV_PART_MAIN);
-  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(cfg_confirm_yes_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-  cfg_confirm_yes_label_ = lv_label_create(cfg_confirm_yes_btn_);
-  if (!cfg_confirm_yes_label_) {
-    lv_obj_del(cfg_confirm_backdrop_);
-    cfg_confirm_backdrop_ = nullptr;
-    cfg_confirm_dialog_ = nullptr;
-    cfg_confirm_title_label_ = nullptr;
-    cfg_confirm_action_label_ = nullptr;
-    cfg_confirm_no_btn_ = nullptr;
-    cfg_confirm_no_label_ = nullptr;
-    cfg_confirm_yes_btn_ = nullptr;
+  lv_obj_set_height(confirm_yes_btn_, 34);
+  lv_obj_set_style_min_width(confirm_yes_btn_, 84, LV_PART_MAIN);
+  lv_obj_add_style(confirm_yes_btn_, &style_button_, 0);
+  lv_obj_add_style(confirm_yes_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_set_style_bg_color(confirm_yes_btn_, lv_color_hex(0x2F6B30), LV_PART_MAIN);
+  lv_obj_add_event_cb(confirm_yes_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(confirm_yes_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(confirm_yes_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  confirm_yes_label_ = lv_label_create(confirm_yes_btn_);
+  if (!confirm_yes_label_) {
+    lv_obj_del(confirm_backdrop_);
+    confirm_backdrop_ = nullptr;
+    confirm_dialog_ = nullptr;
+    confirm_title_label_ = nullptr;
+    confirm_action_label_ = nullptr;
+    confirm_no_btn_ = nullptr;
+    confirm_no_label_ = nullptr;
+    confirm_yes_btn_ = nullptr;
     return false;
   }
-  lv_obj_set_style_text_color(cfg_confirm_yes_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_label_set_text(cfg_confirm_yes_label_, "(Y)es");
-  lv_obj_center(cfg_confirm_yes_label_);
+  lv_obj_set_style_text_color(confirm_yes_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(confirm_yes_label_, "(Y)es");
+  lv_obj_center(confirm_yes_label_);
 
   if (key_group_) {
-    lv_group_add_obj(key_group_, cfg_confirm_no_btn_);
-    lv_group_add_obj(key_group_, cfg_confirm_yes_btn_);
+    lv_group_add_obj(key_group_, confirm_no_btn_);
+    lv_group_add_obj(key_group_, confirm_yes_btn_);
   }
 
   return true;
@@ -6184,15 +6482,24 @@ bool StandaloneUi::ensureCfgConfirmDialogBuilt() {
 }
 
 bool StandaloneUi::cfgActionNeedsConfirm(uint8_t row) const {
+  if (row == kCfgRowRepeater) {
+    // Confirm only when turning repeater mode ON (extra airtime/battery cost);
+    // turning it back off needs no confirmation.
+    plumeria::web::WebSettings s{};
+    plumeria::web::loadSettings(&s);
+    return !s.repeater_mode;
+  }
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   return row == kCfgRowExportConfig || row == kCfgRowImportConfig || row == kCfgRowDeleteConfig;
 #else
-  (void)row;
   return false;
 #endif
 }
 
 const char* StandaloneUi::cfgConfirmActionText(uint8_t row) const {
+  if (row == kCfgRowRepeater) {
+    return "Enable Repeater mode? Forwards mesh traffic; higher airtime + battery use.";
+  }
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   switch (row) {
     case kCfgRowExportConfig:
@@ -6210,11 +6517,36 @@ const char* StandaloneUi::cfgConfirmActionText(uint8_t row) const {
   return "Run action";
 }
 
+// Generic confirmation modal. Callers set any kind-specific pending state
+// (e.g. confirm_pending_row_, contacts_pending_delete_key_) before calling.
+void StandaloneUi::openConfirmDialog(ConfirmKind kind, const char* title, const char* body,
+                                     uint32_t guard_ms) {
+  if (!ensureConfirmDialogBuilt()) {
+    return;
+  }
+
+  confirm_kind_ = kind;
+  confirm_open_ = true;
+  confirm_swallow_first_click_ = true;
+  confirm_guard_until_ms_ = millis() + guard_ms;
+  if (confirm_title_label_) {
+    lv_label_set_text(confirm_title_label_, title ? title : "Confirm?");
+  }
+  if (confirm_action_label_) {
+    lv_label_set_text(confirm_action_label_, body ? body : "");
+  }
+  lv_obj_clear_flag(confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(confirm_backdrop_);
+  if (key_group_ && confirm_no_btn_) {
+    lv_group_focus_obj(confirm_no_btn_);
+  }
+}
+
 void StandaloneUi::openCfgConfirmDialog(uint8_t row) {
   if (!cfg_dialog_) {
     return;
   }
-  if (!ensureCfgConfirmDialogBuilt()) {
+  if (!ensureConfirmDialogBuilt()) {
     strncpy(cfg_status_text_, "Confirm dialog unavailable", sizeof(cfg_status_text_) - 1);
     cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
     strncpy(cfg_action_text_, "Action blocked", sizeof(cfg_action_text_) - 1);
@@ -6223,41 +6555,53 @@ void StandaloneUi::openCfgConfirmDialog(uint8_t row) {
     return;
   }
 
-  cfg_confirm_pending_row_ = row;
-  cfg_confirm_open_ = true;
-  cfg_confirm_swallow_first_click_ = true;
+  confirm_pending_row_ = row;
+  char body[64];
+  snprintf(body, sizeof(body), "Action: %s", cfgConfirmActionText(row));
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-  cfg_confirm_guard_until_ms_ = millis() + 1200;
+  const uint32_t guard = 1200;
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-  cfg_confirm_guard_until_ms_ = millis() + 550;
+  const uint32_t guard = 550;
 #else
-  cfg_confirm_guard_until_ms_ = millis() + 250;
+  const uint32_t guard = 250;
 #endif
-  lv_label_set_text_fmt(cfg_confirm_action_label_, "Action: %s", cfgConfirmActionText(row));
-  lv_obj_clear_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
-  if (cfg_dialog_) {
-    lv_obj_move_foreground(cfg_dialog_);
-  }
-  lv_obj_move_foreground(cfg_confirm_backdrop_);
-  if (key_group_ && cfg_confirm_no_btn_) {
-    lv_group_focus_obj(cfg_confirm_no_btn_);
-  }
+  openConfirmDialog(ConfirmKind::CfgRow, "Confirm?", body, guard);
 }
 
-void StandaloneUi::closeCfgConfirmDialog() {
-  cfg_confirm_open_ = false;
-  cfg_confirm_pending_row_ = 0xFF;
-  cfg_confirm_guard_until_ms_ = 0;
-  cfg_confirm_swallow_first_click_ = false;
-  if (cfg_confirm_backdrop_) {
-    lv_obj_add_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
+void StandaloneUi::closeConfirmDialog() {
+  const ConfirmKind kind = confirm_kind_;
+  confirm_open_ = false;
+  confirm_kind_ = ConfirmKind::None;
+  confirm_pending_row_ = 0xFF;
+  confirm_guard_until_ms_ = 0;
+  confirm_swallow_first_click_ = false;
+  if (confirm_backdrop_) {
+    lv_obj_add_flag(confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
   }
+  // Restore focus to whatever raised the confirmation.
   if (cfg_open_ && key_group_ && cfg_rows_[cfg_selected_row_]) {
     lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
+  } else if (kind == ConfirmKind::ContactDelete && contacts_open_ && key_group_ && contacts_del_btn_) {
+    lv_group_focus_obj(contacts_del_btn_);
   }
 }
 
 void StandaloneUi::performCfgConfirmedAction(uint8_t row) {
+  if (row == kCfgRowRepeater) {
+    char err[96] = {};
+    if (plumeria::web::setRepeaterMode(true, err, sizeof(err))) {
+      strncpy(cfg_status_text_, "Repeater enabled", sizeof(cfg_status_text_) - 1);
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      strncpy(cfg_action_text_, "Repeater ON", sizeof(cfg_action_text_) - 1);
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    } else {
+      strncpy(cfg_status_text_, err[0] ? err : "Repeater enable failed", sizeof(cfg_status_text_) - 1);
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    }
+    return;
+  }
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   switch (row) {
     case kCfgRowExportConfig:
@@ -6302,14 +6646,69 @@ void StandaloneUi::performCfgConfirmedAction(uint8_t row) {
 #endif
 }
 
-void StandaloneUi::acceptCfgConfirmDialog() {
-  if (!cfg_confirm_open_) {
+void StandaloneUi::acceptConfirmDialog() {
+  if (!confirm_open_) {
     return;
   }
-  const uint8_t row = cfg_confirm_pending_row_;
-  closeCfgConfirmDialog();
-  performCfgConfirmedAction(row);
-  refreshCfgDialog();
+  const ConfirmKind kind = confirm_kind_;
+  const uint8_t row = confirm_pending_row_;
+  closeConfirmDialog();
+  switch (kind) {
+    case ConfirmKind::CfgRow:
+      performCfgConfirmedAction(row);
+      refreshCfgDialog();
+      break;
+    case ConfirmKind::ContactDelete:
+      performContactDelete();
+      break;
+    default:
+      break;
+  }
+}
+
+void StandaloneUi::openContactDeleteConfirm() {
+  if (!contacts_open_ || contacts_count_ == 0 || contacts_selected_index_ >= contacts_count_) {
+    return;
+  }
+  const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+  strncpy(contacts_pending_delete_key_, selected.public_key_hex, sizeof(contacts_pending_delete_key_) - 1);
+  contacts_pending_delete_key_[sizeof(contacts_pending_delete_key_) - 1] = '\0';
+  strncpy(contacts_pending_delete_name_, selected.name, sizeof(contacts_pending_delete_name_) - 1);
+  contacts_pending_delete_name_[sizeof(contacts_pending_delete_name_) - 1] = '\0';
+
+  char body[64];
+  snprintf(body, sizeof(body), "Delete \"%s\"?", contacts_pending_delete_name_);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  const uint32_t guard = 1200;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+  const uint32_t guard = 550;
+#else
+  const uint32_t guard = 250;
+#endif
+  openConfirmDialog(ConfirmKind::ContactDelete, "Delete contact?", body, guard);
+}
+
+void StandaloneUi::performContactDelete() {
+  if (!mesh_adapter_ || contacts_pending_delete_key_[0] == '\0') {
+    return;
+  }
+  const bool ok = mesh_adapter_->removeContactByPublicKeyHex(contacts_pending_delete_key_);
+  if (ok) {
+    snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Deleted %s",
+             contacts_pending_delete_name_);
+    if (contacts_selected_index_ > 0) {
+      contacts_selected_index_--;
+    }
+    contacts_dm_open_ = false;
+    contacts_nav_focused_ = true;
+    refreshContactsDialog(true);
+  } else {
+    strncpy(contacts_status_text_, "Delete failed", sizeof(contacts_status_text_) - 1);
+    contacts_status_text_[sizeof(contacts_status_text_) - 1] = '\0';
+    refreshContactsDialog(false);
+  }
+  contacts_pending_delete_key_[0] = '\0';
+  contacts_pending_delete_name_[0] = '\0';
 }
 
 void StandaloneUi::activateCfgSelection() {
@@ -6424,6 +6823,23 @@ void StandaloneUi::activateCfgSelection() {
         cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       } else {
         strncpy(cfg_status_text_, err[0] ? err : "Multi-ACK toggle failed", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+      break;
+    }
+    case kCfgRowRepeater: {
+      // Enabling is routed through the confirm dialog (see cfgActionNeedsConfirm),
+      // so reaching here means we are toggling repeater mode OFF.
+      char err[96] = {};
+      if (plumeria::web::setRepeaterMode(false, err, sizeof(err))) {
+        strncpy(cfg_status_text_, "Repeater disabled", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Repeater OFF", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      } else {
+        strncpy(cfg_status_text_, err[0] ? err : "Repeater toggle failed", sizeof(cfg_status_text_) - 1);
         cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
         strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
         cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
@@ -6570,6 +6986,16 @@ void StandaloneUi::refreshHeaderVisuals() {
   const bool hide_battery_pct = contacts_open_;
 #endif
   const bool hide_battery_bar = contacts_open_;
+
+  // The header Del button only belongs on the Contacts screen (detail view).
+  // refreshContactsDialog() shows it there; hide it whenever we're off that
+  // screen so it can never linger over the chat/other headers.
+  if (contacts_path_btn_ && !contacts_open_) {
+    lv_obj_add_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (contacts_del_btn_ && !contacts_open_) {
+    lv_obj_add_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
+  }
 
   if (hide_battery_pct) {
     lv_obj_add_flag(battery_pct_label_, LV_OBJ_FLAG_HIDDEN);
@@ -8301,12 +8727,13 @@ void StandaloneUi::handleKey(uint32_t key) {
   if (cfg_open_ && (!cfg_dialog_ || lv_obj_has_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     cfg_open_ = false;
   }
-  if (cfg_confirm_open_ &&
-      (!cfg_open_ || !cfg_confirm_backdrop_ || lv_obj_has_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN))) {
-    cfg_confirm_open_ = false;
-    cfg_confirm_pending_row_ = 0xFF;
-    cfg_confirm_guard_until_ms_ = 0;
-    cfg_confirm_swallow_first_click_ = false;
+  if (confirm_open_ &&
+      (!confirm_backdrop_ || lv_obj_has_flag(confirm_backdrop_, LV_OBJ_FLAG_HIDDEN))) {
+    confirm_open_ = false;
+    confirm_kind_ = ConfirmKind::None;
+    confirm_pending_row_ = 0xFF;
+    confirm_guard_until_ms_ = 0;
+    confirm_swallow_first_click_ = false;
   }
   if (help_open_ && (!help_dialog_ || lv_obj_has_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     help_open_ = false;
@@ -8325,6 +8752,10 @@ void StandaloneUi::handleKey(uint32_t key) {
   }
   if (dm_open_ && !compose_open_ && (!dm_dialog_ || lv_obj_has_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     dm_open_ = false;
+  }
+  if (contacts_path_open_ &&
+      (!contacts_path_dialog_ || lv_obj_has_flag(contacts_path_dialog_, LV_OBJ_FLAG_HIDDEN))) {
+    contacts_path_open_ = false;
   }
   // Keyboard visibility is managed explicitly by compose open/close flows.
 
@@ -8356,6 +8787,43 @@ void StandaloneUi::handleKey(uint32_t key) {
   const bool is_escape = (norm_key == LV_KEY_ESC || norm_key == 27 || norm_key == 8);
   lv_obj_t* focused = key_group_ ? lv_group_get_focused(key_group_) : nullptr;
   const bool chat_focused = (focused == chat_panel_);
+
+  // Shared confirmation modal takes input priority over any underlying screen.
+  if (confirm_open_) {
+    if (static_cast<int32_t>(millis() - confirm_guard_until_ms_) < 0) {
+      return;
+    }
+    const bool was_cfg = (confirm_kind_ == ConfirmKind::CfgRow);
+    if (norm_key == 'y' || norm_key == 'Y') {
+      acceptConfirmDialog();
+    } else if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+      // Cardputer action key can auto-repeat; require explicit Y/N.
+      return;
+#else
+      // Enter follows focus: default is No, so accidental Enter cancels.
+      if (focused == confirm_yes_btn_) {
+        acceptConfirmDialog();
+      } else {
+        closeConfirmDialog();
+        if (was_cfg) {
+          strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
+          cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+          refreshCfgDialog();
+        }
+      }
+#endif
+    } else if (norm_key == 'n' || norm_key == 'N' || norm_key == LV_KEY_ESC ||
+               norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127) {
+      closeConfirmDialog();
+      if (was_cfg) {
+        strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+        refreshCfgDialog();
+      }
+    }
+    return;
+  }
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
   if (compose_open_ && (key == '`' || key == '~')) {
@@ -8515,37 +8983,6 @@ void StandaloneUi::handleKey(uint32_t key) {
   }
 
   if (cfg_open_) {
-    if (cfg_confirm_open_) {
-      if (static_cast<int32_t>(millis() - cfg_confirm_guard_until_ms_) < 0) {
-        return;
-      }
-      if (norm_key == 'y' || norm_key == 'Y') {
-        acceptCfgConfirmDialog();
-      } else if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-        // Cardputer action key can auto-repeat; require explicit Y/N.
-        return;
-#else
-        // Enter follows focus: default is No, so accidental Enter cancels.
-        if (focused == cfg_confirm_yes_btn_) {
-          acceptCfgConfirmDialog();
-        } else {
-          closeCfgConfirmDialog();
-          strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
-          cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-          refreshCfgDialog();
-        }
-#endif
-      } else if (norm_key == 'n' || norm_key == 'N' || norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE ||
-                 norm_key == 8 || norm_key == 127) {
-        closeCfgConfirmDialog();
-        strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-        refreshCfgDialog();
-      }
-      return;
-    }
-
     lv_obj_t* focused = key_group_ ? lv_group_get_focused(key_group_) : nullptr;
     if (focused == cfg_close_btn_ &&
         (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r' || norm_key == LV_KEY_ESC ||
@@ -8661,6 +9098,28 @@ void StandaloneUi::handleKey(uint32_t key) {
   }
 
   if (contacts_open_) {
+    if (contacts_path_open_) {
+      if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+        if (contacts_path_body_panel_) {
+          lv_obj_scroll_by(contacts_path_body_panel_, 0, -kMsgScrollStep, LV_ANIM_OFF);
+        }
+        return;
+      }
+      if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+        if (contacts_path_body_panel_) {
+          lv_obj_scroll_by(contacts_path_body_panel_, 0, kMsgScrollStep, LV_ANIM_OFF);
+        }
+        return;
+      }
+      if (norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127 ||
+          norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r' ||
+          (kKeyboardNavEnabled && norm_key == 'p')) {
+        closeContactsPathDialog();
+        return;
+      }
+      return;
+    }
+
     const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
 
     if (kKeyboardNavEnabled && norm_key == 'f') {
@@ -8671,8 +9130,16 @@ void StandaloneUi::handleKey(uint32_t key) {
       activateContactsAction(1);
       return;
     }
-    if (kKeyboardNavEnabled && (norm_key == 'd' || norm_key == 'm')) {
+    if (kKeyboardNavEnabled && norm_key == 'm') {
       activateContactsAction(2);
+      return;
+    }
+    if (kKeyboardNavEnabled && norm_key == 'd') {
+      openContactDeleteConfirm();
+      return;
+    }
+    if (kKeyboardNavEnabled && norm_key == 'p') {
+      openContactsPathDialog();
       return;
     }
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -8974,12 +9441,13 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   if (cfg_open_ && (!cfg_dialog_ || lv_obj_has_flag(cfg_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     cfg_open_ = false;
   }
-  if (cfg_confirm_open_ &&
-      (!cfg_open_ || !cfg_confirm_backdrop_ || lv_obj_has_flag(cfg_confirm_backdrop_, LV_OBJ_FLAG_HIDDEN))) {
-    cfg_confirm_open_ = false;
-    cfg_confirm_pending_row_ = 0xFF;
-    cfg_confirm_guard_until_ms_ = 0;
-    cfg_confirm_swallow_first_click_ = false;
+  if (confirm_open_ &&
+      (!confirm_backdrop_ || lv_obj_has_flag(confirm_backdrop_, LV_OBJ_FLAG_HIDDEN))) {
+    confirm_open_ = false;
+    confirm_kind_ = ConfirmKind::None;
+    confirm_pending_row_ = 0xFF;
+    confirm_guard_until_ms_ = 0;
+    confirm_swallow_first_click_ = false;
   }
   if (help_open_ && (!help_dialog_ || lv_obj_has_flag(help_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     help_open_ = false;
@@ -8999,7 +9467,39 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
   if (dm_open_ && !compose_open_ && (!dm_dialog_ || lv_obj_has_flag(dm_dialog_, LV_OBJ_FLAG_HIDDEN))) {
     dm_open_ = false;
   }
+  if (contacts_path_open_ &&
+      (!contacts_path_dialog_ || lv_obj_has_flag(contacts_path_dialog_, LV_OBJ_FLAG_HIDDEN))) {
+    contacts_path_open_ = false;
+  }
   // Keyboard visibility is managed explicitly by compose open/close flows.
+
+  // Shared confirmation modal takes click priority over any underlying screen.
+  if (confirm_open_) {
+    if (static_cast<int32_t>(millis() - confirm_guard_until_ms_) < 0) {
+      return;
+    }
+    if (confirm_swallow_first_click_) {
+      confirm_swallow_first_click_ = false;
+      return;
+    }
+    const bool was_cfg = (confirm_kind_ == ConfirmKind::CfgRow);
+    if ((target == confirm_yes_btn_) || (target == confirm_yes_label_) ||
+        hasAncestor(target, confirm_yes_btn_)) {
+      acceptConfirmDialog();
+    } else if ((target == confirm_no_btn_) || (target == confirm_no_label_) ||
+               hasAncestor(target, confirm_no_btn_) || target == confirm_backdrop_) {
+      closeConfirmDialog();
+      if (was_cfg) {
+        strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+        refreshCfgDialog();
+      }
+    } else if (confirm_dialog_ && hasAncestor(target, confirm_dialog_)) {
+      // Clicks inside confirm dialog body should not leak to underlying handlers.
+      return;
+    }
+    return;
+  }
 
   if (help_open_) {
     if ((target == help_close_btn_) || (target == help_close_label_) || hasAncestor(target, help_close_btn_)) {
@@ -9023,33 +9523,22 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
     closeAdvertPopup();
   }
 
+  if (contacts_path_open_) {
+    if ((target == contacts_path_close_btn_) || (target == contacts_path_close_label_) ||
+        hasAncestor(target, contacts_path_close_btn_)) {
+      closeContactsPathDialog();
+      return;
+    }
+    if (hasAncestor(target, contacts_path_dialog_)) {
+      return;
+    }
+    closeContactsPathDialog();
+    return;
+  }
+
   if (cfg_open_) {
     if ((target == cfg_close_btn_) || (target == cfg_close_label_) || hasAncestor(target, cfg_close_btn_)) {
       closeCfgDialog(true);
-      return;
-    }
-
-    if (cfg_confirm_open_) {
-      if (static_cast<int32_t>(millis() - cfg_confirm_guard_until_ms_) < 0) {
-        return;
-      }
-      if (cfg_confirm_swallow_first_click_) {
-        cfg_confirm_swallow_first_click_ = false;
-        return;
-      }
-      if ((target == cfg_confirm_yes_btn_) || (target == cfg_confirm_yes_label_) ||
-          hasAncestor(target, cfg_confirm_yes_btn_)) {
-        acceptCfgConfirmDialog();
-      } else if ((target == cfg_confirm_no_btn_) || (target == cfg_confirm_no_label_) ||
-                 hasAncestor(target, cfg_confirm_no_btn_) || target == cfg_confirm_backdrop_) {
-        closeCfgConfirmDialog();
-        strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-        refreshCfgDialog();
-      } else if (cfg_confirm_dialog_ && hasAncestor(target, cfg_confirm_dialog_)) {
-        // Clicks inside confirm dialog body should not leak to row handlers.
-        return;
-      }
       return;
     }
 
@@ -9262,6 +9751,16 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
         refreshContactsDialog(false);
         focusCurrentZoneObject();
       }
+      return;
+    }
+
+    if ((target == contacts_del_btn_) || (target == contacts_del_label_) || hasAncestor(target, contacts_del_btn_)) {
+      openContactDeleteConfirm();
+      return;
+    }
+
+    if ((target == contacts_path_btn_) || (target == contacts_path_label_) || hasAncestor(target, contacts_path_btn_)) {
+      openContactsPathDialog();
       return;
     }
 
@@ -9540,7 +10039,7 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
       // While config confirmation is open, ignore PRESSED to avoid
       // key/touch double-dispatch (PRESSED+CLICKED) auto-triggering
       // an immediate Yes/No on the modal buttons.
-      if (ui->cfg_confirm_open_) {
+      if (ui->confirm_open_) {
         lv_indev_t* indev = lv_indev_get_act();
         if (indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
           break;

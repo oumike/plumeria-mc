@@ -91,22 +91,56 @@ const char* boolToText(bool value) {
   return value ? "true" : "false";
 }
 
-void applyTimezoneOffsetFromSettings() {
+void buildPosixUtcFromOffsetMinutes(int16_t offset_minutes, char* out, size_t out_size) {
+  if (!out || out_size == 0) {
+    return;
+  }
+
   // POSIX TZ uses reversed sign: local = UTC - value.
-  const int local_offset_min = static_cast<int>(g_settings.timezone_offset_minutes);
-  int posix_value_min = -local_offset_min;
+  int posix_value_min = -static_cast<int>(offset_minutes);
   bool neg = posix_value_min < 0;
   int abs_min = neg ? -posix_value_min : posix_value_min;
   int hours = abs_min / 60;
   int mins = abs_min % 60;
 
-  char tz_buf[24] = {};
   if (mins == 0) {
-    snprintf(tz_buf, sizeof(tz_buf), "UTC%s%d", neg ? "-" : "", hours);
+    snprintf(out, out_size, "UTC%s%d", neg ? "-" : "", hours);
   } else {
-    snprintf(tz_buf, sizeof(tz_buf), "UTC%s%d:%02d", neg ? "-" : "", hours, mins);
+    snprintf(out, out_size, "UTC%s%d:%02d", neg ? "-" : "", hours, mins);
+  }
+}
+
+void resolveTimezoneSpec(char* out, size_t out_size) {
+  if (!out || out_size == 0) {
+    return;
   }
 
+  out[0] = '\0';
+  if (g_settings.timezone_posix[0] != '\0') {
+    strncpy(out, g_settings.timezone_posix, out_size - 1);
+    out[out_size - 1] = '\0';
+    return;
+  }
+  // Prefer explicit POSIX-style TZ strings when provided. Browser IANA names
+  // (contains '/') are not directly usable in this runtime, so fall back to
+  // stored offset-derived UTC spec.
+  if (g_settings.timezone[0] != '\0' && strchr(g_settings.timezone, '/') == nullptr) {
+    strncpy(out, g_settings.timezone, out_size - 1);
+    out[out_size - 1] = '\0';
+  } else {
+    buildPosixUtcFromOffsetMinutes(g_settings.timezone_offset_minutes, out, out_size);
+  }
+}
+
+bool radioParamsEqual(float lhs_freq, float lhs_bw, uint8_t lhs_sf, uint8_t lhs_cr, int8_t lhs_pwr,
+                      float rhs_freq, float rhs_bw, uint8_t rhs_sf, uint8_t rhs_cr, int8_t rhs_pwr) {
+  return (fabsf(lhs_freq - rhs_freq) <= 0.0005f) && (fabsf(lhs_bw - rhs_bw) <= 0.05f) &&
+         (lhs_sf == rhs_sf) && (lhs_cr == rhs_cr) && (lhs_pwr == rhs_pwr);
+}
+
+void applyTimezoneOffsetFromSettings() {
+  char tz_buf[24] = {};
+  resolveTimezoneSpec(tz_buf, sizeof(tz_buf));
   setenv("TZ", tz_buf, 1);
   tzset();
 }
@@ -159,6 +193,7 @@ void saveSettings(const plumeria::web::WebSettings& settings) {
   prefs.putString("wifi_ssid", settings.wifi_ssid);
   prefs.putString("wifi_pass", settings.wifi_pass);
   prefs.putString("timezone", settings.timezone);
+  prefs.putString("timezone_posix", settings.timezone_posix);
   prefs.putInt("tz_offset", static_cast<int>(settings.timezone_offset_minutes));
   prefs.putString("region", settings.region);
   prefs.putFloat("lora_freq", settings.lora_freq_mhz);
@@ -168,6 +203,7 @@ void saveSettings(const plumeria::web::WebSettings& settings) {
   prefs.putChar("lora_pwr", settings.lora_tx_power_dbm);
   prefs.putUChar("path_hash_mode", settings.path_hash_mode);
   prefs.putBool("multi_ack", settings.multi_ack);
+  prefs.putBool("repeater", settings.repeater_mode);
   prefs.putUShort("screen_timeout", settings.screen_timeout_seconds);
   prefs.putString("mesh_region", settings.mesh_region);
   prefs.end();
@@ -179,7 +215,9 @@ void setIpFrom(const IPAddress& address) {
 }
 
 bool syncTimeFromNtp() {
-  configTzTime("UTC0", "pool.ntp.org", "time.nist.gov", "time.google.com");
+  char tz_buf[24] = {};
+  resolveTimezoneSpec(tz_buf, sizeof(tz_buf));
+  configTzTime(tz_buf, "pool.ntp.org", "time.nist.gov", "time.google.com");
 
   const uint32_t start = millis();
   while (millis() - start < kNtpSyncTimeoutMs) {
@@ -268,6 +306,9 @@ String buildConfigText() {
   out += "timezone: ";
   out += configSafeValue(g_settings.timezone);
   out += "\n";
+  out += "timezone_posix: ";
+  out += configSafeValue(g_settings.timezone_posix);
+  out += "\n";
   out += "tz_offset: ";
   out += String(static_cast<int>(g_settings.timezone_offset_minutes));
   out += "\n";
@@ -294,6 +335,12 @@ String buildConfigText() {
   out += "\n";
   out += "path_hash_mode: ";
   out += String(g_settings.path_hash_mode);
+  out += "\n";
+  out += "multi_ack: ";
+  out += g_settings.multi_ack ? "1" : "0";
+  out += "\n";
+  out += "repeater_mode: ";
+  out += g_settings.repeater_mode ? "1" : "0";
   out += "\n";
   out += "mesh_region: ";
   out += configSafeValue(g_settings.mesh_region);
@@ -403,6 +450,15 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   int imported_favorite_count = 0;
   bool saw_identity_private_key = false;
   bool saw_identity_public_key = false;
+  bool saw_timezone = false;
+  bool saw_tz_offset = false;
+  bool saw_timezone_posix = false;
+  bool saw_region = false;
+  bool saw_freq = false;
+  bool saw_bw = false;
+  bool saw_sf = false;
+  bool saw_cr = false;
+  bool saw_pwr = false;
   char imported_identity_public_hex[193] = {};
   char imported_identity_private_hex[193] = {};
   memset(g_imported_channels_buf, 0, sizeof(g_imported_channels_buf));
@@ -469,6 +525,14 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         value = kDefaultTimezone;
       }
       copyString(imported.timezone, sizeof(imported.timezone), value.c_str());
+      saw_timezone = true;
+    } else if (key.equals("timezone_posix")) {
+      if (value.length() >= static_cast<int>(sizeof(imported.timezone_posix))) {
+        setImportError(err, err_size, "timezone_posix too long");
+        return false;
+      }
+      copyString(imported.timezone_posix, sizeof(imported.timezone_posix), value.c_str());
+      saw_timezone_posix = true;
     } else if (key.equals("tz_offset")) {
       const int tz_offset = value.toInt();
       if (tz_offset < -840 || tz_offset > 840) {
@@ -476,12 +540,14 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.timezone_offset_minutes = static_cast<int16_t>(tz_offset);
+      saw_tz_offset = true;
     } else if (key.equals("region")) {
       if (!findRegion(value.c_str())) {
         setImportError(err, err_size, "Unknown region");
         return false;
       }
       copyString(imported.region, sizeof(imported.region), value.c_str());
+      saw_region = true;
     } else if (key.equals("freq")) {
       const float freq = value.toFloat();
       if (freq < 100.0f || freq > 2500.0f) {
@@ -489,6 +555,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.lora_freq_mhz = freq;
+      saw_freq = true;
     } else if (key.equals("bw")) {
       const float bw = value.toFloat();
       if (bw < 7.0f || bw > 500.0f) {
@@ -496,6 +563,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.lora_bw_khz = bw;
+      saw_bw = true;
     } else if (key.equals("sf")) {
       const int sf = value.toInt();
       if (sf < 5 || sf > 12) {
@@ -503,6 +571,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.lora_sf = static_cast<uint8_t>(sf);
+      saw_sf = true;
     } else if (key.equals("cr")) {
       const int cr = value.toInt();
       if (cr < 5 || cr > 8) {
@@ -510,6 +579,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.lora_cr = static_cast<uint8_t>(cr);
+      saw_cr = true;
     } else if (key.equals("pwr")) {
       const int pwr = value.toInt();
       if (pwr < 1 || pwr > 30) {
@@ -517,6 +587,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.lora_tx_power_dbm = static_cast<int8_t>(pwr);
+      saw_pwr = true;
     } else if (key.equals("advert_interval_minutes")) {
       const int minutes = value.toInt();
       if (minutes < static_cast<int>(kMinAdvertIntervalMinutes) || minutes > 65535) {
@@ -531,6 +602,10 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
         return false;
       }
       imported.path_hash_mode = static_cast<uint8_t>(mode);
+    } else if (key.equals("multi_ack")) {
+      imported.multi_ack = parseBoolArg(value, imported.multi_ack);
+    } else if (key.equals("repeater_mode")) {
+      imported.repeater_mode = parseBoolArg(value, imported.repeater_mode);
     } else if (key.equals("mesh_region")) {
       if (value.length() >= static_cast<int>(sizeof(imported.mesh_region))) {
         setImportError(err, err_size, "mesh_region too long");
@@ -651,14 +726,35 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
     }
   }
 
+  // Honor region-only updates in imported config by applying preset defaults
+  // when explicit radio fields are omitted.
+  if (saw_region && !(saw_freq || saw_bw || saw_sf || saw_cr || saw_pwr)) {
+    const RegionPreset* preset = findRegion(imported.region);
+    if (preset) {
+      imported.lora_freq_mhz = preset->frequency_mhz;
+      imported.lora_bw_khz = preset->bandwidth_khz;
+      imported.lora_sf = preset->spreading_factor;
+      imported.lora_cr = preset->coding_rate;
+      imported.lora_tx_power_dbm = preset->tx_power_dbm;
+      saw_freq = saw_bw = saw_sf = saw_cr = saw_pwr = true;
+    }
+  }
+
+  if (!saw_timezone_posix && (saw_timezone || saw_tz_offset)) {
+    if (imported.timezone[0] != '\0' && strchr(imported.timezone, '/') == nullptr) {
+      copyString(imported.timezone_posix, sizeof(imported.timezone_posix), imported.timezone);
+    } else {
+      buildPosixUtcFromOffsetMinutes(imported.timezone_offset_minutes, imported.timezone_posix,
+                                     sizeof(imported.timezone_posix));
+    }
+  }
+
   const bool wifi_changed = (strcmp(g_settings.wifi_ssid, imported.wifi_ssid) != 0) ||
                             (strcmp(g_settings.wifi_pass, imported.wifi_pass) != 0);
-  const bool radio_changed =
-      (strcmp(g_settings.region, imported.region) != 0) ||
-      (fabsf(g_settings.lora_freq_mhz - imported.lora_freq_mhz) > 0.0005f) ||
-      (fabsf(g_settings.lora_bw_khz - imported.lora_bw_khz) > 0.05f) ||
-      (g_settings.lora_sf != imported.lora_sf) || (g_settings.lora_cr != imported.lora_cr) ||
-      (g_settings.lora_tx_power_dbm != imported.lora_tx_power_dbm);
+  const bool radio_changed = !radioParamsEqual(
+      g_settings.lora_freq_mhz, g_settings.lora_bw_khz, g_settings.lora_sf, g_settings.lora_cr,
+      g_settings.lora_tx_power_dbm, imported.lora_freq_mhz, imported.lora_bw_khz, imported.lora_sf,
+      imported.lora_cr, imported.lora_tx_power_dbm);
   bool identity_changed = false;
 
   Serial.printf("[IMPORT] node_name=%s\n", imported.node_name);
@@ -668,6 +764,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   Serial.printf("[IMPORT] wifi_ssid=%s\n", imported.wifi_ssid[0] ? imported.wifi_ssid : "(empty)");
   Serial.printf("[IMPORT] wifi_pass_len=%u\n", static_cast<unsigned>(strlen(imported.wifi_pass)));
   Serial.printf("[IMPORT] timezone=%s\n", imported.timezone);
+  Serial.printf("[IMPORT] timezone_posix=%s\n", imported.timezone_posix[0] ? imported.timezone_posix : "(empty)");
   Serial.printf("[IMPORT] tz_offset=%d\n", static_cast<int>(imported.timezone_offset_minutes));
   Serial.printf("[IMPORT] region=%s\n", imported.region);
   Serial.printf("[IMPORT] freq=%.3f\n", imported.lora_freq_mhz);
@@ -677,6 +774,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   Serial.printf("[IMPORT] pwr=%d\n", static_cast<int>(imported.lora_tx_power_dbm));
   Serial.printf("[IMPORT] advert_interval_minutes=%u\n", static_cast<unsigned>(imported.advert_interval_minutes));
   Serial.printf("[IMPORT] path_hash_mode=%u\n", static_cast<unsigned>(imported.path_hash_mode));
+  Serial.printf("[IMPORT] multi_ack=%s\n", boolToText(imported.multi_ack));
   Serial.printf("[IMPORT] mesh_region=%s\n", imported.mesh_region[0] ? imported.mesh_region : "(empty)");
   Serial.printf("[IMPORT] screen_timeout_seconds=%u\n", static_cast<unsigned>(imported.screen_timeout_seconds));
   Serial.printf("[IMPORT] identity_public_key_present=%s\n", boolToText(saw_identity_public_key));
@@ -740,6 +838,10 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
     g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
     Serial.printf("[IMPORT] setPathHashMode(%u)\n", static_cast<unsigned>(g_settings.path_hash_mode));
     g_mesh->setPathHashMode(g_settings.path_hash_mode);
+    Serial.printf("[IMPORT] setMultiAck(%s)\n", boolToText(g_settings.multi_ack));
+    g_mesh->setMultiAck(g_settings.multi_ack);
+    Serial.printf("[IMPORT] setRepeaterMode(%s)\n", boolToText(g_settings.repeater_mode));
+    g_mesh->setRepeaterMode(g_settings.repeater_mode);
     Serial.printf("[IMPORT] setMeshRegion(%s)\n", g_settings.mesh_region[0] ? g_settings.mesh_region : "");
     g_mesh->setMeshRegion(g_settings.mesh_region);
 
@@ -954,6 +1056,8 @@ small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 </select>
 </label>
 <label><input id='multi_ack' type='checkbox' style='width:auto;margin-right:8px'>Multi-ACK (show per-hop delivery count in message receipts)</label>
+<label><input id='repeater_mode' type='checkbox' style='width:auto;margin-right:8px'>Repeater mode (forward mesh traffic for other nodes)</label>
+<div style='color:#c07a2a;font-size:0.85em;margin:2px 0 8px 24px'>Warning: continuously repeats packets. Significantly increases radio airtime and battery drain; advertises this node as a repeater.</div>
 <label>Mesh Region (filter; blank = unfiltered)<input id='mesh_region' maxlength='31' placeholder='e.g. #mountains-west or leave blank'></label>
 <label>Screen Timeout Seconds<input id='screen_timeout_sec' type='number' min='1' max='600' step='1'></label>
 </section>
@@ -1026,6 +1130,7 @@ function showTab(tab){['config','contacts','utils'].forEach(t=>{const p=document
 async function jget(u){const r=await fetch(u);return r.json();}
 async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(b)});return r.json();}
 function tzOffsetMinutes(tz){try{const p=new Intl.DateTimeFormat('en-US',{timeZone:tz,timeZoneName:'longOffset'}).formatToParts(new Date());const v=(p.find(x=>x.type==='timeZoneName')||{}).value||'';const m=v.match(/([+-])(\d{1,2})(?::?(\d{2}))?/);if(m){const s=m[1]==='-'?-1:1,h=parseInt(m[2],10)||0,n=parseInt(m[3]||'0',10)||0;return s*(h*60+n);}}catch(_e){}return 0;}
+function tzPosixFromOffsetMinutes(offsetMinutes){const posixValue=-Number(offsetMinutes||0);const neg=posixValue<0;const absMin=Math.abs(posixValue);const h=Math.floor(absMin/60);const m=absMin%60;return m===0?('UTC'+(neg?'-':'')+String(h)):('UTC'+(neg?'-':'')+String(h)+':'+String(m).padStart(2,'0'));}
 function validCoord(lat,lon){return Number.isFinite(lat)&&Number.isFinite(lon)&&lat>=-90&&lat<=90&&lon>=-180&&lon<=180&&!(lat===0&&lon===0);}
 function bindDirtyTracking(){
   const node=document.getElementById('node_name');
@@ -1103,6 +1208,7 @@ async function loadStatus(force=false){
     if(timeoutEl)timeoutEl.value=s.screen_timeout_sec||30;
     if(meshRegionEl)meshRegionEl.value=s.mesh_region||'';
     const multiAckEl=document.getElementById('multi_ack');if(multiAckEl)multiAckEl.checked=!!s.multi_ack;
+    const repEl=document.getElementById('repeater_mode');if(repEl)repEl.checked=!!s.repeater_mode;
   }
 
   const latEl=document.getElementById('node_lat');
@@ -1136,7 +1242,7 @@ async function loadContacts(){const c=await jget('/api/contacts');contactsCache=
 
 async function addChannel(){const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}let r=null;try{r=await jpost('/api/channels/add',{name,psk});}catch(e){alert('Add channel request failed: '+(e&&e.message?e.message:String(e)));return;}if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}
 
-async function saveAll(){const tz=document.getElementById('timezone').value;let r=null;try{r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,tz_offset:String(tzOffsetMinutes(tz)),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value,mesh_region:document.getElementById('mesh_region').value});}catch(e){alert('Save request failed: '+(e&&e.message?e.message:String(e)));return;}alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
+async function saveAll(){const tz=document.getElementById('timezone').value;const tzOffset=tzOffsetMinutes(tz);const tzPosix=tzPosixFromOffsetMinutes(tzOffset);let r=null;try{r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,timezone_posix:tzPosix,tz_offset:String(tzOffset),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',repeater_mode:document.getElementById('repeater_mode').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value,mesh_region:document.getElementById('mesh_region').value});}catch(e){alert('Save request failed: '+(e&&e.message?e.message:String(e)));return;}alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
 
 async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||((r&&r.error)||'done'));}
 async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||((r&&r.error)||'done'));}
@@ -1399,6 +1505,8 @@ void handleStatus() {
   payload += jsonString(g_settings.wifi_pass);
   payload += ",\"timezone\":";
   payload += jsonString(g_settings.timezone);
+  payload += ",\"timezone_posix\":";
+  payload += jsonString(g_settings.timezone_posix);
   payload += ",\"tz_offset\":";
   payload += String(static_cast<int>(g_settings.timezone_offset_minutes));
   payload += ",\"region\":";
@@ -1419,6 +1527,8 @@ void handleStatus() {
   payload += String(g_settings.path_hash_mode);
   payload += ",\"multi_ack\":";
   payload += g_settings.multi_ack ? "true" : "false";
+  payload += ",\"repeater_mode\":";
+  payload += g_settings.repeater_mode ? "true" : "false";
   payload += ",\"mesh_region\":";
   payload += jsonString(g_settings.mesh_region);
   payload += ",\"screen_timeout_sec\":";
@@ -1630,6 +1740,7 @@ void handleSaveAll() {
   String ssid = g_server.arg("ssid");
   String pass = g_server.arg("pass");
   String timezone = g_server.arg("timezone");
+  String timezone_posix = g_server.arg("timezone_posix");
   String tz_offset = g_server.arg("tz_offset");
   String region = g_server.arg("region");
   String freq = g_server.arg("freq");
@@ -1640,6 +1751,7 @@ void handleSaveAll() {
   String adv_int_min = g_server.arg("adv_int_min");
   String path_hash_mode = g_server.arg("path_hash_mode");
   String multi_ack_str = g_server.arg("multi_ack");
+  String repeater_str = g_server.arg("repeater_mode");
   String screen_timeout_sec = g_server.arg("screen_timeout_sec");
   String mesh_region = g_server.arg("mesh_region");
 
@@ -1658,6 +1770,7 @@ void handleSaveAll() {
 
   pass.trim();
   timezone.trim();
+  timezone_posix.trim();
   tz_offset.trim();
   region.trim();
   freq.trim();
@@ -1668,6 +1781,7 @@ void handleSaveAll() {
   adv_int_min.trim();
   path_hash_mode.trim();
   multi_ack_str.trim();
+  repeater_str.trim();
   screen_timeout_sec.trim();
   mesh_region.trim();
 
@@ -1705,6 +1819,17 @@ void handleSaveAll() {
   }
   if (tz_offset_min < -840 || tz_offset_min > 840) {
     sendJsonError("Timezone offset out of range");
+    return;
+  }
+
+  if (timezone_posix.length() == 0) {
+    char tz_buf[24] = {};
+    buildPosixUtcFromOffsetMinutes(static_cast<int16_t>(tz_offset_min), tz_buf, sizeof(tz_buf));
+    timezone_posix = tz_buf;
+  }
+
+  if (timezone_posix.length() >= static_cast<int>(sizeof(g_settings.timezone_posix))) {
+    sendJsonError("Timezone POSIX value too long");
     return;
   }
 
@@ -1773,15 +1898,31 @@ void handleSaveAll() {
     return;
   }
 
+  const bool region_changed = strcmp(g_settings.region, region.c_str()) != 0;
+  const bool posted_radio_matches_current = radioParamsEqual(
+      g_settings.lora_freq_mhz, g_settings.lora_bw_khz, g_settings.lora_sf, g_settings.lora_cr,
+      g_settings.lora_tx_power_dbm, freq_mhz, bw_khz, static_cast<uint8_t>(sf_value),
+      static_cast<uint8_t>(cr_value), static_cast<int8_t>(pwr_value));
+
+  // If only the region changed (without explicit radio edits), honor that by
+  // applying the region preset server-side.
+  if (region_changed && posted_radio_matches_current) {
+    const RegionPreset* preset = findRegion(region.c_str());
+    if (preset) {
+      freq_mhz = preset->frequency_mhz;
+      bw_khz = preset->bandwidth_khz;
+      sf_value = static_cast<int>(preset->spreading_factor);
+      cr_value = static_cast<int>(preset->coding_rate);
+      pwr_value = static_cast<int>(preset->tx_power_dbm);
+    }
+  }
+
   const bool wifi_changed =
       (strcmp(g_settings.wifi_ssid, ssid.c_str()) != 0) || (strcmp(g_settings.wifi_pass, pass.c_str()) != 0);
-  const bool radio_changed =
-      (strcmp(g_settings.region, region.c_str()) != 0) ||
-      (fabsf(g_settings.lora_freq_mhz - freq_mhz) > 0.0005f) ||
-      (fabsf(g_settings.lora_bw_khz - bw_khz) > 0.05f) ||
-      (g_settings.lora_sf != static_cast<uint8_t>(sf_value)) ||
-      (g_settings.lora_cr != static_cast<uint8_t>(cr_value)) ||
-      (g_settings.lora_tx_power_dbm != static_cast<int8_t>(pwr_value));
+  const bool radio_changed = !radioParamsEqual(
+      g_settings.lora_freq_mhz, g_settings.lora_bw_khz, g_settings.lora_sf, g_settings.lora_cr,
+      g_settings.lora_tx_power_dbm, freq_mhz, bw_khz, static_cast<uint8_t>(sf_value),
+      static_cast<uint8_t>(cr_value), static_cast<int8_t>(pwr_value));
   const bool reboot_required = wifi_changed || radio_changed;
 
   copyString(g_settings.region, sizeof(g_settings.region), region.c_str());
@@ -1794,6 +1935,10 @@ void handleSaveAll() {
   g_settings.advert_interval_minutes = static_cast<uint16_t>(advert_interval_minutes);
   g_settings.path_hash_mode = static_cast<uint8_t>(path_hash_mode_value);
   g_settings.multi_ack = (multi_ack_str == "1" || multi_ack_str.equalsIgnoreCase("true"));
+  // Guard against older cached pages that omit the field: only overwrite when present.
+  if (repeater_str.length() > 0) {
+    g_settings.repeater_mode = (repeater_str == "1" || repeater_str.equalsIgnoreCase("true"));
+  }
   g_settings.screen_timeout_seconds = static_cast<uint16_t>(screen_timeout_seconds);
   copyString(g_settings.wifi_ssid, sizeof(g_settings.wifi_ssid), ssid.c_str());
   copyString(g_settings.wifi_pass, sizeof(g_settings.wifi_pass), pass.c_str());
@@ -1802,6 +1947,7 @@ void handleSaveAll() {
   g_settings.node_longitude = node_longitude;
   g_settings.send_location_in_advert = send_location_in_advert;
   copyString(g_settings.timezone, sizeof(g_settings.timezone), timezone.c_str());
+  copyString(g_settings.timezone_posix, sizeof(g_settings.timezone_posix), timezone_posix.c_str());
   g_settings.timezone_offset_minutes = static_cast<int16_t>(tz_offset_min);
 
   if (g_mesh) {
@@ -1815,6 +1961,7 @@ void handleSaveAll() {
     g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
     g_mesh->setPathHashMode(g_settings.path_hash_mode);
     g_mesh->setMultiAck(g_settings.multi_ack);
+    g_mesh->setRepeaterMode(g_settings.repeater_mode);
     g_mesh->setMeshRegion(g_settings.mesh_region);
     g_mesh->broadcastSelfAdvertNow();
   }
@@ -1989,9 +2136,24 @@ void loadSettings(WebSettings* out_settings) {
     timezone = prefs.getString("timezone", kDefaultTimezone);
   }
 
+  String timezone_posix = "";
+  if (prefs.isKey("timezone_posix")) {
+    timezone_posix = prefs.getString("timezone_posix", "");
+  }
+
   int tz_offset = 0;
   if (prefs.isKey("tz_offset")) {
     tz_offset = prefs.getInt("tz_offset", 0);
+  }
+
+  if (timezone_posix.length() == 0) {
+    if (timezone.indexOf('/') < 0 && timezone.length() > 0) {
+      timezone_posix = timezone;
+    } else {
+      char tz_buf[24] = {};
+      buildPosixUtcFromOffsetMinutes(static_cast<int16_t>(tz_offset), tz_buf, sizeof(tz_buf));
+      timezone_posix = tz_buf;
+    }
   }
 
   String region = kDefaultRegion;
@@ -2044,6 +2206,11 @@ void loadSettings(WebSettings* out_settings) {
   if (prefs.isKey("multi_ack")) {
     multi_ack = prefs.getBool("multi_ack", false);
   }
+  // Repeater mode defaults OFF on fresh installs (key absent).
+  bool repeater_mode = false;
+  if (prefs.isKey("repeater")) {
+    repeater_mode = prefs.getBool("repeater", false);
+  }
   String mesh_region = String("");
   if (prefs.isKey("mesh_region")) {
     mesh_region = prefs.getString("mesh_region", "");
@@ -2068,6 +2235,7 @@ void loadSettings(WebSettings* out_settings) {
   copyString(out_settings->wifi_ssid, sizeof(out_settings->wifi_ssid), ssid.c_str());
   copyString(out_settings->wifi_pass, sizeof(out_settings->wifi_pass), pass.c_str());
   copyString(out_settings->timezone, sizeof(out_settings->timezone), timezone.c_str());
+  copyString(out_settings->timezone_posix, sizeof(out_settings->timezone_posix), timezone_posix.c_str());
   out_settings->timezone_offset_minutes = static_cast<int16_t>(tz_offset);
   copyString(out_settings->region, sizeof(out_settings->region), region.c_str());
   out_settings->lora_freq_mhz = freq_mhz;
@@ -2077,6 +2245,7 @@ void loadSettings(WebSettings* out_settings) {
   out_settings->lora_tx_power_dbm = pwr;
   out_settings->path_hash_mode = path_hash_mode;
   out_settings->multi_ack = multi_ack;
+  out_settings->repeater_mode = repeater_mode;
   copyString(out_settings->mesh_region, sizeof(out_settings->mesh_region), mesh_region.c_str());
 }
 
@@ -2110,6 +2279,7 @@ bool begin(mesh::MeshAdapter* mesh_adapter, const WebSettings& initial_settings)
     g_mesh->setAutoAdvertIntervalMinutes(g_settings.advert_interval_minutes);
     g_mesh->setPathHashMode(g_settings.path_hash_mode);
     g_mesh->setMultiAck(g_settings.multi_ack);
+    g_mesh->setRepeaterMode(g_settings.repeater_mode);
     g_mesh->setMeshRegion(g_settings.mesh_region);
   }
   applyTimezoneOffsetFromSettings();
@@ -2275,6 +2445,21 @@ bool setMultiAck(bool enabled, char* err, size_t err_size) {
   next.multi_ack = enabled;
   if (g_mesh) {
     g_mesh->setMultiAck(enabled);
+  }
+  saveSettings(next);
+  if (g_running) {
+    g_settings = next;
+  }
+  setImportError(err, err_size, "");
+  return true;
+}
+
+bool setRepeaterMode(bool enabled, char* err, size_t err_size) {
+  WebSettings next{};
+  loadSettings(&next);
+  next.repeater_mode = enabled;
+  if (g_mesh) {
+    g_mesh->setRepeaterMode(enabled);
   }
   saveSettings(next);
   if (g_running) {

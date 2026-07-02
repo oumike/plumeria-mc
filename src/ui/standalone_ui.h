@@ -41,9 +41,9 @@ class StandaloneUi {
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 4;
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
-  static constexpr uint8_t kCfgRowCount = 7;
+  static constexpr uint8_t kCfgRowCount = 8;
 #else
-  static constexpr uint8_t kCfgRowCount = 10;
+  static constexpr uint8_t kCfgRowCount = 11;
 #endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
   static constexpr uint8_t kContactActionCount = 4;  // Fav, Admin, DM, Close
@@ -52,7 +52,11 @@ class StandaloneUi {
 #endif
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
-  static constexpr size_t kMaxStoredChatRows = 128;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+  static constexpr size_t kMaxStoredChatRows = 112;
+#else
+  static constexpr size_t kMaxStoredChatRows = 120;
+#endif
   static constexpr size_t kMetricChartPoints = 60;
 
   bool createStyles();
@@ -80,18 +84,25 @@ class StandaloneUi {
   void refreshCfgDialog();
   void moveCfgSelection(int delta);
   void activateCfgSelection();
-  bool ensureCfgConfirmDialogBuilt();
+  // Shared confirmation modal (used by config and contacts).
+  enum class ConfirmKind : uint8_t { None, CfgRow, ContactDelete };
+  bool ensureConfirmDialogBuilt();
+  void openConfirmDialog(ConfirmKind kind, const char* title, const char* body, uint32_t guard_ms);
+  void closeConfirmDialog();
+  void acceptConfirmDialog();
   bool cfgActionNeedsConfirm(uint8_t row) const;
   const char* cfgConfirmActionText(uint8_t row) const;
   void openCfgConfirmDialog(uint8_t row);
-  void closeCfgConfirmDialog();
-  void acceptCfgConfirmDialog();
   void performCfgConfirmedAction(uint8_t row);
+  void openContactDeleteConfirm();
+  void performContactDelete();
   bool openContactsDialog();
   bool ensureContactsDialogBuilt();
   void closeContactsDialog(bool focus_chat = false);
   void refreshContactsDialog(bool reload_from_mesh = true);
   void rebuildContactsDmPanel();
+  void openContactsPathDialog();
+  void closeContactsPathDialog();
   void moveContactsSelection(int delta);
   void activateContactsAction(uint8_t action_idx);
   void startComposeForSelectedContact();
@@ -237,14 +248,14 @@ class StandaloneUi {
   lv_obj_t* cfg_content_panel_ = nullptr;
   lv_obj_t* cfg_rows_[kCfgRowCount]{};
   lv_obj_t* cfg_row_labels_[kCfgRowCount]{};
-  lv_obj_t* cfg_confirm_backdrop_ = nullptr;
-  lv_obj_t* cfg_confirm_dialog_ = nullptr;
-  lv_obj_t* cfg_confirm_title_label_ = nullptr;
-  lv_obj_t* cfg_confirm_action_label_ = nullptr;
-  lv_obj_t* cfg_confirm_yes_btn_ = nullptr;
-  lv_obj_t* cfg_confirm_yes_label_ = nullptr;
-  lv_obj_t* cfg_confirm_no_btn_ = nullptr;
-  lv_obj_t* cfg_confirm_no_label_ = nullptr;
+  lv_obj_t* confirm_backdrop_ = nullptr;
+  lv_obj_t* confirm_dialog_ = nullptr;
+  lv_obj_t* confirm_title_label_ = nullptr;
+  lv_obj_t* confirm_action_label_ = nullptr;
+  lv_obj_t* confirm_yes_btn_ = nullptr;
+  lv_obj_t* confirm_yes_label_ = nullptr;
+  lv_obj_t* confirm_no_btn_ = nullptr;
+  lv_obj_t* confirm_no_label_ = nullptr;
   lv_obj_t* contacts_dialog_ = nullptr;
   lv_obj_t* contacts_status_label_ = nullptr;
   lv_obj_t* contacts_detail_panel_ = nullptr;
@@ -258,6 +269,16 @@ class StandaloneUi {
   lv_obj_t* contacts_dm_panel_ = nullptr;
   lv_obj_t* contacts_dm_new_btn_ = nullptr;
   lv_obj_t* contacts_dm_new_label_ = nullptr;
+  lv_obj_t* contacts_path_btn_ = nullptr;
+  lv_obj_t* contacts_path_label_ = nullptr;
+  lv_obj_t* contacts_del_btn_ = nullptr;
+  lv_obj_t* contacts_del_label_ = nullptr;
+  lv_obj_t* contacts_path_dialog_ = nullptr;
+  lv_obj_t* contacts_path_title_label_ = nullptr;
+  lv_obj_t* contacts_path_body_panel_ = nullptr;
+  lv_obj_t* contacts_path_body_label_ = nullptr;
+  lv_obj_t* contacts_path_close_btn_ = nullptr;
+  lv_obj_t* contacts_path_close_label_ = nullptr;
   lv_obj_t* dm_dialog_ = nullptr;
   lv_obj_t* dm_title_label_ = nullptr;
   lv_obj_t* dm_new_btn_ = nullptr;
@@ -416,16 +437,20 @@ class StandaloneUi {
   bool has_unread_dm_ = false;
   bool contacts_nav_focused_ = false;
   bool contacts_dm_open_ = false;
-  bool cfg_confirm_open_ = false;
+  bool contacts_path_open_ = false;
+  bool confirm_open_ = false;
   bool first_install_identity_prompt_ = false;
   bool first_install_auto_export_pending_ = false;
   bool identity_prompt_open_ = false;
   uint8_t pending_chat_focus_attempts_ = 0;
   uint8_t dropdown_highlight_channel_ = 0;
   uint8_t cfg_selected_row_ = 0;
-  uint8_t cfg_confirm_pending_row_ = 0xFF;
-  uint32_t cfg_confirm_guard_until_ms_ = 0;
-  bool cfg_confirm_swallow_first_click_ = false;
+  uint8_t confirm_pending_row_ = 0xFF;
+  uint32_t confirm_guard_until_ms_ = 0;
+  bool confirm_swallow_first_click_ = false;
+  ConfirmKind confirm_kind_ = ConfirmKind::None;
+  char contacts_pending_delete_key_[65] = {};
+  char contacts_pending_delete_name_[32] = {};
   uint8_t contacts_selected_index_ = 0;
   uint8_t contacts_action_index_ = 0;
   uint8_t contacts_count_ = 0;

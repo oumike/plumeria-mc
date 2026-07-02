@@ -459,6 +459,23 @@ class StandaloneChatMesh : public BaseChatMesh {
     return multi_ack_enabled_ ? 1 : 0;
   }
 
+  void setRepeaterMode(bool enabled) {
+    repeater_enabled_ = enabled;
+  }
+
+  bool getRepeaterMode() const {
+    return repeater_enabled_;
+  }
+
+  // Repeater mode: when enabled, this node forwards flood, direct-routed, and
+  // trace packets (mirrors official MeshCore repeater behavior, which overrides
+  // this virtual to return true). Off by default, so a plain client never
+  // repeats. Dedup + retransmit backoff are handled by the base Mesh.
+  bool allowPacketForward(const ::mesh::Packet* packet) override {
+    (void)packet;
+    return repeater_enabled_;
+  }
+
   void setMeshRegion(const char* region_name) {
     if (!region_name) {
       region_name = "";
@@ -656,29 +673,34 @@ class StandaloneChatMesh : public BaseChatMesh {
     }
   }
 
+  // Build a self-advert whose type reflects the current role: ADV_TYPE_REPEATER
+  // while repeater mode is on (so the mesh treats us as infrastructure), else
+  // ADV_TYPE_CHAT like a normal client.
+  ::mesh::Packet* createTypedSelfAdvert() {
+    const uint8_t adv_type = repeater_enabled_ ? ADV_TYPE_REPEATER : ADV_TYPE_CHAT;
+    const bool with_loc = advert_location_enabled_ && advert_lat_ >= -90.0 &&
+                          advert_lat_ <= 90.0 && advert_lon_ >= -180.0 && advert_lon_ <= 180.0;
+    uint8_t app_data[MAX_ADVERT_DATA_SIZE];
+    uint8_t app_data_len;
+    if (with_loc) {
+      AdvertDataBuilder builder(adv_type, node_name_, advert_lat_, advert_lon_);
+      app_data_len = builder.encodeTo(app_data);
+    } else {
+      AdvertDataBuilder builder(adv_type, node_name_);
+      app_data_len = builder.encodeTo(app_data);
+    }
+    return createAdvert(self_id, app_data, app_data_len);
+  }
+
   void broadcastSelfAdvert() {
-    ::mesh::Packet* packet = nullptr;
-    if (advert_location_enabled_ && advert_lat_ >= -90.0 && advert_lat_ <= 90.0 &&
-        advert_lon_ >= -180.0 && advert_lon_ <= 180.0) {
-      packet = createSelfAdvert(node_name_, advert_lat_, advert_lon_);
-    }
-    if (!packet) {
-      packet = createSelfAdvert(node_name_);
-    }
+    ::mesh::Packet* packet = createTypedSelfAdvert();
     if (packet) {
       sendZeroHop(packet);
     }
   }
 
   void broadcastSelfAdvertFlood() {
-    ::mesh::Packet* packet = nullptr;
-    if (advert_location_enabled_ && advert_lat_ >= -90.0 && advert_lat_ <= 90.0 &&
-        advert_lon_ >= -180.0 && advert_lon_ <= 180.0) {
-      packet = createSelfAdvert(node_name_, advert_lat_, advert_lon_);
-    }
-    if (!packet) {
-      packet = createSelfAdvert(node_name_);
-    }
+    ::mesh::Packet* packet = createTypedSelfAdvert();
     if (packet) {
       if (mesh_region_active_) {
         uint16_t codes[2] = { mesh_region_key_.calcTransportCode(packet), 0 };
@@ -1036,6 +1058,7 @@ class StandaloneChatMesh : public BaseChatMesh {
   bool advert_location_enabled_;
   uint8_t path_hash_mode_;
   bool multi_ack_enabled_;
+  bool repeater_enabled_ = false;
   double advert_lat_;
   double advert_lon_;
   char mesh_region_name_[32] = {};
@@ -1159,6 +1182,7 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
   runtime_->mesh->setNodeName(kDefaultNodeName);
   runtime_->mesh->setPathHashMode(path_hash_mode_);
   runtime_->mesh->setMultiAck(multi_ack_enabled_);
+  runtime_->mesh->setRepeaterMode(repeater_enabled_);
   runtime_->mesh->setMeshRegion(mesh_region_);
 
   identity_loaded_from_nvs_ = loadIdentityFromNvs(&runtime_->mesh->self_id);
@@ -1510,6 +1534,22 @@ bool MeshAdapter::setMultiAck(bool enabled) {
   return true;
 }
 
+bool MeshAdapter::setRepeaterMode(bool enabled) {
+  repeater_enabled_ = enabled;
+  if (runtime_ && runtime_->mesh) {
+    runtime_->mesh->setRepeaterMode(enabled);
+    // Re-announce so the mesh sees the new node type (repeater vs chat) promptly.
+    if (ready_) {
+      runtime_->mesh->broadcastSelfAdvertFlood();
+    }
+  }
+  return true;
+}
+
+bool MeshAdapter::getRepeaterMode() const {
+  return repeater_enabled_;
+}
+
 bool MeshAdapter::setMeshRegion(const char* region_name) {
   const char* safe = region_name ? region_name : "";
   if (strlen(safe) >= sizeof(mesh_region_)) {
@@ -1666,6 +1706,8 @@ int MeshAdapter::exportContacts(MeshContactSummary contacts[], int max_contacts)
 
     summary.favorite = (contact.flags & 0x01U) != 0;
     summary.type = contact.type;
+    summary.out_path_len = contact.out_path_len;
+    memcpy(summary.out_path, contact.out_path, sizeof(summary.out_path));
     summary.lastmod = contact.lastmod;
     summary.gps_lat_i = contact.gps_lat;
     summary.gps_lon_i = contact.gps_lon;

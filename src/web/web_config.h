@@ -17,6 +17,7 @@ struct WebSettings {
   char wifi_ssid[64];
   char wifi_pass[64];
   char timezone[64];
+  char timezone_posix[24];
   int16_t timezone_offset_minutes;
   char region[24];
   float lora_freq_mhz;
@@ -26,6 +27,7 @@ struct WebSettings {
   int8_t lora_tx_power_dbm;
   uint8_t path_hash_mode;
   bool multi_ack;
+  bool repeater_mode;
   uint16_t screen_timeout_seconds;
   char mesh_region[32];
 };
@@ -48,6 +50,7 @@ bool setSendLocationInAdvert(bool enabled, char* err, size_t err_size);
 bool setMeshRegion(const char* region_name, char* err, size_t err_size);
 bool setPathHashMode(uint8_t mode, char* err, size_t err_size);
 bool setMultiAck(bool enabled, char* err, size_t err_size);
+bool setRepeaterMode(bool enabled, char* err, size_t err_size);
 uint16_t screenTimeoutSeconds();
 
 }  // namespace web

@@ -47,6 +47,10 @@ struct MeshContactSummary {
   char public_key_hex[65];
   bool favorite;
   uint8_t type;
+  // Packed path_len from MeshCore (upper 2 bits hash size-1, lower 6 bits hop count).
+  uint8_t out_path_len;
+  // Raw route path bytes (hash-count * hash-size bytes, max 64).
+  uint8_t out_path[64];
   uint32_t lastmod;
   int32_t gps_lat_i;
   int32_t gps_lon_i;
@@ -78,6 +82,8 @@ class MeshAdapter {
   bool setPathHashMode(uint8_t mode);
   uint8_t getPathHashMode() const;
   bool setMultiAck(bool enabled);
+  bool setRepeaterMode(bool enabled);
+  bool getRepeaterMode() const;
   bool setMeshRegion(const char* region_name);
   void getMeshRegion(char* out_name, size_t out_size) const;
   bool setAutoAdvertIntervalMinutes(uint16_t minutes);
@@ -151,6 +157,7 @@ class MeshAdapter {
   uint32_t last_persist_flush_ms_ = 0;
   uint8_t path_hash_mode_ = 0;
   bool multi_ack_enabled_ = false;
+  bool repeater_enabled_ = false;
   char mesh_region_[32] = {};
   uint32_t rx_raw_count_ = 0;
   uint32_t rx_packet_count_ = 0;
