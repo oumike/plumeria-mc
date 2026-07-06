@@ -61,6 +61,7 @@ constexpr RegionPreset kRegionPresets[] = {
 
 WebServer g_server(80);
 bool g_running = false;
+bool g_server_enabled = false;
 char g_mode[8] = "off";
 char g_ip[20] = "";
 plumeria::mesh::MeshAdapter* g_mesh = nullptr;
@@ -949,6 +950,16 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
 }
 
 void startFallbackAp() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  // Cardputer builds have shown intermittent crashes in softAP startup.
+  // Keep network stack disabled instead of forcing fallback AP mode.
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  copyString(g_mode, sizeof(g_mode), "off");
+  g_ip[0] = '\0';
+  return;
+#endif
+
   WiFi.disconnect(false, true);
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
@@ -2289,7 +2300,10 @@ bool begin(mesh::MeshAdapter* mesh_adapter, const WebSettings& initial_settings)
   registerRoutes();
   bringupNetwork();
 
-  g_server.begin();
+  g_server_enabled = (strcmp(g_mode, "off") != 0);
+  if (g_server_enabled) {
+    g_server.begin();
+  }
   g_running = true;
   return true;
 }
@@ -2298,7 +2312,9 @@ void loop() {
   if (!g_running) {
     return;
   }
-  g_server.handleClient();
+  if (g_server_enabled) {
+    g_server.handleClient();
+  }
 
   if (g_reboot_pending && static_cast<int32_t>(millis() - g_reboot_at_ms) >= 0) {
     delay(50);
@@ -2310,7 +2326,10 @@ void end() {
   if (!g_running) {
     return;
   }
-  g_server.stop();
+  if (g_server_enabled) {
+    g_server.stop();
+    g_server_enabled = false;
+  }
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   g_mode[0] = '\0';
@@ -2461,6 +2480,62 @@ bool setRepeaterMode(bool enabled, char* err, size_t err_size) {
   if (g_mesh) {
     g_mesh->setRepeaterMode(enabled);
   }
+  saveSettings(next);
+  if (g_running) {
+    g_settings = next;
+  }
+  setImportError(err, err_size, "");
+  return true;
+}
+
+int regionPresetCount() {
+  return static_cast<int>(sizeof(kRegionPresets) / sizeof(kRegionPresets[0]));
+}
+
+const char* regionPresetId(int index) {
+  if (index < 0 || index >= regionPresetCount()) {
+    return "";
+  }
+  return kRegionPresets[index].id;
+}
+
+const char* defaultRegionId() {
+  return kDefaultRegion;
+}
+
+// Apply a region's radio preset (freq/bw/sf/cr/pwr + region id) and persist.
+// Does NOT reboot; the radio is re-initialized at next boot, so the caller is
+// responsible for restarting when it wants the change to take effect.
+bool setRegionPreset(const char* region_id, char* err, size_t err_size) {
+  const RegionPreset* preset = findRegion(region_id);
+  if (!preset) {
+    setImportError(err, err_size, "Unknown region preset");
+    return false;
+  }
+
+  WebSettings next{};
+  loadSettings(&next);
+  copyString(next.region, sizeof(next.region), preset->id);
+  next.lora_freq_mhz = preset->frequency_mhz;
+  next.lora_bw_khz = preset->bandwidth_khz;
+  next.lora_sf = preset->spreading_factor;
+  next.lora_cr = preset->coding_rate;
+  next.lora_tx_power_dbm = preset->tx_power_dbm;
+  saveSettings(next);
+  if (g_running) {
+    g_settings = next;
+  }
+  setImportError(err, err_size, "");
+  return true;
+}
+
+// Persist WiFi credentials (empty strings clear them). Applied at next boot;
+// caller reboots.
+bool setWifiCredentials(const char* ssid, const char* pass, char* err, size_t err_size) {
+  WebSettings next{};
+  loadSettings(&next);
+  copyString(next.wifi_ssid, sizeof(next.wifi_ssid), ssid ? ssid : "");
+  copyString(next.wifi_pass, sizeof(next.wifi_pass), pass ? pass : "");
   saveSettings(next);
   if (g_running) {
     g_settings = next;

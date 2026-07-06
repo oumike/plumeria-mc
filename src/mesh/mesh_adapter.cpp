@@ -1535,11 +1535,14 @@ bool MeshAdapter::setMultiAck(bool enabled) {
 }
 
 bool MeshAdapter::setRepeaterMode(bool enabled) {
+  const bool changed = (repeater_enabled_ != enabled);
   repeater_enabled_ = enabled;
   if (runtime_ && runtime_->mesh) {
     runtime_->mesh->setRepeaterMode(enabled);
-    // Re-announce so the mesh sees the new node type (repeater vs chat) promptly.
-    if (ready_) {
+    // Re-announce so the mesh sees the new node type (repeater vs chat) promptly,
+    // but only for a real runtime change and only once adverts are unlocked. This
+    // avoids advertising during boot/no-op applies and first-install onboarding.
+    if (ready_ && changed && adverts_unlocked_for_boot_) {
       runtime_->mesh->broadcastSelfAdvertFlood();
     }
   }

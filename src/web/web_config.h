@@ -51,6 +51,13 @@ bool setMeshRegion(const char* region_name, char* err, size_t err_size);
 bool setPathHashMode(uint8_t mode, char* err, size_t err_size);
 bool setMultiAck(bool enabled, char* err, size_t err_size);
 bool setRepeaterMode(bool enabled, char* err, size_t err_size);
+
+// Region radio presets (used by first-install onboarding).
+int regionPresetCount();
+const char* regionPresetId(int index);
+const char* defaultRegionId();
+bool setRegionPreset(const char* region_id, char* err, size_t err_size);
+bool setWifiCredentials(const char* ssid, const char* pass, char* err, size_t err_size);
 uint16_t screenTimeoutSeconds();
 
 }  // namespace web

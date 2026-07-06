@@ -605,24 +605,21 @@ void setup() {
                plumeria::web::mode(), plumeria::web::ip());
 
   bool first_install_identity_prompt = false;
+  bool first_install_import_available = false;
   if (mesh_ready && !g_mesh.identityLoadedFromNvs()) {
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Fresh install: rather than silently importing an SD config, note that one
+    // is available so the onboarding flow can offer it as a prompt.
     String cfg_text;
     if (loadConfigTextFromSd(&cfg_text) && configHasIdentityKeys(cfg_text)) {
-      char err[96] = {};
-      if (plumeria::web::importConfigText(cfg_text.c_str(), false, err, sizeof(err))) {
-        delay(120);
-        ESP.restart();
-      }
+      first_install_import_available = true;
     }
 #endif
-
-    if (!g_mesh.identityLoadedFromNvs()) {
-      first_install_identity_prompt = true;
-    }
+    first_install_identity_prompt = true;
   }
 
   g_ui.attachMeshAdapter(&g_mesh);
+  g_ui.setFirstInstallImportAvailable(first_install_import_available);
   g_ui.setFirstInstallIdentityPrompt(first_install_identity_prompt);
   const bool ui_ready = g_ui.begin();
   pagerDiagLog("ui begin=%d", ui_ready ? 1 : 0);

@@ -18,6 +18,7 @@ class StandaloneUi {
 
   void attachMeshAdapter(mesh::MeshAdapter* adapter);
   void setFirstInstallIdentityPrompt(bool enabled);
+  void setFirstInstallImportAvailable(bool available);
   void setChannels(const char names[][32], size_t count);
   void setMeshReady(bool ready);
   void setWifiState(bool config_server_on, bool sta_connected, bool ap_mode);
@@ -85,9 +86,26 @@ class StandaloneUi {
   void moveCfgSelection(int delta);
   void activateCfgSelection();
   // Shared confirmation modal (used by config and contacts).
-  enum class ConfirmKind : uint8_t { None, CfgRow, ContactDelete };
+  enum class ConfirmKind : uint8_t { None, CfgRow, ContactDelete, ImportFirstInstall, RegionDefault };
+
+  // First-install onboarding wizard: import? -> name -> region -> wifi -> reboot.
+  enum class OnboardingStep : uint8_t { None, Import, Name, Region, RegionList, WifiSsid, WifiPass };
+  void startOnboarding();
+  void advanceOnboardingToName();
+  void openOnboardingComposePrompt(const char* placeholder, uint16_t max_len, bool allow_skip);
+  void declineConfirm();
+  void openRegionChoicePrompt();
+  void openRegionListDialog();
+  bool ensureRegionListDialogBuilt();
+  void chooseRegionAndAdvance(const char* region_id);
+  void openWifiSsidPrompt();
+  void openWifiPassPrompt();
+  bool commitOnboardingText();
+  void onboardingSkipOrCancel();
+  void finishOnboardingAndReboot();
   bool ensureConfirmDialogBuilt();
-  void openConfirmDialog(ConfirmKind kind, const char* title, const char* body, uint32_t guard_ms);
+  void openConfirmDialog(ConfirmKind kind, const char* title, const char* body, uint32_t guard_ms,
+                         const char* yes_label = nullptr, const char* no_label = nullptr);
   void closeConfirmDialog();
   void acceptConfirmDialog();
   bool cfgActionNeedsConfirm(uint8_t row) const;
@@ -171,6 +189,7 @@ class StandaloneUi {
 
   static void onFocusableEvent(lv_event_t* event);
   static void onContactsEvent(lv_event_t* event);
+  static void onRegionListEvent(lv_event_t* event);
   static void onDmEvent(lv_event_t* event);
   static void onComposeActionEvent(lv_event_t* event);
   static void onComposeKeyboardEvent(lv_event_t* event);
@@ -441,7 +460,13 @@ class StandaloneUi {
   bool confirm_open_ = false;
   bool first_install_identity_prompt_ = false;
   bool first_install_auto_export_pending_ = false;
+  bool first_install_import_available_ = false;
   bool identity_prompt_open_ = false;
+  OnboardingStep onboarding_step_ = OnboardingStep::None;
+  char onboarding_wifi_ssid_[64] = {};
+  lv_obj_t* region_list_backdrop_ = nullptr;
+  lv_obj_t* region_list_panel_ = nullptr;
+  uint8_t region_list_selected_ = 0;
   uint8_t pending_chat_focus_attempts_ = 0;
   uint8_t dropdown_highlight_channel_ = 0;
   uint8_t cfg_selected_row_ = 0;

@@ -116,7 +116,7 @@ constexpr lv_coord_t kContactsSelectorLabelHorizontalPad = 6;
 constexpr lv_coord_t kComposeDialogMinW = 160;
 constexpr lv_coord_t kComposeDialogMaxW = 236;
 constexpr lv_coord_t kComposeDialogH = 90;
-constexpr lv_coord_t kComposeDialogSingleLineH = 78;
+constexpr lv_coord_t kComposeDialogSingleLineH = 96;
 constexpr lv_coord_t kComposeInputH = 54;
 constexpr lv_coord_t kComposeInputSingleLineH = 24;
 constexpr size_t kComposeMessageMaxChars = 90;
@@ -1608,6 +1608,284 @@ void StandaloneUi::setFirstInstallIdentityPrompt(bool enabled) {
 #endif
 }
 
+void StandaloneUi::setFirstInstallImportAvailable(bool available) {
+  first_install_import_available_ = available;
+}
+
+namespace {
+uint32_t onboardingConfirmGuardMs() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  return 1200;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+  return 550;
+#else
+  return 250;
+#endif
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// First-install onboarding wizard
+//   [import?] -> node name -> radio region -> wifi ssid/pass -> reboot
+// ---------------------------------------------------------------------------
+
+void StandaloneUi::startOnboarding() {
+  if (first_install_import_available_) {
+    onboarding_step_ = OnboardingStep::Import;
+    openConfirmDialog(ConfirmKind::ImportFirstInstall, "Import configuration?",
+                      "A saved configuration was found on SD. Import it and reboot?",
+                      onboardingConfirmGuardMs());
+  } else {
+    advanceOnboardingToName();
+  }
+}
+
+void StandaloneUi::advanceOnboardingToName() {
+  openIdentityNamePrompt();  // sets onboarding_step_ = Name
+}
+
+void StandaloneUi::openRegionChoicePrompt() {
+  onboarding_step_ = OnboardingStep::Region;
+  const char* def = plumeria::web::defaultRegionId();
+  char body[96];
+  snprintf(body, sizeof(body), "Radio region: %s. Use this preset, or change?", def);
+  char use_label[24];
+  snprintf(use_label, sizeof(use_label), "(U)se %s", def);
+  openConfirmDialog(ConfirmKind::RegionDefault, "Radio preset", body, onboardingConfirmGuardMs(),
+                    use_label, "(C)hange");
+}
+
+void StandaloneUi::chooseRegionAndAdvance(const char* region_id) {
+  char err[96] = {};
+  plumeria::web::setRegionPreset(region_id, err, sizeof(err));
+  openWifiSsidPrompt();
+}
+
+void StandaloneUi::openWifiSsidPrompt() {
+  onboarding_step_ = OnboardingStep::WifiSsid;
+  onboarding_wifi_ssid_[0] = '\0';
+  openOnboardingComposePrompt("WiFi SSID (blank = skip)", 63, true);
+}
+
+void StandaloneUi::openWifiPassPrompt() {
+  onboarding_step_ = OnboardingStep::WifiPass;
+  openOnboardingComposePrompt("WiFi password (blank = none)", 63, true);
+}
+
+bool StandaloneUi::commitOnboardingText() {
+  if (!compose_input_) {
+    return false;
+  }
+  const char* raw = lv_textarea_get_text(compose_input_);
+  String text(raw ? raw : "");
+  text.trim();
+
+  switch (onboarding_step_) {
+    case OnboardingStep::Name: {
+      if (text.length() == 0 || text.length() > 31) {
+        appendChatLine("[ERR] Identity name must be 1-31 chars", ChatLineKind::Error);
+        return false;
+      }
+      char err[96] = {};
+      if (!plumeria::web::setNodeName(text.c_str(), err, sizeof(err))) {
+        appendChatLine(err[0] ? err : "[ERR] Failed to set identity name", ChatLineKind::Error);
+        return false;
+      }
+      identity_prompt_open_ = false;
+      closeComposeDialog(false);
+      openRegionChoicePrompt();
+      return true;
+    }
+    case OnboardingStep::WifiSsid: {
+      if (text.length() == 0) {
+        identity_prompt_open_ = false;
+        closeComposeDialog(false);
+        finishOnboardingAndReboot();
+        return true;
+      }
+      strncpy(onboarding_wifi_ssid_, text.c_str(), sizeof(onboarding_wifi_ssid_) - 1);
+      onboarding_wifi_ssid_[sizeof(onboarding_wifi_ssid_) - 1] = '\0';
+      openWifiPassPrompt();  // reconfigures the still-open compose for the password
+      return true;
+    }
+    case OnboardingStep::WifiPass: {
+      char err[96] = {};
+      plumeria::web::setWifiCredentials(onboarding_wifi_ssid_, text.c_str(), err, sizeof(err));
+      identity_prompt_open_ = false;
+      closeComposeDialog(false);
+      finishOnboardingAndReboot();
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+void StandaloneUi::onboardingSkipOrCancel() {
+  switch (onboarding_step_) {
+    case OnboardingStep::WifiSsid:
+      identity_prompt_open_ = false;
+      closeComposeDialog(false);
+      finishOnboardingAndReboot();
+      break;
+    case OnboardingStep::WifiPass: {
+      char err[96] = {};
+      plumeria::web::setWifiCredentials(onboarding_wifi_ssid_, "", err, sizeof(err));
+      identity_prompt_open_ = false;
+      closeComposeDialog(false);
+      finishOnboardingAndReboot();
+      break;
+    }
+    default:
+      // Node name is required: ignore skip/cancel and keep the prompt open.
+      break;
+  }
+}
+
+void StandaloneUi::finishOnboardingAndReboot() {
+  onboarding_step_ = OnboardingStep::None;
+  // Save the freshly-built config to SD (where supported) so it can be
+  // re-imported later, then reboot to bring the radio up on the chosen region.
+  if (first_install_auto_export_pending_) {
+    first_install_auto_export_pending_ = false;
+    exportConfigToSd();
+  }
+  delay(120);
+  ESP.restart();
+}
+
+void StandaloneUi::declineConfirm() {
+  const ConfirmKind kind = confirm_kind_;
+  closeConfirmDialog();
+  switch (kind) {
+    case ConfirmKind::CfgRow:
+      strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      refreshCfgDialog();
+      break;
+    case ConfirmKind::ImportFirstInstall:
+      advanceOnboardingToName();
+      break;
+    case ConfirmKind::RegionDefault:
+      openRegionListDialog();
+      break;
+    default:
+      break;
+  }
+}
+
+void StandaloneUi::onRegionListEvent(lv_event_t* event) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(event));
+  if (!ui || lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    return;
+  }
+  lv_obj_t* target = lv_event_get_target(event);
+  const int index = static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
+  const char* id = plumeria::web::regionPresetId(index);
+  if (!id || id[0] == '\0') {
+    return;
+  }
+  if (ui->region_list_backdrop_) {
+    lv_obj_add_flag(ui->region_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  }
+  ui->chooseRegionAndAdvance(id);
+}
+
+bool StandaloneUi::ensureRegionListDialogBuilt() {
+  if (region_list_backdrop_) {
+    return true;
+  }
+  if (!root_) {
+    return false;
+  }
+
+  region_list_backdrop_ = lv_obj_create(root_);
+  if (!region_list_backdrop_) {
+    return false;
+  }
+  lv_obj_set_size(region_list_backdrop_, LV_PCT(90), LV_PCT(90));
+  lv_obj_align(region_list_backdrop_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(region_list_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_color(region_list_backdrop_, lv_color_hex(0x0E285B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(region_list_backdrop_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(region_list_backdrop_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(region_list_backdrop_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(region_list_backdrop_, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(region_list_backdrop_, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(region_list_backdrop_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(region_list_backdrop_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_flag(region_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* title = lv_label_create(region_list_backdrop_);
+  lv_obj_add_style(title, &style_text_main_, 0);
+  lv_label_set_text(title, "Select radio region");
+
+  lv_obj_t* hint = lv_label_create(region_list_backdrop_);
+  lv_obj_add_style(hint, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(hint, "j/k or arrows, Enter=select, 1-9=quick, u=default, c=back");
+
+  region_list_panel_ = lv_obj_create(region_list_backdrop_);
+  lv_obj_set_width(region_list_panel_, LV_PCT(100));
+  lv_obj_set_flex_grow(region_list_panel_, 1);
+  lv_obj_set_style_bg_opa(region_list_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(region_list_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(region_list_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(region_list_panel_, 3, LV_PART_MAIN);
+  lv_obj_set_flex_flow(region_list_panel_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scroll_dir(region_list_panel_, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(region_list_panel_, LV_SCROLLBAR_MODE_AUTO);
+
+  const int count = plumeria::web::regionPresetCount();
+  for (int i = 0; i < count; i++) {
+    lv_obj_t* btn = lv_btn_create(region_list_panel_);
+    lv_obj_set_width(btn, LV_PCT(100));
+    lv_obj_set_height(btn, 26);
+    lv_obj_add_style(btn, &style_button_, 0);
+    lv_obj_add_style(btn, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_set_user_data(btn, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+    lv_obj_add_event_cb(btn, onRegionListEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(btn, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(btn, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    if (key_group_) {
+      lv_group_add_obj(key_group_, btn);
+    }
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_obj_add_style(lbl, &style_text_main_, 0);
+    char row[48] = {};
+    const char* id = plumeria::web::regionPresetId(i);
+    if (i < 9) {
+      snprintf(row, sizeof(row), "(%d) %s", i + 1, id ? id : "-");
+      lv_label_set_text(lbl, row);
+    } else {
+      lv_label_set_text(lbl, id ? id : "-");
+    }
+    lv_obj_center(lbl);
+  }
+  return true;
+}
+
+void StandaloneUi::openRegionListDialog() {
+  if (!ensureRegionListDialogBuilt()) {
+    // Fall back to the default region if the picker cannot be built.
+    chooseRegionAndAdvance(plumeria::web::defaultRegionId());
+    return;
+  }
+  onboarding_step_ = OnboardingStep::RegionList;
+  region_list_selected_ = 0;
+  lv_obj_clear_flag(region_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(region_list_backdrop_);
+  if (key_group_ && region_list_panel_) {
+    lv_obj_t* first = lv_obj_get_child(region_list_panel_, 0);
+    if (first) {
+      lv_group_focus_obj(first);
+    }
+  }
+}
+
 bool StandaloneUi::ensureContactsDialogBuilt() {
   if (!kEnableContactsDialog) {
     return false;
@@ -3012,7 +3290,7 @@ bool StandaloneUi::begin() {
   started_ = true;
   if (first_install_identity_prompt_) {
     first_install_identity_prompt_ = false;
-    openIdentityNamePrompt();
+    startOnboarding();
   }
   if (splash_overlay_) {
     lv_obj_move_foreground(splash_overlay_);
@@ -3324,7 +3602,13 @@ void StandaloneUi::refreshComposeDialog() {
 
   char title[64];
   if (identity_prompt_open_) {
-    snprintf(title, sizeof(title), "Identity Name: ");
+    if (onboarding_step_ == OnboardingStep::WifiSsid) {
+      snprintf(title, sizeof(title), "WiFi SSID (blank = skip)");
+    } else if (onboarding_step_ == OnboardingStep::WifiPass) {
+      snprintf(title, sizeof(title), "WiFi Password (blank = none)");
+    } else {
+      snprintf(title, sizeof(title), "Identity Name: ");
+    }
   } else if (compose_dm_mode_) {
     snprintf(title, sizeof(title), "DM to %s", compose_target_channel_[0] ? compose_target_channel_ : "-");
   } else {
@@ -3336,6 +3620,13 @@ void StandaloneUi::refreshComposeDialog() {
     lv_label_set_text(compose_send_label_, identity_prompt_open_ ? "Save" : "Send");
   }
 
+  if (compose_cancel_label_) {
+    const bool allow_skip = identity_prompt_open_ &&
+                            (onboarding_step_ == OnboardingStep::WifiSsid ||
+                             onboarding_step_ == OnboardingStep::WifiPass);
+    lv_label_set_text(compose_cancel_label_, allow_skip ? "Skip" : "Cancel");
+  }
+
   if (compose_hint_label_) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_label_set_text(compose_hint_label_, "");
@@ -3344,7 +3635,13 @@ void StandaloneUi::refreshComposeDialog() {
     if (kUseOnscreenKeyboard) {
       lv_label_set_text(compose_hint_label_, identity_prompt_open_ ? "Tap OK to save name." : "Tap OK to send.");
     } else {
-      lv_label_set_text(compose_hint_label_, identity_prompt_open_ ? "Press enter to commit identity name." : "");
+      if (!identity_prompt_open_) {
+        lv_label_set_text(compose_hint_label_, "");
+      } else if (onboarding_step_ == OnboardingStep::WifiSsid || onboarding_step_ == OnboardingStep::WifiPass) {
+        lv_label_set_text(compose_hint_label_, "Enter=Next  Esc=Skip");
+      } else {
+        lv_label_set_text(compose_hint_label_, "Enter=Save");
+      }
     }
 #endif
   }
@@ -3743,9 +4040,20 @@ void StandaloneUi::openComposeDialog() {
 }
 
 void StandaloneUi::openIdentityNamePrompt() {
+  onboarding_step_ = OnboardingStep::Name;
+  openOnboardingComposePrompt("Enter identity name", 31, false);
+}
+
+void StandaloneUi::openOnboardingComposePrompt(const char* placeholder, uint16_t max_len,
+                                               bool allow_skip) {
+  (void)allow_skip;
   if (!compose_dialog_ || !compose_input_) {
     return;
   }
+
+  const bool wifi_ssid_prompt = onboarding_step_ == OnboardingStep::WifiSsid;
+  const bool wifi_pass_prompt = onboarding_step_ == OnboardingStep::WifiPass;
+  const bool wifi_prompt = wifi_ssid_prompt || wifi_pass_prompt;
 
   identity_prompt_open_ = true;
   compose_dm_mode_ = false;
@@ -3762,16 +4070,39 @@ void StandaloneUi::openIdentityNamePrompt() {
     lv_obj_set_width(compose_input_, LV_PCT(100));
     lv_obj_set_height(compose_input_, 38);
   } else {
-    lv_obj_set_size(compose_dialog_, lv_obj_get_width(compose_dialog_), kComposeDialogSingleLineH);
-    lv_obj_set_size(compose_input_, LV_PCT(composeInputWidthPct()), kComposeInputSingleLineH);
-    lv_obj_align(compose_input_, LV_ALIGN_BOTTOM_MID, 0, composeInputBottomInset());
+    const lv_coord_t main_w = main_panel_ ? lv_obj_get_width(main_panel_) : lv_disp_get_hor_res(nullptr);
+    const lv_coord_t dialog_w =
+        clampCoord(static_cast<lv_coord_t>(main_w - dialogInsetW(8, 2)), kComposeDialogMinW,
+                   dialogMaxW(kComposeDialogMaxW, 338));
+    lv_obj_set_size(compose_dialog_, dialog_w, kComposeDialogSingleLineH);
     lv_obj_center(compose_dialog_);
+    lv_obj_update_layout(compose_dialog_);
+
+    // Keep onboarding input geometry deterministic (no LV_ALIGN recompute jitter).
+    lv_coord_t input_w = static_cast<lv_coord_t>(dialog_w - (wifi_prompt ? 12 : 8));
+    if (input_w < 40) {
+      input_w = 40;
+    }
+    const lv_coord_t input_h = kComposeInputSingleLineH;
+    lv_obj_set_size(compose_input_, input_w, input_h);
+    lv_obj_set_align(compose_input_, LV_ALIGN_TOP_LEFT);
+    lv_obj_set_pos(compose_input_, 4, 44);
+    lv_obj_move_foreground(compose_input_);
   }
-  lv_textarea_set_one_line(compose_input_, true);
+  // SSID stays non-one-line to avoid cursor-follow jitter; password is strict one-line.
+  lv_textarea_set_one_line(compose_input_, !wifi_ssid_prompt);
+  lv_textarea_set_password_mode(compose_input_, false);
+  if (!kUseOnscreenKeyboard && wifi_prompt) {
+    // Keep SSID and password visually identical in height on keyboard builds.
+    lv_obj_set_height(compose_input_, kComposeInputSingleLineH);
+    lv_obj_set_style_pad_top(compose_input_, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(compose_input_, 1, LV_PART_MAIN);
+  }
+  lv_obj_set_scrollbar_mode(compose_input_, LV_SCROLLBAR_MODE_OFF);
 
   lv_textarea_set_text(compose_input_, "");
-  lv_textarea_set_max_length(compose_input_, 31);
-  lv_textarea_set_placeholder_text(compose_input_, "Enter identity name");
+  lv_textarea_set_max_length(compose_input_, max_len);
+  lv_textarea_set_placeholder_text(compose_input_, placeholder);
   refreshComposeDialog();
 
   compose_open_ = true;
@@ -3899,11 +4230,8 @@ void StandaloneUi::onComposeKeyboardEvent(lv_event_t* event) {
 
   const lv_event_code_t code = lv_event_get_code(event);
   if (code == LV_EVENT_READY) {
-    if (ui->identity_prompt_open_) {
-      if (ui->applyIdentityNameFromPrompt()) {
-        ui->identity_prompt_open_ = false;
-        ui->closeComposeDialog(true);
-      }
+    if (ui->onboarding_step_ != OnboardingStep::None) {
+      ui->commitOnboardingText();  // handles validation, transition, and closing
     } else if (ui->sendComposeMessage()) {
       ui->closeComposeDialog(true);
     }
@@ -3911,7 +4239,11 @@ void StandaloneUi::onComposeKeyboardEvent(lv_event_t* event) {
   }
 
   if (code == LV_EVENT_CANCEL) {
-    ui->closeComposeDialog(true);
+    if (ui->onboarding_step_ != OnboardingStep::None) {
+      ui->onboardingSkipOrCancel();
+    } else {
+      ui->closeComposeDialog(true);
+    }
   }
 }
 
@@ -3923,7 +4255,11 @@ void StandaloneUi::onComposeActionEvent(lv_event_t* event) {
 
   lv_obj_t* target = lv_event_get_target(event);
   if (target == ui->compose_cancel_btn_) {
-    ui->closeComposeDialog(true);
+    if (ui->onboarding_step_ != OnboardingStep::None) {
+      ui->onboardingSkipOrCancel();
+    } else {
+      ui->closeComposeDialog(true);
+    }
     return;
   }
 
@@ -3931,11 +4267,8 @@ void StandaloneUi::onComposeActionEvent(lv_event_t* event) {
     return;
   }
 
-  if (ui->identity_prompt_open_) {
-    if (ui->applyIdentityNameFromPrompt()) {
-      ui->identity_prompt_open_ = false;
-      ui->closeComposeDialog(true);
-    }
+  if (ui->onboarding_step_ != OnboardingStep::None) {
+    ui->commitOnboardingText();
     return;
   }
 
@@ -4185,14 +4518,11 @@ bool StandaloneUi::handleComposeKey(uint32_t key) {
 
   if (identity_prompt_open_) {
     if (key == LV_KEY_ENTER || key == '\n' || key == '\r') {
-      if (applyIdentityNameFromPrompt()) {
-        identity_prompt_open_ = false;
-        closeComposeDialog(true);
-      }
+      commitOnboardingText();  // validates, transitions, and closes as needed
       return true;
     }
 
-    // Keep the prompt open until a valid name is submitted.
+    // Keep the prompt open until this step is submitted (or skipped via Esc).
     return true;
   }
 
@@ -6520,7 +6850,7 @@ const char* StandaloneUi::cfgConfirmActionText(uint8_t row) const {
 // Generic confirmation modal. Callers set any kind-specific pending state
 // (e.g. confirm_pending_row_, contacts_pending_delete_key_) before calling.
 void StandaloneUi::openConfirmDialog(ConfirmKind kind, const char* title, const char* body,
-                                     uint32_t guard_ms) {
+                                     uint32_t guard_ms, const char* yes_label, const char* no_label) {
   if (!ensureConfirmDialogBuilt()) {
     return;
   }
@@ -6534,6 +6864,12 @@ void StandaloneUi::openConfirmDialog(ConfirmKind kind, const char* title, const 
   }
   if (confirm_action_label_) {
     lv_label_set_text(confirm_action_label_, body ? body : "");
+  }
+  if (confirm_yes_label_) {
+    lv_label_set_text(confirm_yes_label_, yes_label ? yes_label : "(Y)es");
+  }
+  if (confirm_no_label_) {
+    lv_label_set_text(confirm_no_label_, no_label ? no_label : "(N)o");
   }
   lv_obj_clear_flag(confirm_backdrop_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(confirm_backdrop_);
@@ -6660,6 +6996,12 @@ void StandaloneUi::acceptConfirmDialog() {
       break;
     case ConfirmKind::ContactDelete:
       performContactDelete();
+      break;
+    case ConfirmKind::ImportFirstInstall:
+      importConfigFromSd();  // imports + reboots
+      break;
+    case ConfirmKind::RegionDefault:
+      chooseRegionAndAdvance(plumeria::web::defaultRegionId());
       break;
     default:
       break;
@@ -8793,34 +9135,81 @@ void StandaloneUi::handleKey(uint32_t key) {
     if (static_cast<int32_t>(millis() - confirm_guard_until_ms_) < 0) {
       return;
     }
-    const bool was_cfg = (confirm_kind_ == ConfirmKind::CfgRow);
-    if (norm_key == 'y' || norm_key == 'Y') {
+    if (confirm_kind_ == ConfirmKind::RegionDefault && kKeyboardNavEnabled && norm_key == 'u') {
+      acceptConfirmDialog();
+    } else if (confirm_kind_ == ConfirmKind::RegionDefault && kKeyboardNavEnabled && norm_key == 'c') {
+      declineConfirm();
+    } else if (norm_key == 'y' || norm_key == 'Y') {
       acceptConfirmDialog();
     } else if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
       // Cardputer action key can auto-repeat; require explicit Y/N.
       return;
 #else
-      // Enter follows focus: default is No, so accidental Enter cancels.
+      // Enter follows focus: default is No, so accidental Enter declines.
       if (focused == confirm_yes_btn_) {
         acceptConfirmDialog();
       } else {
-        closeConfirmDialog();
-        if (was_cfg) {
-          strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
-          cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-          refreshCfgDialog();
-        }
+        declineConfirm();
       }
 #endif
     } else if (norm_key == 'n' || norm_key == 'N' || norm_key == LV_KEY_ESC ||
                norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127) {
-      closeConfirmDialog();
-      if (was_cfg) {
-        strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-        refreshCfgDialog();
+      declineConfirm();
+    }
+    return;
+  }
+
+  // Region picker (onboarding) is modal: handle its own nav, block everything else.
+  if (onboarding_step_ == OnboardingStep::RegionList && region_list_panel_) {
+    const int count = plumeria::web::regionPresetCount();
+    if (count <= 0) {
+      return;
+    }
+    if (norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127 ||
+        (kKeyboardNavEnabled && norm_key == 'c')) {
+      if (region_list_backdrop_) {
+        lv_obj_add_flag(region_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
       }
+      openRegionChoicePrompt();
+      return;
+    } else if (kKeyboardNavEnabled && norm_key == 'u') {
+      if (region_list_backdrop_) {
+        lv_obj_add_flag(region_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+      }
+      chooseRegionAndAdvance(plumeria::web::defaultRegionId());
+      return;
+    } else if (kKeyboardNavEnabled && norm_key >= '1' && norm_key <= '9') {
+      const int picked = static_cast<int>(norm_key - '1');
+      if (picked >= 0 && picked < count) {
+        region_list_selected_ = static_cast<uint8_t>(picked);
+        const char* id = plumeria::web::regionPresetId(region_list_selected_);
+        if (region_list_backdrop_) {
+          lv_obj_add_flag(region_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+        }
+        chooseRegionAndAdvance(id);
+      }
+      return;
+    } else if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+      region_list_selected_ = static_cast<uint8_t>((region_list_selected_ + count - 1) % count);
+    } else if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+      region_list_selected_ = static_cast<uint8_t>((region_list_selected_ + 1) % count);
+    } else if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      const char* id = plumeria::web::regionPresetId(region_list_selected_);
+      if (region_list_backdrop_) {
+        lv_obj_add_flag(region_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+      }
+      chooseRegionAndAdvance(id);
+      return;
+    } else {
+      return;
+    }
+    lv_obj_t* item = lv_obj_get_child(region_list_panel_, region_list_selected_);
+    if (item) {
+      if (key_group_) {
+        lv_group_focus_obj(item);
+      }
+      lv_obj_scroll_to_view(item, LV_ANIM_ON);
     }
     return;
   }
@@ -9482,18 +9871,12 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
       confirm_swallow_first_click_ = false;
       return;
     }
-    const bool was_cfg = (confirm_kind_ == ConfirmKind::CfgRow);
     if ((target == confirm_yes_btn_) || (target == confirm_yes_label_) ||
         hasAncestor(target, confirm_yes_btn_)) {
       acceptConfirmDialog();
     } else if ((target == confirm_no_btn_) || (target == confirm_no_label_) ||
                hasAncestor(target, confirm_no_btn_) || target == confirm_backdrop_) {
-      closeConfirmDialog();
-      if (was_cfg) {
-        strncpy(cfg_action_text_, "Cancelled", sizeof(cfg_action_text_) - 1);
-        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-        refreshCfgDialog();
-      }
+      declineConfirm();
     } else if (confirm_dialog_ && hasAncestor(target, confirm_dialog_)) {
       // Clicks inside confirm dialog body should not leak to underlying handlers.
       return;
