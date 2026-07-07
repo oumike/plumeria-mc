@@ -1868,6 +1868,142 @@ bool StandaloneUi::ensureRegionListDialogBuilt() {
   return true;
 }
 
+bool StandaloneUi::ensureContactActionsPopupBuilt() {
+  if (contacts_actions_backdrop_) {
+    return true;
+  }
+  if (!root_) {
+    return false;
+  }
+
+  contacts_actions_backdrop_ = lv_obj_create(root_);
+  if (!contacts_actions_backdrop_) {
+    return false;
+  }
+  lv_obj_set_size(contacts_actions_backdrop_, LV_PCT(70), LV_SIZE_CONTENT);
+  lv_obj_align(contacts_actions_backdrop_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(contacts_actions_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_color(contacts_actions_backdrop_, lv_color_hex(0x0E285B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(contacts_actions_backdrop_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(contacts_actions_backdrop_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(contacts_actions_backdrop_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(contacts_actions_backdrop_, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(contacts_actions_backdrop_, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(contacts_actions_backdrop_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(contacts_actions_backdrop_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_flag(contacts_actions_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(contacts_actions_backdrop_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(contacts_actions_backdrop_, onContactsEvent, LV_EVENT_CLICKED, this);
+
+  lv_obj_t* title = lv_label_create(contacts_actions_backdrop_);
+  lv_obj_add_style(title, &style_text_main_, 0);
+  lv_label_set_text(title, "Contact Actions");
+
+  contacts_actions_panel_ = lv_obj_create(contacts_actions_backdrop_);
+  lv_obj_set_width(contacts_actions_panel_, LV_PCT(100));
+  lv_obj_set_height(contacts_actions_panel_, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(contacts_actions_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(contacts_actions_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(contacts_actions_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(contacts_actions_panel_, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(contacts_actions_panel_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_clear_flag(contacts_actions_panel_, LV_OBJ_FLAG_SCROLLABLE);
+
+  // Admin (fresh button; shown only for repeater/room contacts).
+  contacts_actions_admin_btn_ = lv_btn_create(contacts_actions_panel_);
+  lv_obj_set_width(contacts_actions_admin_btn_, LV_PCT(100));
+  lv_obj_set_height(contacts_actions_admin_btn_, 28);
+  lv_obj_add_style(contacts_actions_admin_btn_, &style_button_, 0);
+  lv_obj_add_style(contacts_actions_admin_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(contacts_actions_admin_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(contacts_actions_admin_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(contacts_actions_admin_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(contacts_actions_admin_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  contacts_actions_admin_label_ = lv_label_create(contacts_actions_admin_btn_);
+  lv_obj_add_style(contacts_actions_admin_label_, &style_text_main_, 0);
+  lv_label_set_text(contacts_actions_admin_label_, "(A)dmin");
+  lv_obj_center(contacts_actions_admin_label_);
+
+  // Reparent the existing Path/Ignore/Del buttons into the pop-up as full-width
+  // rows; their existing handlers/actions are preserved.
+  lv_obj_t* reparent[3] = { contacts_path_btn_, contacts_ignore_btn_, contacts_del_btn_ };
+  for (int i = 0; i < 3; i++) {
+    lv_obj_t* b = reparent[i];
+    if (!b) {
+      continue;
+    }
+    lv_obj_set_parent(b, contacts_actions_panel_);
+    lv_obj_set_width(b, LV_PCT(100));
+    lv_obj_set_height(b, 28);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_HIDDEN);  // visibility now follows the backdrop
+  }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  contacts_actions_close_btn_ = lv_btn_create(contacts_actions_panel_);
+  lv_obj_set_width(contacts_actions_close_btn_, LV_PCT(100));
+  lv_obj_set_height(contacts_actions_close_btn_, 28);
+  lv_obj_add_style(contacts_actions_close_btn_, &style_button_, 0);
+  lv_obj_add_style(contacts_actions_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(contacts_actions_close_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(contacts_actions_close_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(contacts_actions_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  lv_obj_t* clbl = lv_label_create(contacts_actions_close_btn_);
+  lv_obj_add_style(clbl, &style_text_main_, 0);
+  lv_label_set_text(clbl, "Close");
+  lv_obj_center(clbl);
+#endif
+
+  if (key_group_) {
+    lv_group_add_obj(key_group_, contacts_actions_admin_btn_);
+    if (contacts_actions_close_btn_) {
+      lv_group_add_obj(key_group_, contacts_actions_close_btn_);
+    }
+  }
+  return true;
+}
+
+void StandaloneUi::openContactActionsPopup() {
+  if (!contacts_open_ || contacts_count_ == 0 || contacts_selected_index_ >= contacts_count_) {
+    return;
+  }
+  if (!ensureContactActionsPopupBuilt()) {
+    return;
+  }
+  contacts_actions_open_ = true;
+  const mesh::MeshContactSummary& sel = contacts_cache_[contacts_selected_index_];
+  const bool is_admin = (sel.type == 2 || sel.type == 3);
+  if (contacts_actions_admin_btn_) {
+    if (is_admin) {
+      lv_obj_clear_flag(contacts_actions_admin_btn_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(contacts_actions_admin_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (contacts_ignore_label_) {
+    lv_label_set_text(contacts_ignore_label_, sel.ignored ? "Un(i)gnore" : "(I)gnore");
+  }
+  lv_obj_clear_flag(contacts_actions_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(contacts_actions_backdrop_);
+  if (key_group_) {
+    lv_obj_t* first = (is_admin && contacts_actions_admin_btn_) ? contacts_actions_admin_btn_
+                                                                : contacts_path_btn_;
+    if (first) {
+      lv_group_focus_obj(first);
+    }
+  }
+}
+
+void StandaloneUi::closeContactActionsPopup() {
+  contacts_actions_open_ = false;
+  if (contacts_actions_backdrop_) {
+    lv_obj_add_flag(contacts_actions_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (key_group_ && contacts_actions_btn_ && contacts_open_) {
+    lv_group_focus_obj(contacts_actions_btn_);
+  }
+}
+
 void StandaloneUi::openRegionListDialog() {
   if (!ensureRegionListDialogBuilt()) {
     // Fall back to the default region if the picker cannot be built.
@@ -2309,7 +2445,7 @@ void StandaloneUi::buildLayout() {
 
   contacts_path_btn_ = lv_btn_create(header_bar_);
   lv_obj_set_size(contacts_path_btn_, 58, selector_h);
-  lv_obj_align(contacts_path_btn_, LV_ALIGN_RIGHT_MID, -50, 0);
+  lv_obj_align(contacts_path_btn_, LV_ALIGN_RIGHT_MID, -126, 0);
   lv_obj_add_style(contacts_path_btn_, &style_button_, 0);
   lv_obj_add_style(contacts_path_btn_, &style_button_focused_, LV_STATE_FOCUSED);
   lv_obj_clear_flag(contacts_path_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -2323,6 +2459,25 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_style_text_font(contacts_path_label_, header_font, 0);
   lv_label_set_text(contacts_path_label_, "(P)ath");
   lv_obj_center(contacts_path_label_);
+
+  // Ignore/Unignore button: sits between Path and Del in the header. Label
+  // toggles based on the selected contact's ignore state (see refreshContactsDialog).
+  contacts_ignore_btn_ = lv_btn_create(header_bar_);
+  lv_obj_set_size(contacts_ignore_btn_, 70, selector_h);
+  lv_obj_align(contacts_ignore_btn_, LV_ALIGN_RIGHT_MID, -52, 0);
+  lv_obj_add_style(contacts_ignore_btn_, &style_button_, 0);
+  lv_obj_add_style(contacts_ignore_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(contacts_ignore_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(contacts_ignore_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(contacts_ignore_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(contacts_ignore_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  lv_obj_add_flag(contacts_ignore_btn_, LV_OBJ_FLAG_HIDDEN);
+
+  contacts_ignore_label_ = lv_label_create(contacts_ignore_btn_);
+  lv_obj_add_style(contacts_ignore_label_, &style_text_main_, 0);
+  lv_obj_set_style_text_font(contacts_ignore_label_, header_font, 0);
+  lv_label_set_text(contacts_ignore_label_, "(I)gnore");
+  lv_obj_center(contacts_ignore_label_);
 
   // Delete-contact button: lives in the header, right-aligned. Only shown while
   // the Contacts screen is open (where the wireless/clock/battery cluster on the
@@ -2347,6 +2502,31 @@ void StandaloneUi::buildLayout() {
   lv_label_set_text(contacts_del_label_, "(D)el");
 #endif
   lv_obj_center(contacts_del_label_);
+
+  // "Contact Actions" header button (top-right). Opens a pop-up that holds the
+  // Admin/Path/Ignore/Del buttons. Path/Ignore/Del above are reparented into
+  // that pop-up when it is first built; they start hidden here.
+  contacts_actions_btn_ = lv_btn_create(header_bar_);
+  // Content-sized width so the internal padding is real space between the label
+  // and the border (a fixed width with a centered label would hide it).
+  lv_obj_set_size(contacts_actions_btn_, LV_SIZE_CONTENT, selector_h);
+  lv_obj_align(contacts_actions_btn_, LV_ALIGN_RIGHT_MID, -2, 0);
+  lv_obj_add_style(contacts_actions_btn_, &style_button_, 0);
+  lv_obj_add_style(contacts_actions_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  // Match the contact selector button's internal horizontal padding.
+  lv_obj_set_style_pad_left(contacts_actions_btn_, 3, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(contacts_actions_btn_, 3, LV_PART_MAIN);
+  lv_obj_clear_flag(contacts_actions_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(contacts_actions_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(contacts_actions_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(contacts_actions_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  lv_obj_add_flag(contacts_actions_btn_, LV_OBJ_FLAG_HIDDEN);
+
+  contacts_actions_label_ = lv_label_create(contacts_actions_btn_);
+  lv_obj_add_style(contacts_actions_label_, &style_text_main_, 0);
+  lv_obj_set_style_text_font(contacts_actions_label_, header_font, 0);
+  lv_label_set_text(contacts_actions_label_, "(A)ctions");
+  lv_obj_center(contacts_actions_label_);
 
   chat_panel_ = lv_obj_create(main_panel_);
   lv_obj_set_pos(chat_panel_, 0, chat_y);
@@ -4666,11 +4846,11 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     }
 #endif
     lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
-    if (contacts_path_btn_) {
-      lv_obj_add_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_actions_btn_) {
+      lv_obj_add_flag(contacts_actions_btn_, LV_OBJ_FLAG_HIDDEN);
     }
-    if (contacts_del_btn_) {
-      lv_obj_add_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_actions_open_) {
+      closeContactActionsPopup();
     }
     lv_obj_add_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(contacts_status_label_, LV_OBJ_FLAG_HIDDEN);
@@ -4709,13 +4889,10 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
 
   lv_label_set_text(contacts_action_labels_[0], favoriteActionLabel(selected.favorite, isAdminContact));
 
-  // Show/hide admin button
+  // Admin now lives in the Contact Actions pop-up, so the bottom-row Admin
+  // button is always hidden (bottom row shows Fav + DM only).
   if (contacts_action_rows_[1]) {
-    if (isAdminContact) {
-      lv_obj_clear_flag(contacts_action_rows_[1], LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_add_flag(contacts_action_rows_[1], LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_obj_add_flag(contacts_action_rows_[1], LV_OBJ_FLAG_HIDDEN);
   }
 
   if (contacts_action_labels_[1]) {
@@ -4740,34 +4917,15 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
 
 // Keep Heltec contact actions dense: with no Admin action (non-repeater),
 // Fav and DM each take half of the row.
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  // Bottom row is Fav + DM only (Admin moved to the Contact Actions pop-up),
+  // so each takes half the row.
   if (contacts_action_rows_[0] && contacts_action_rows_[2]) {
-    const lv_coord_t action_w = isAdminContact ? LV_PCT(32) : LV_PCT(49);
-    lv_obj_set_width(contacts_action_rows_[0], action_w);
-    lv_obj_set_width(contacts_action_rows_[2], action_w);
-    if (contacts_action_rows_[1]) {
-      lv_obj_set_width(contacts_action_rows_[1], LV_PCT(32));
-    }
-    if (contacts_detail_panel_) {
-      lv_obj_invalidate(contacts_detail_panel_);
-    }
-  }
-#endif
-
-  // Update non-Heltec button widths dynamically based on admin visibility
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (contacts_action_rows_[0] && contacts_action_rows_[2]) {
-    const lv_coord_t btn_w = isAdminContact ? LV_PCT(32) : LV_PCT(49);
-    lv_obj_set_width(contacts_action_rows_[0], btn_w);
-    if (isAdminContact && contacts_action_rows_[1]) {
-      lv_obj_set_width(contacts_action_rows_[1], LV_PCT(32));
-    }
-    lv_obj_set_width(contacts_action_rows_[2], btn_w);
+    lv_obj_set_width(contacts_action_rows_[0], LV_PCT(49));
+    lv_obj_set_width(contacts_action_rows_[2], LV_PCT(49));
   }
   if (contacts_detail_panel_) {
     lv_obj_invalidate(contacts_detail_panel_);
   }
-#endif
 
   for (uint8_t i = 0; i < kContactActionCount; i++) {
     if (!contacts_action_rows_[i] || !contacts_action_labels_[i]) {
@@ -4803,12 +4961,12 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     lv_obj_align(contacts_dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
     lv_obj_move_foreground(contacts_dm_new_btn_);
     lv_obj_add_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
-    // Hide Del in the DM sub-view; NEW owns the top-right there.
-    if (contacts_path_btn_) {
-      lv_obj_add_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
+    // Hide the Contact Actions button in the DM sub-view; NEW owns the top-right.
+    if (contacts_actions_btn_) {
+      lv_obj_add_flag(contacts_actions_btn_, LV_OBJ_FLAG_HIDDEN);
     }
-    if (contacts_del_btn_) {
-      lv_obj_add_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_actions_open_) {
+      closeContactActionsPopup();
     }
     rebuildContactsDmPanel();
   } else {
@@ -4821,14 +4979,11 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), dm_panel_collapsed_h);
     lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
-    if (contacts_path_btn_) {
-      lv_obj_clear_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_move_foreground(contacts_path_btn_);
-    }
-    // Show Del in the contact detail view (a contact is selected here).
-    if (contacts_del_btn_) {
-      lv_obj_clear_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_move_foreground(contacts_del_btn_);
+    // Show the Contact Actions button in the detail view; it opens the pop-up
+    // holding Admin/Path/Ignore/Del.
+    if (contacts_actions_btn_) {
+      lv_obj_clear_flag(contacts_actions_btn_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(contacts_actions_btn_);
     }
   }
 
@@ -5154,6 +5309,12 @@ bool StandaloneUi::openContactsDialog() {
     if (contacts_path_btn_ && lv_obj_get_group(contacts_path_btn_) != key_group_) {
       lv_group_add_obj(key_group_, contacts_path_btn_);
     }
+    if (contacts_ignore_btn_ && lv_obj_get_group(contacts_ignore_btn_) != key_group_) {
+      lv_group_add_obj(key_group_, contacts_ignore_btn_);
+    }
+    if (contacts_actions_btn_ && lv_obj_get_group(contacts_actions_btn_) != key_group_) {
+      lv_group_add_obj(key_group_, contacts_actions_btn_);
+    }
     if (contacts_detail_info_panel_ && lv_obj_get_group(contacts_detail_info_panel_) != key_group_) {
       lv_group_add_obj(key_group_, contacts_detail_info_panel_);
     }
@@ -5198,6 +5359,7 @@ void StandaloneUi::closeContactsDialog(bool focus_chat) {
   contacts_nav_focused_ = false;
   contacts_dm_open_ = false;
   closeContactsPathDialog();
+  closeContactActionsPopup();
   pending_contacts_show_ = false;
   pending_contacts_post_open_ = false;
   refreshHeaderVisuals();
@@ -7008,6 +7170,25 @@ void StandaloneUi::acceptConfirmDialog() {
   }
 }
 
+void StandaloneUi::toggleSelectedContactIgnored() {
+  if (!contacts_open_ || contacts_count_ == 0 || contacts_selected_index_ >= contacts_count_ ||
+      !mesh_adapter_) {
+    return;
+  }
+  mesh::MeshContactSummary& sel = contacts_cache_[contacts_selected_index_];
+  const bool next = !sel.ignored;
+  if (mesh_adapter_->setContactIgnoredByPublicKeyHex(sel.public_key_hex, sel.name, next)) {
+    sel.ignored = next;
+    snprintf(contacts_status_text_, sizeof(contacts_status_text_), "%s %s", sel.name,
+             next ? "ignored" : "unignored");
+  } else {
+    strncpy(contacts_status_text_, "Ignore update failed", sizeof(contacts_status_text_) - 1);
+    contacts_status_text_[sizeof(contacts_status_text_) - 1] = '\0';
+  }
+  contacts_dm_open_ = false;
+  refreshContactsDialog(false);
+}
+
 void StandaloneUi::openContactDeleteConfirm() {
   if (!contacts_open_ || contacts_count_ == 0 || contacts_selected_index_ >= contacts_count_) {
     return;
@@ -7332,11 +7513,8 @@ void StandaloneUi::refreshHeaderVisuals() {
   // The header Del button only belongs on the Contacts screen (detail view).
   // refreshContactsDialog() shows it there; hide it whenever we're off that
   // screen so it can never linger over the chat/other headers.
-  if (contacts_path_btn_ && !contacts_open_) {
-    lv_obj_add_flag(contacts_path_btn_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (contacts_del_btn_ && !contacts_open_) {
-    lv_obj_add_flag(contacts_del_btn_, LV_OBJ_FLAG_HIDDEN);
+  if (contacts_actions_btn_ && !contacts_open_) {
+    lv_obj_add_flag(contacts_actions_btn_, LV_OBJ_FLAG_HIDDEN);
   }
 
   if (hide_battery_pct) {
@@ -9509,6 +9687,36 @@ void StandaloneUi::handleKey(uint32_t key) {
       return;
     }
 
+    // Contact Actions pop-up is modal: run the chosen action then close, or
+    // close on Backspace/Esc. (Path/Ignore/Del keep their p/i/d triggers.)
+    if (contacts_actions_open_) {
+      if (norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127) {
+        closeContactActionsPopup();
+        return;
+      }
+      if (kKeyboardNavEnabled && norm_key == 'a') {
+        closeContactActionsPopup();
+        activateContactsAction(1);
+        return;
+      }
+      if (kKeyboardNavEnabled && norm_key == 'p') {
+        closeContactActionsPopup();
+        openContactsPathDialog();
+        return;
+      }
+      if (kKeyboardNavEnabled && norm_key == 'i') {
+        closeContactActionsPopup();
+        toggleSelectedContactIgnored();
+        return;
+      }
+      if (kKeyboardNavEnabled && norm_key == 'd') {
+        closeContactActionsPopup();
+        openContactDeleteConfirm();
+        return;
+      }
+      return;  // modal: swallow everything else
+    }
+
     const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
 
     if (kKeyboardNavEnabled && norm_key == 'f') {
@@ -9516,7 +9724,7 @@ void StandaloneUi::handleKey(uint32_t key) {
       return;
     }
     if (kKeyboardNavEnabled && norm_key == 'a') {
-      activateContactsAction(1);
+      openContactActionsPopup();
       return;
     }
     if (kKeyboardNavEnabled && norm_key == 'm') {
@@ -9529,6 +9737,10 @@ void StandaloneUi::handleKey(uint32_t key) {
     }
     if (kKeyboardNavEnabled && norm_key == 'p') {
       openContactsPathDialog();
+      return;
+    }
+    if (kKeyboardNavEnabled && norm_key == 'i') {
+      toggleSelectedContactIgnored();
       return;
     }
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -10137,13 +10349,33 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
       return;
     }
 
-    if ((target == contacts_del_btn_) || (target == contacts_del_label_) || hasAncestor(target, contacts_del_btn_)) {
-      openContactDeleteConfirm();
+    // Contact Actions pop-up: its buttons run the same actions, then it closes.
+    if (contacts_actions_open_) {
+      if ((target == contacts_actions_admin_btn_) || hasAncestor(target, contacts_actions_admin_btn_)) {
+        closeContactActionsPopup();
+        activateContactsAction(1);  // Admin
+      } else if ((target == contacts_path_btn_) || (target == contacts_path_label_) ||
+                 hasAncestor(target, contacts_path_btn_)) {
+        closeContactActionsPopup();
+        openContactsPathDialog();
+      } else if ((target == contacts_ignore_btn_) || (target == contacts_ignore_label_) ||
+                 hasAncestor(target, contacts_ignore_btn_)) {
+        closeContactActionsPopup();
+        toggleSelectedContactIgnored();
+      } else if ((target == contacts_del_btn_) || (target == contacts_del_label_) ||
+                 hasAncestor(target, contacts_del_btn_)) {
+        closeContactActionsPopup();
+        openContactDeleteConfirm();
+      } else {
+        // Close button, tap on backdrop padding, or tap outside the pop-up.
+        closeContactActionsPopup();
+      }
       return;
     }
 
-    if ((target == contacts_path_btn_) || (target == contacts_path_label_) || hasAncestor(target, contacts_path_btn_)) {
-      openContactsPathDialog();
+    if ((target == contacts_actions_btn_) || (target == contacts_actions_label_) ||
+        hasAncestor(target, contacts_actions_btn_)) {
+      openContactActionsPopup();
       return;
     }
 

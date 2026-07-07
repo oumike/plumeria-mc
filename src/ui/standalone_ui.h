@@ -113,6 +113,10 @@ class StandaloneUi {
   void openCfgConfirmDialog(uint8_t row);
   void performCfgConfirmedAction(uint8_t row);
   void openContactDeleteConfirm();
+  void toggleSelectedContactIgnored();
+  bool ensureContactActionsPopupBuilt();
+  void openContactActionsPopup();
+  void closeContactActionsPopup();
   void performContactDelete();
   bool openContactsDialog();
   bool ensureContactsDialogBuilt();
@@ -290,8 +294,19 @@ class StandaloneUi {
   lv_obj_t* contacts_dm_new_label_ = nullptr;
   lv_obj_t* contacts_path_btn_ = nullptr;
   lv_obj_t* contacts_path_label_ = nullptr;
+  lv_obj_t* contacts_ignore_btn_ = nullptr;
+  lv_obj_t* contacts_ignore_label_ = nullptr;
   lv_obj_t* contacts_del_btn_ = nullptr;
   lv_obj_t* contacts_del_label_ = nullptr;
+  // "Contact Actions" header button + the pop-up it opens (holds Admin/Path/Ignore/Del).
+  lv_obj_t* contacts_actions_btn_ = nullptr;
+  lv_obj_t* contacts_actions_label_ = nullptr;
+  lv_obj_t* contacts_actions_backdrop_ = nullptr;
+  lv_obj_t* contacts_actions_panel_ = nullptr;
+  lv_obj_t* contacts_actions_admin_btn_ = nullptr;
+  lv_obj_t* contacts_actions_admin_label_ = nullptr;
+  lv_obj_t* contacts_actions_close_btn_ = nullptr;
+  bool contacts_actions_open_ = false;
   lv_obj_t* contacts_path_dialog_ = nullptr;
   lv_obj_t* contacts_path_title_label_ = nullptr;
   lv_obj_t* contacts_path_body_panel_ = nullptr;

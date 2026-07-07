@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <new>
+
 #include <Mesh.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/BaseChatMesh.h>
@@ -820,6 +822,9 @@ class StandaloneChatMesh : public BaseChatMesh {
     }
     char contact_key[65] = {};
     bytesToHex(contact.id.pub_key, PUB_KEY_SIZE, contact_key, sizeof(contact_key));
+    if (adapter_->isContactIgnoredByPublicKeyHex(contact_key)) {
+      return;  // ignored contact: do not surface or store the DM
+    }
     if (false) Serial.printf("[RX][DM] from=%s msg=%.80s\n", contact.name, text ? text : "");
     adapter_->queueDirectMessage(contact_name, contact_key, text ? text : "");
   }
@@ -891,6 +896,24 @@ class StandaloneChatMesh : public BaseChatMesh {
     if (resolved_name[0] == '\0') {
       adapter_->queueInfo("RX channel hash unresolved; message dropped");
       return;
+    }
+
+    // Channel messages are "SenderName: text"; drop if the sender name matches an
+    // ignored contact (name-based, since group messages carry no verified pubkey).
+    if (text && text[0] != '\0') {
+      const char* colon = strchr(text, ':');
+      if (colon && colon > text) {
+        char sender[32] = {};
+        size_t sender_len = static_cast<size_t>(colon - text);
+        if (sender_len > sizeof(sender) - 1) {
+          sender_len = sizeof(sender) - 1;
+        }
+        memcpy(sender, text, sender_len);
+        sender[sender_len] = '\0';
+        if (adapter_->isContactIgnoredByName(sender)) {
+          return;
+        }
+      }
     }
 
     if (false) Serial.printf("[RX][CH] channel=%s msg=%.80s\n", resolved_name, text ? text : "");
@@ -1235,6 +1258,8 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
 
   loadContactsFromFs();
   loadContactTelemetryFromFs();
+  ensureIgnoredAllocated();
+  loadIgnoredFromNvs();
 
   // On fresh installs (no identity in NVS yet), avoid announcing a temporary
   // random identity before config import restores the intended keys.
@@ -1708,6 +1733,7 @@ int MeshAdapter::exportContacts(MeshContactSummary contacts[], int max_contacts)
     }
 
     summary.favorite = (contact.flags & 0x01U) != 0;
+    summary.ignored = isContactIgnoredByPublicKeyHex(summary.public_key_hex);
     summary.type = contact.type;
     summary.out_path_len = contact.out_path_len;
     memcpy(summary.out_path, contact.out_path, sizeof(summary.out_path));
@@ -1846,6 +1872,180 @@ bool MeshAdapter::setContactFavoriteByPublicKeyHex(const char* public_key_hex, b
     return false;
   }
   contacts_dirty_ = false;
+  return true;
+}
+
+bool MeshAdapter::ensureIgnoredAllocated() {
+  if (ignored_) {
+    return true;
+  }
+  ignored_ = new (std::nothrow) IgnoredContact[kMaxIgnored]();
+  return ignored_ != nullptr;
+}
+
+int MeshAdapter::findIgnoredSlotByKey(const char* public_key_hex) const {
+  if (!ignored_ || !public_key_hex || public_key_hex[0] == '\0') {
+    return -1;
+  }
+  for (size_t i = 0; i < kMaxIgnored; i++) {
+    if (ignored_[i].used && strcmp(ignored_[i].key, public_key_hex) == 0) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+bool MeshAdapter::isContactIgnoredByPublicKeyHex(const char* public_key_hex) const {
+  return findIgnoredSlotByKey(public_key_hex) >= 0;
+}
+
+bool MeshAdapter::isContactIgnoredByName(const char* name) const {
+  if (!ignored_ || !name || name[0] == '\0') {
+    return false;
+  }
+  for (size_t i = 0; i < kMaxIgnored; i++) {
+    if (ignored_[i].used && ignored_[i].name[0] != '\0' && strcmp(ignored_[i].name, name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MeshAdapter::addIgnoredContact(const char* public_key_hex, const char* name) {
+  if (!ensureIgnoredAllocated() || !public_key_hex || public_key_hex[0] == '\0') {
+    return false;
+  }
+  if (findIgnoredSlotByKey(public_key_hex) >= 0) {
+    return true;  // already ignored
+  }
+  for (size_t i = 0; i < kMaxIgnored; i++) {
+    if (!ignored_[i].used) {
+      strncpy(ignored_[i].key, public_key_hex, sizeof(ignored_[i].key) - 1);
+      ignored_[i].key[sizeof(ignored_[i].key) - 1] = '\0';
+      strncpy(ignored_[i].name, name ? name : "", sizeof(ignored_[i].name) - 1);
+      ignored_[i].name[sizeof(ignored_[i].name) - 1] = '\0';
+      ignored_[i].used = true;
+      return true;
+    }
+  }
+  return false;  // list full
+}
+
+void MeshAdapter::clearIgnoredContacts() {
+  if (!ignored_) {
+    return;
+  }
+  for (size_t i = 0; i < kMaxIgnored; i++) {
+    memset(&ignored_[i], 0, sizeof(ignored_[i]));
+  }
+}
+
+bool MeshAdapter::persistIgnoredContacts() {
+  return saveIgnoredToNvs();
+}
+
+bool MeshAdapter::setContactIgnoredByPublicKeyHex(const char* public_key_hex, const char* name,
+                                                  bool ignored) {
+  if (!public_key_hex || public_key_hex[0] == '\0') {
+    return false;
+  }
+  if (ignored) {
+    if (!addIgnoredContact(public_key_hex, name)) {
+      return false;
+    }
+  } else {
+    const int slot = findIgnoredSlotByKey(public_key_hex);
+    if (slot >= 0) {
+      memset(&ignored_[slot], 0, sizeof(ignored_[slot]));
+    }
+  }
+  return saveIgnoredToNvs();
+}
+
+int MeshAdapter::ignoredCount() const {
+  if (!ignored_) {
+    return 0;
+  }
+  int n = 0;
+  for (size_t i = 0; i < kMaxIgnored; i++) {
+    if (ignored_[i].used) {
+      n++;
+    }
+  }
+  return n;
+}
+
+bool MeshAdapter::getIgnoredEntry(int index, char* key_out, size_t key_size, char* name_out,
+                                  size_t name_size) const {
+  if (!ignored_ || index < 0 || !key_out || key_size == 0 || !name_out || name_size == 0) {
+    return false;
+  }
+  int n = 0;
+  for (size_t i = 0; i < kMaxIgnored; i++) {
+    if (!ignored_[i].used) {
+      continue;
+    }
+    if (n == index) {
+      strncpy(key_out, ignored_[i].key, key_size - 1);
+      key_out[key_size - 1] = '\0';
+      strncpy(name_out, ignored_[i].name, name_size - 1);
+      name_out[name_size - 1] = '\0';
+      return true;
+    }
+    n++;
+  }
+  return false;
+}
+
+bool MeshAdapter::saveIgnoredToNvs() const {
+  if (!ignored_) {
+    return false;
+  }
+  Preferences prefs;
+  if (!prefs.begin("plum_ignore", false)) {
+    return false;
+  }
+  String blob;
+  for (size_t i = 0; i < kMaxIgnored; i++) {
+    if (!ignored_[i].used) {
+      continue;
+    }
+    blob += ignored_[i].key;
+    blob += '\t';
+    blob += ignored_[i].name;
+    blob += '\n';
+  }
+  prefs.putString("list", blob);
+  prefs.end();
+  return true;
+}
+
+bool MeshAdapter::loadIgnoredFromNvs() {
+  clearIgnoredContacts();
+  Preferences prefs;
+  if (!prefs.begin("plum_ignore", true)) {
+    return false;
+  }
+  String blob = prefs.getString("list", "");
+  prefs.end();
+
+  int start = 0;
+  const int total = static_cast<int>(blob.length());
+  while (start < total) {
+    int nl = blob.indexOf('\n', start);
+    if (nl < 0) {
+      nl = total;
+    }
+    String line = blob.substring(start, nl);
+    start = nl + 1;
+    const int tab = line.indexOf('\t');
+    if (tab <= 0) {
+      continue;
+    }
+    String key = line.substring(0, tab);
+    String name = line.substring(tab + 1);
+    addIgnoredContact(key.c_str(), name.c_str());
+  }
   return true;
 }
 

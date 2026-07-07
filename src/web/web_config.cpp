@@ -351,6 +351,21 @@ String buildConfigText() {
   out += "\n";
 
   if (g_mesh) {
+    const int nign = g_mesh->ignoredCount();
+    for (int i = 0; i < nign; i++) {
+      char ikey[65] = {};
+      char iname[32] = {};
+      if (g_mesh->getIgnoredEntry(i, ikey, sizeof(ikey), iname, sizeof(iname))) {
+        out += "ignore: ";
+        out += ikey;
+        out += "|";
+        out += configSafeValue(iname);
+        out += "\n";
+      }
+    }
+  }
+
+  if (g_mesh) {
     memset(g_export_identity_public_hex, 0, sizeof(g_export_identity_public_hex));
     memset(g_export_identity_private_hex, 0, sizeof(g_export_identity_private_hex));
     if (g_mesh->getIdentityKeysHex(g_export_identity_public_hex, sizeof(g_export_identity_public_hex),
@@ -449,6 +464,8 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   int imported_channel_count = 0;
   int imported_contact_count = 0;
   int imported_favorite_count = 0;
+  bool saw_ignored = false;
+  int imported_ignored_count = 0;
   bool saw_identity_private_key = false;
   bool saw_identity_public_key = false;
   bool saw_timezone = false;
@@ -607,6 +624,22 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
       imported.multi_ack = parseBoolArg(value, imported.multi_ack);
     } else if (key.equals("repeater_mode")) {
       imported.repeater_mode = parseBoolArg(value, imported.repeater_mode);
+    } else if (key.equals("ignore")) {
+      // Format: "<pubkey_hex>|<name>". Applied inline to avoid a large static
+      // buffer: the first entry clears the existing list; persisted at apply.
+      const int bar = value.indexOf('|');
+      String hex = (bar >= 0) ? value.substring(0, bar) : value;
+      String name = (bar >= 0) ? value.substring(bar + 1) : String("");
+      hex.trim();
+      name.trim();
+      if (hex.length() > 0 && g_mesh) {
+        if (!saw_ignored) {
+          g_mesh->clearIgnoredContacts();
+          saw_ignored = true;
+        }
+        g_mesh->addIgnoredContact(hex.c_str(), name.c_str());
+        imported_ignored_count++;
+      }
     } else if (key.equals("mesh_region")) {
       if (value.length() >= static_cast<int>(sizeof(imported.mesh_region))) {
         setImportError(err, err_size, "mesh_region too long");
@@ -845,6 +878,12 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
     g_mesh->setRepeaterMode(g_settings.repeater_mode);
     Serial.printf("[IMPORT] setMeshRegion(%s)\n", g_settings.mesh_region[0] ? g_settings.mesh_region : "");
     g_mesh->setMeshRegion(g_settings.mesh_region);
+
+    if (saw_ignored) {
+      // Entries were cleared+added inline during parse; persist the final list.
+      Serial.printf("[IMPORT] ignore list replaced (%d entries)\n", imported_ignored_count);
+      g_mesh->persistIgnoredContacts();
+    }
 
     if (saw_channels) {
       Serial.println("[IMPORT] replacing channels");

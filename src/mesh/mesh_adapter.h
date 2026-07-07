@@ -46,6 +46,7 @@ struct MeshContactSummary {
   char name[32];
   char public_key_hex[65];
   bool favorite;
+  bool ignored;
   uint8_t type;
   // Packed path_len from MeshCore (upper 2 bits hash size-1, lower 6 bits hop count).
   uint8_t out_path_len;
@@ -98,6 +99,15 @@ class MeshAdapter {
   bool importFavoriteContactByPublicKeyHex(const char* public_key_hex);
   bool setContactFavoriteByPublicKeyHex(const char* public_key_hex, bool favorite);
   bool removeContactByPublicKeyHex(const char* public_key_hex);
+  // Ignore list: suppress DMs/chats from a contact. Persisted + exported/imported.
+  bool setContactIgnoredByPublicKeyHex(const char* public_key_hex, const char* name, bool ignored);
+  bool isContactIgnoredByPublicKeyHex(const char* public_key_hex) const;
+  bool isContactIgnoredByName(const char* name) const;
+  int ignoredCount() const;
+  bool getIgnoredEntry(int index, char* key_out, size_t key_size, char* name_out, size_t name_size) const;
+  bool addIgnoredContact(const char* public_key_hex, const char* name);
+  void clearIgnoredContacts();
+  bool persistIgnoredContacts();
   bool sendLogin(const char* public_key_hex, const char* password);
   bool sendAdminCommand(const char* public_key_hex, const char* command);
   bool addChannel(const char* channel_name, const char* psk_base64 = nullptr);
@@ -143,6 +153,20 @@ class MeshAdapter {
   bool saveContactsToFs();
   bool loadChannelsFromFs();
   bool saveChannelsToFs();
+  bool loadIgnoredFromNvs();
+  bool saveIgnoredToNvs() const;
+  int findIgnoredSlotByKey(const char* public_key_hex) const;
+
+  static constexpr size_t kMaxIgnored = 32;
+  struct IgnoredContact {
+    char key[65];
+    char name[32];
+    bool used;
+  };
+  // Heap-allocated at begin() so the array lives in the heap rather than the
+  // tight static DRAM segment; null if allocation ever fails (feature disabled).
+  IgnoredContact* ignored_ = nullptr;
+  bool ensureIgnoredAllocated();
 
   static constexpr size_t kMaxQueuedEvents = 32;
   MeshEvent event_queue_[kMaxQueuedEvents]{};
