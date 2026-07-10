@@ -28,6 +28,7 @@ struct WebSettings {
   uint8_t path_hash_mode;
   bool multi_ack;
   bool repeater_mode;
+  bool notifications_enabled;
   uint16_t screen_timeout_seconds;
   char mesh_region[32];
 };
@@ -51,6 +52,7 @@ bool setMeshRegion(const char* region_name, char* err, size_t err_size);
 bool setPathHashMode(uint8_t mode, char* err, size_t err_size);
 bool setMultiAck(bool enabled, char* err, size_t err_size);
 bool setRepeaterMode(bool enabled, char* err, size_t err_size);
+bool setNotificationsEnabled(bool enabled, char* err, size_t err_size);
 
 // Region radio presets (used by first-install onboarding).
 int regionPresetCount();
@@ -59,6 +61,7 @@ const char* defaultRegionId();
 bool setRegionPreset(const char* region_id, char* err, size_t err_size);
 bool setWifiCredentials(const char* ssid, const char* pass, char* err, size_t err_size);
 uint16_t screenTimeoutSeconds();
+bool notificationsEnabled();
 
 }  // namespace web
 }  // namespace plumeria

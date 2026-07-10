@@ -110,6 +110,7 @@ class MeshAdapter {
   bool persistIgnoredContacts();
   bool sendLogin(const char* public_key_hex, const char* password);
   bool sendAdminCommand(const char* public_key_hex, const char* command);
+  bool requestContactTelemetryByPublicKeyHex(const char* public_key_hex);
   bool addChannel(const char* channel_name, const char* psk_base64 = nullptr);
   bool removeChannel(const char* channel_name);
   void getRadioStats(MeshRadioStats* out_stats) const;
@@ -139,6 +140,7 @@ class MeshAdapter {
                        uint8_t perm, uint8_t acl_perm, uint8_t fw_ver, const char* text);
   void queueAdminCommandResponse(const uint8_t* pub_key, const char* contact_name, const char* text);
   void handleLoginResponse(const void* contact, const uint8_t* data, uint8_t len);
+  void handleContactTelemetryResponse(const void* contact, const uint8_t* data, uint8_t len);
   void handleCommandData(const void* contact, const char* text);
   void checkLoginTimeout(uint32_t now_ms);
   void noteRxRaw();

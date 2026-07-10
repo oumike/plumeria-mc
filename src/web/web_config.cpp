@@ -29,6 +29,7 @@ constexpr uint16_t kMinAdvertIntervalMinutes = 60;
 constexpr uint16_t kDefaultScreenTimeoutSeconds = 30;
 constexpr uint16_t kMinScreenTimeoutSeconds = 1;
 constexpr uint16_t kMaxScreenTimeoutSeconds = 600;
+constexpr bool kDefaultNotificationsEnabled = true;
 constexpr char kDefaultTimezone[] = "UTC0";
 constexpr char kDefaultRegion[] = "US";
 constexpr uint8_t kDefaultPathHashMode = 0;
@@ -205,6 +206,7 @@ void saveSettings(const plumeria::web::WebSettings& settings) {
   prefs.putUChar("path_hash_mode", settings.path_hash_mode);
   prefs.putBool("multi_ack", settings.multi_ack);
   prefs.putBool("repeater", settings.repeater_mode);
+  prefs.putBool("notifications", settings.notifications_enabled);
   prefs.putUShort("screen_timeout", settings.screen_timeout_seconds);
   prefs.putString("mesh_region", settings.mesh_region);
   prefs.end();
@@ -342,6 +344,9 @@ String buildConfigText() {
   out += "\n";
   out += "repeater_mode: ";
   out += g_settings.repeater_mode ? "1" : "0";
+  out += "\n";
+  out += "notifications_enabled: ";
+  out += g_settings.notifications_enabled ? "1" : "0";
   out += "\n";
   out += "mesh_region: ";
   out += configSafeValue(g_settings.mesh_region);
@@ -624,6 +629,8 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
       imported.multi_ack = parseBoolArg(value, imported.multi_ack);
     } else if (key.equals("repeater_mode")) {
       imported.repeater_mode = parseBoolArg(value, imported.repeater_mode);
+    } else if (key.equals("notifications_enabled")) {
+      imported.notifications_enabled = parseBoolArg(value, imported.notifications_enabled);
     } else if (key.equals("ignore")) {
       // Format: "<pubkey_hex>|<name>". Applied inline to avoid a large static
       // buffer: the first entry clears the existing list; persisted at apply.
@@ -809,6 +816,7 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   Serial.printf("[IMPORT] advert_interval_minutes=%u\n", static_cast<unsigned>(imported.advert_interval_minutes));
   Serial.printf("[IMPORT] path_hash_mode=%u\n", static_cast<unsigned>(imported.path_hash_mode));
   Serial.printf("[IMPORT] multi_ack=%s\n", boolToText(imported.multi_ack));
+  Serial.printf("[IMPORT] notifications_enabled=%s\n", boolToText(imported.notifications_enabled));
   Serial.printf("[IMPORT] mesh_region=%s\n", imported.mesh_region[0] ? imported.mesh_region : "(empty)");
   Serial.printf("[IMPORT] screen_timeout_seconds=%u\n", static_cast<unsigned>(imported.screen_timeout_seconds));
   Serial.printf("[IMPORT] identity_public_key_present=%s\n", boolToText(saw_identity_public_key));
@@ -1123,6 +1131,7 @@ small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 <label><input id='multi_ack' type='checkbox' style='width:auto;margin-right:8px'>Multi-ACK (show per-hop delivery count in message receipts)</label>
 <label><input id='repeater_mode' type='checkbox' style='width:auto;margin-right:8px'>Repeater mode (forward mesh traffic for other nodes)</label>
 <div style='color:#c07a2a;font-size:0.85em;margin:2px 0 8px 24px'>Warning: continuously repeats packets. Significantly increases radio airtime and battery drain; advertises this node as a repeater.</div>
+<label><input id='notifications_enabled' type='checkbox' style='width:auto;margin-right:8px'>Notifications (new message chime)</label>
 <label>Mesh Region (filter; blank = unfiltered)<input id='mesh_region' maxlength='31' placeholder='e.g. #mountains-west or leave blank'></label>
 <label>Screen Timeout Seconds<input id='screen_timeout_sec' type='number' min='1' max='600' step='1'></label>
 </section>
@@ -1214,7 +1223,7 @@ function bindDirtyTracking(){
   const sendLoc=document.getElementById('send_loc_adv');
   if(sendLoc){sendLoc.addEventListener('change',()=>{locationDirty=true;});}
   ['wifi_ssid','wifi_pass'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{wifiDirty=true;});e.addEventListener('change',()=>{wifiDirty=true;});}});
-  ['region','freq','bw','sf','cr','pwr','adv_int_min','path_hash_mode','screen_timeout_sec','mesh_region'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{radioDirty=true;});e.addEventListener('change',()=>{radioDirty=true;});}});
+  ['region','freq','bw','sf','cr','pwr','adv_int_min','path_hash_mode','screen_timeout_sec','mesh_region','notifications_enabled'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{radioDirty=true;});e.addEventListener('change',()=>{radioDirty=true;});}});
   const tz=document.getElementById('timezone');
   if(tz){tz.addEventListener('input',()=>{timezoneDirty=true;});tz.addEventListener('change',()=>{timezoneDirty=true;});}
 }
@@ -1285,6 +1294,7 @@ async function loadStatus(force=false){
     if(meshRegionEl)meshRegionEl.value=s.mesh_region||'';
     const multiAckEl=document.getElementById('multi_ack');if(multiAckEl)multiAckEl.checked=!!s.multi_ack;
     const repEl=document.getElementById('repeater_mode');if(repEl)repEl.checked=!!s.repeater_mode;
+    const notifEl=document.getElementById('notifications_enabled');if(notifEl)notifEl.checked=(typeof s.notifications_enabled==='boolean')?s.notifications_enabled:true;
   }
 
   const latEl=document.getElementById('node_lat');
@@ -1318,7 +1328,7 @@ async function loadContacts(){const c=await jget('/api/contacts');contactsCache=
 
 async function addChannel(){const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}let r=null;try{r=await jpost('/api/channels/add',{name,psk});}catch(e){alert('Add channel request failed: '+(e&&e.message?e.message:String(e)));return;}if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}
 
-async function saveAll(){const tz=document.getElementById('timezone').value;const tzOffset=tzOffsetMinutes(tz);const tzPosix=tzPosixFromOffsetMinutes(tzOffset);let r=null;try{r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,timezone_posix:tzPosix,tz_offset:String(tzOffset),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',repeater_mode:document.getElementById('repeater_mode').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value,mesh_region:document.getElementById('mesh_region').value});}catch(e){alert('Save request failed: '+(e&&e.message?e.message:String(e)));return;}alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
+async function saveAll(){const tz=document.getElementById('timezone').value;const tzOffset=tzOffsetMinutes(tz);const tzPosix=tzPosixFromOffsetMinutes(tzOffset);let r=null;try{r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,timezone_posix:tzPosix,tz_offset:String(tzOffset),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',repeater_mode:document.getElementById('repeater_mode').checked?'1':'0',notifications_enabled:document.getElementById('notifications_enabled').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value,mesh_region:document.getElementById('mesh_region').value});}catch(e){alert('Save request failed: '+(e&&e.message?e.message:String(e)));return;}alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
 
 async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||((r&&r.error)||'done'));}
 async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||((r&&r.error)||'done'));}
@@ -1605,6 +1615,8 @@ void handleStatus() {
   payload += g_settings.multi_ack ? "true" : "false";
   payload += ",\"repeater_mode\":";
   payload += g_settings.repeater_mode ? "true" : "false";
+  payload += ",\"notifications_enabled\":";
+  payload += g_settings.notifications_enabled ? "true" : "false";
   payload += ",\"mesh_region\":";
   payload += jsonString(g_settings.mesh_region);
   payload += ",\"screen_timeout_sec\":";
@@ -1830,6 +1842,7 @@ void handleSaveAll() {
   String path_hash_mode = g_server.arg("path_hash_mode");
   String multi_ack_str = g_server.arg("multi_ack");
   String repeater_str = g_server.arg("repeater_mode");
+  String notifications_str = g_server.arg("notifications_enabled");
   String screen_timeout_sec = g_server.arg("screen_timeout_sec");
   String mesh_region = g_server.arg("mesh_region");
 
@@ -1860,6 +1873,7 @@ void handleSaveAll() {
   path_hash_mode.trim();
   multi_ack_str.trim();
   repeater_str.trim();
+  notifications_str.trim();
   screen_timeout_sec.trim();
   mesh_region.trim();
 
@@ -2016,6 +2030,11 @@ void handleSaveAll() {
   // Guard against older cached pages that omit the field: only overwrite when present.
   if (repeater_str.length() > 0) {
     g_settings.repeater_mode = (repeater_str == "1" || repeater_str.equalsIgnoreCase("true"));
+  }
+  // Guard against older cached pages that omit the field: only overwrite when present.
+  if (notifications_str.length() > 0) {
+    g_settings.notifications_enabled =
+        (notifications_str == "1" || notifications_str.equalsIgnoreCase("true"));
   }
   g_settings.screen_timeout_seconds = static_cast<uint16_t>(screen_timeout_seconds);
   copyString(g_settings.wifi_ssid, sizeof(g_settings.wifi_ssid), ssid.c_str());
@@ -2289,6 +2308,10 @@ void loadSettings(WebSettings* out_settings) {
   if (prefs.isKey("repeater")) {
     repeater_mode = prefs.getBool("repeater", false);
   }
+  bool notifications_enabled = kDefaultNotificationsEnabled;
+  if (prefs.isKey("notifications")) {
+    notifications_enabled = prefs.getBool("notifications", kDefaultNotificationsEnabled);
+  }
   String mesh_region = String("");
   if (prefs.isKey("mesh_region")) {
     mesh_region = prefs.getString("mesh_region", "");
@@ -2324,6 +2347,7 @@ void loadSettings(WebSettings* out_settings) {
   out_settings->path_hash_mode = path_hash_mode;
   out_settings->multi_ack = multi_ack;
   out_settings->repeater_mode = repeater_mode;
+  out_settings->notifications_enabled = notifications_enabled;
   copyString(out_settings->mesh_region, sizeof(out_settings->mesh_region), mesh_region.c_str());
 }
 
@@ -2555,6 +2579,18 @@ bool setRepeaterMode(bool enabled, char* err, size_t err_size) {
   return true;
 }
 
+bool setNotificationsEnabled(bool enabled, char* err, size_t err_size) {
+  WebSettings next{};
+  loadSettings(&next);
+  next.notifications_enabled = enabled;
+  saveSettings(next);
+  if (g_running) {
+    g_settings = next;
+  }
+  setImportError(err, err_size, "");
+  return true;
+}
+
 int regionPresetCount() {
   return static_cast<int>(sizeof(kRegionPresets) / sizeof(kRegionPresets[0]));
 }
@@ -2642,6 +2678,15 @@ bool setMeshRegion(const char* region_name, char* err, size_t err_size) {
 
 uint16_t screenTimeoutSeconds() {
   return clampScreenTimeoutSeconds(static_cast<int>(g_settings.screen_timeout_seconds));
+}
+
+bool notificationsEnabled() {
+  if (g_running) {
+    return g_settings.notifications_enabled;
+  }
+  WebSettings current{};
+  loadSettings(&current);
+  return current.notifications_enabled;
 }
 
 }  // namespace web

@@ -42,9 +42,9 @@ class StandaloneUi {
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 4;
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
-  static constexpr uint8_t kCfgRowCount = 8;
+  static constexpr uint8_t kCfgRowCount = 9;
 #else
-  static constexpr uint8_t kCfgRowCount = 11;
+  static constexpr uint8_t kCfgRowCount = 12;
 #endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
   static constexpr uint8_t kContactActionCount = 4;  // Fav, Admin, DM, Close
@@ -54,7 +54,7 @@ class StandaloneUi {
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-  static constexpr size_t kMaxStoredChatRows = 112;
+  static constexpr size_t kMaxStoredChatRows = 110;
 #else
   static constexpr size_t kMaxStoredChatRows = 120;
 #endif
@@ -73,6 +73,9 @@ class StandaloneUi {
   void refreshComposeDialog();
   void refreshClockIfNeeded(uint32_t now_ms);
   void syncChannelsFromMeshIfNeeded(uint32_t now_ms);
+  void pollRepeaterTelemetryIfNeeded(uint32_t now_ms);
+  void triggerMessageNotificationChime();
+  void serviceMessageNotificationChime(uint32_t now_ms);
 
   void openChannelDropdown();
   void closeChannelDropdown(bool keep_highlight = false);
@@ -314,6 +317,8 @@ class StandaloneUi {
   lv_obj_t* contacts_actions_panel_ = nullptr;
   lv_obj_t* contacts_actions_admin_btn_ = nullptr;
   lv_obj_t* contacts_actions_admin_label_ = nullptr;
+  lv_obj_t* contacts_actions_refresh_btn_ = nullptr;
+  lv_obj_t* contacts_actions_refresh_label_ = nullptr;
   lv_obj_t* contacts_actions_close_btn_ = nullptr;
   bool contacts_actions_open_ = false;
   lv_obj_t* contacts_path_dialog_ = nullptr;
@@ -486,6 +491,7 @@ class StandaloneUi {
   bool live_snr_open_ = false;
   bool advert_popup_open_ = false;
   bool has_unread_dm_ = false;
+  bool message_chime_active_ = false;
   bool contacts_nav_focused_ = false;
   bool contacts_dm_open_ = false;
   bool contacts_path_open_ = false;
@@ -537,6 +543,8 @@ class StandaloneUi {
   char pending_local_echo_channel_[32]{};
   char pending_local_echo_text_[96]{};
   uint32_t pending_local_echo_deadline_ms_ = 0;
+  uint8_t message_chime_note_index_ = 0;
+  uint32_t message_chime_next_ms_ = 0;
   uint32_t room_ingest_last_name_hash_ = 0;
   uint32_t room_ingest_last_key_hash_ = 0;
   uint32_t room_ingest_last_text_hash_ = 0;
@@ -600,6 +608,7 @@ class StandaloneUi {
   uint32_t last_clock_update_ms_ = 0;
   uint16_t last_clock_minute_ = 0xFFFF;
   uint32_t last_channel_sync_ms_ = 0;
+  char repeater_poll_target_key_[65] = {};
   uint32_t last_unread_pulse_ms_ = 0;
 };
 

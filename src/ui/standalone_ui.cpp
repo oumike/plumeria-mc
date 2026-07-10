@@ -16,12 +16,28 @@
 
 #include "web/web_config.h"
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#include <M5Cardputer.h>
+#endif
+
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+#include <driver/i2s.h>
+#endif
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#include <Codecs/es8311/ES8311.h>
+#endif
+
 #ifndef PLUMERIA_KEY_DEBUG
 #define PLUMERIA_KEY_DEBUG 0
 #endif
 
 #ifndef PLUMERIA_CONTACTS_TRACE
 #define PLUMERIA_CONTACTS_TRACE 0
+#endif
+
+#ifndef PLUMERIA_PAGER_AUDIO_DEBUG
+#define PLUMERIA_PAGER_AUDIO_DEBUG 0
 #endif
 
 #if PLUMERIA_CONTACTS_TRACE
@@ -337,6 +353,7 @@ const char* kCfgRowLabels[] = {
   "Multi-ACK",
   "Mesh Region",
   "Repeater",
+  "Notifications",
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   "Export Config",
   "Import Config",
@@ -352,10 +369,432 @@ constexpr uint8_t kCfgRowMultipaths = 4;
 constexpr uint8_t kCfgRowMultiAck = 5;
 constexpr uint8_t kCfgRowMeshRegion = 6;
 constexpr uint8_t kCfgRowRepeater = 7;
+constexpr uint8_t kCfgRowNotifications = 8;
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
-constexpr uint8_t kCfgRowExportConfig = 8;
-constexpr uint8_t kCfgRowImportConfig = 9;
-constexpr uint8_t kCfgRowDeleteConfig = 10;
+constexpr uint8_t kCfgRowExportConfig = 9;
+constexpr uint8_t kCfgRowImportConfig = 10;
+constexpr uint8_t kCfgRowDeleteConfig = 11;
+#endif
+
+constexpr uint8_t kMessageChimeNoteCount = 3;
+// Requested pattern is E->B->E at octave 0. On tiny speakers, 20-31 Hz is
+// effectively inaudible, so transpose by +4 octaves while keeping intervals.
+constexpr float kMessageChimeHz[kMessageChimeNoteCount] = {329.63f, 493.88f, 329.63f};
+constexpr uint32_t kMessageChimeNoteMs = 125;
+constexpr float kTwoPi = 6.28318530718f;
+
+#if defined(DEVICE_TDECK)
+constexpr i2s_port_t kTdeckI2sPort = I2S_NUM_0;
+constexpr int kTdeckI2sBck = 7;
+constexpr int kTdeckI2sWs = 5;
+constexpr int kTdeckI2sDout = 6;
+constexpr uint32_t kTdeckI2sSampleRate = 16000;
+constexpr uint32_t kTdeckToneChunkSamples = 64;
+bool g_tdeck_i2s_ready = false;
+
+bool ensureTdeckI2sReady() {
+  if (g_tdeck_i2s_ready) {
+    return true;
+  }
+
+  i2s_config_t i2s_cfg = {};
+  i2s_cfg.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX);
+  i2s_cfg.sample_rate = static_cast<int>(kTdeckI2sSampleRate);
+  i2s_cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  i2s_cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  i2s_cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+  i2s_cfg.intr_alloc_flags = 0;
+  i2s_cfg.dma_buf_count = 6;
+  i2s_cfg.dma_buf_len = static_cast<int>(kTdeckToneChunkSamples);
+  i2s_cfg.use_apll = false;
+  i2s_cfg.tx_desc_auto_clear = true;
+  i2s_cfg.fixed_mclk = 0;
+
+  if (i2s_driver_install(kTdeckI2sPort, &i2s_cfg, 0, nullptr) != ESP_OK) {
+    return false;
+  }
+
+  i2s_pin_config_t i2s_pins = {};
+  i2s_pins.bck_io_num = kTdeckI2sBck;
+  i2s_pins.ws_io_num = kTdeckI2sWs;
+  i2s_pins.data_out_num = kTdeckI2sDout;
+  i2s_pins.data_in_num = I2S_PIN_NO_CHANGE;
+  if (i2s_set_pin(kTdeckI2sPort, &i2s_pins) != ESP_OK) {
+    i2s_driver_uninstall(kTdeckI2sPort);
+    return false;
+  }
+
+  i2s_zero_dma_buffer(kTdeckI2sPort);
+  g_tdeck_i2s_ready = true;
+  return true;
+}
+
+void playTdeckTone(float frequency_hz, uint32_t duration_ms) {
+  if (frequency_hz <= 0.0f || duration_ms == 0 || !ensureTdeckI2sReady()) {
+    return;
+  }
+
+  int16_t tone_samples[kTdeckToneChunkSamples] = {};
+
+  uint32_t samples_remaining = static_cast<uint32_t>((kTdeckI2sSampleRate * duration_ms) / 1000UL);
+  if (samples_remaining == 0) {
+    samples_remaining = 1;
+  }
+
+  const float phase_step = (kTwoPi * frequency_hz) / static_cast<float>(kTdeckI2sSampleRate);
+  float phase = 0.0f;
+
+  while (samples_remaining > 0) {
+    const uint32_t chunk = samples_remaining > kTdeckToneChunkSamples ? kTdeckToneChunkSamples : samples_remaining;
+    for (uint32_t i = 0; i < chunk; i++) {
+      tone_samples[i] = static_cast<int16_t>(sinf(phase) * 7000.0f);
+      phase += phase_step;
+      if (phase >= kTwoPi) {
+        phase -= kTwoPi;
+      }
+    }
+
+    size_t bytes_written = 0;
+    if (i2s_write(kTdeckI2sPort, tone_samples, chunk * sizeof(int16_t), &bytes_written,
+                  pdMS_TO_TICKS(30)) != ESP_OK) {
+      break;
+    }
+    if (bytes_written < chunk * sizeof(int16_t)) {
+      break;
+    }
+    samples_remaining -= chunk;
+  }
+
+  i2s_zero_dma_buffer(kTdeckI2sPort);
+}
+#endif
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+constexpr i2s_port_t kPagerI2sPort = I2S_NUM_0;
+constexpr int kPagerI2sMclk = 10;
+constexpr int kPagerI2sBck = 11;
+constexpr int kPagerI2sWs = 18;
+constexpr int kPagerI2sDout = 45;
+constexpr int kPagerI2sDin = 17;
+constexpr int kPagerI2cSda = 3;
+constexpr int kPagerI2cScl = 2;
+constexpr uint8_t kPagerCodecAddr = 0x18;
+constexpr uint8_t kPagerAmpExpPin = 1;
+constexpr uint8_t kPagerRegOut0 = 0x02;
+constexpr uint8_t kPagerRegOut1 = 0x03;
+constexpr uint8_t kPagerRegCfg0 = 0x06;
+constexpr uint8_t kPagerRegCfg1 = 0x07;
+constexpr uint32_t kPagerI2sSampleRate = 44100;
+constexpr uint32_t kPagerToneChunkSamples = 64;
+constexpr uint8_t kPagerAudioVolActive = 75;
+constexpr uint8_t kPagerAudioVolIdle = 12;
+bool g_pager_i2s_ready = false;
+bool g_pager_codec_ready = false;
+bool g_pager_amp_on = false;
+bool g_pager_playback_active = false;
+int g_pager_exp_addr = -2;
+audio_driver::ES8311 g_pager_codec;
+
+bool pagerExpReadReg(uint8_t addr, uint8_t reg, uint8_t* val) {
+  if (!val) {
+    return false;
+  }
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  if (Wire.requestFrom(static_cast<int>(addr), 1) != 1) {
+    return false;
+  }
+  *val = static_cast<uint8_t>(Wire.read());
+  return true;
+}
+
+bool pagerExpWriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+bool pagerSetAmp(bool on) {
+  Wire.begin(kPagerI2cSda, kPagerI2cScl, 100000UL);
+
+  if (g_pager_exp_addr == -2) {
+    g_pager_exp_addr = -1;
+    for (uint8_t a = 0x20; a <= 0x27; a++) {
+      Wire.beginTransmission(a);
+      if (Wire.endTransmission() == 0) {
+        g_pager_exp_addr = static_cast<int>(a);
+        break;
+      }
+    }
+  }
+  if (g_pager_exp_addr < 0) {
+    return false;
+  }
+
+  const uint8_t exp_addr = static_cast<uint8_t>(g_pager_exp_addr);
+  uint8_t out0 = 0xFF;
+  uint8_t out1 = 0xFF;
+  uint8_t cfg0 = 0xFF;
+  uint8_t cfg1 = 0xFF;
+  (void)pagerExpReadReg(exp_addr, kPagerRegOut0, &out0);
+  (void)pagerExpReadReg(exp_addr, kPagerRegOut1, &out1);
+  (void)pagerExpReadReg(exp_addr, kPagerRegCfg0, &cfg0);
+  (void)pagerExpReadReg(exp_addr, kPagerRegCfg1, &cfg1);
+
+  const uint8_t bit = static_cast<uint8_t>(1U << (kPagerAmpExpPin & 0x07));
+  cfg0 &= static_cast<uint8_t>(~bit);  // output
+  if (on) {
+    out0 |= bit;                       // enable amp (active-high)
+  } else {
+    out0 &= static_cast<uint8_t>(~bit);
+  }
+
+  const bool ok = pagerExpWriteReg(exp_addr, kPagerRegOut0, out0) &&
+                  pagerExpWriteReg(exp_addr, kPagerRegOut1, out1) &&
+                  pagerExpWriteReg(exp_addr, kPagerRegCfg0, cfg0) &&
+                  pagerExpWriteReg(exp_addr, kPagerRegCfg1, cfg1);
+  if (ok) {
+    g_pager_amp_on = on;
+  }
+  return ok;
+}
+
+bool pagerAudioSelectCommFormat(i2s_config_t* cfg) {
+  if (!cfg) {
+    return false;
+  }
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 4)
+  cfg->communication_format = I2S_COMM_FORMAT_STAND_I2S;
+#else
+  cfg->communication_format = static_cast<i2s_comm_format_t>(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
+#endif
+  return true;
+}
+
+bool ensurePagerCodecReady() {
+  if (g_pager_codec_ready) {
+    return true;
+  }
+
+  g_pager_codec.setWire(&Wire);
+  g_pager_codec.setAddress(kPagerCodecAddr);
+
+  audio_driver::codec_config_t cfg = {};
+  cfg.input_device = audio_driver::ADC_INPUT_NONE;
+  cfg.output_device = audio_driver::DAC_OUTPUT_ALL;
+  cfg.i2s.bits = audio_driver::BIT_LENGTH_16BITS;
+  cfg.i2s.rate = audio_driver::RATE_44K;
+  cfg.i2s.channels = audio_driver::CHANNELS2;
+  cfg.i2s.fmt = audio_driver::I2S_NORMAL;
+  cfg.i2s.mode = audio_driver::MODE_SLAVE;
+
+  if (g_pager_codec.init(&cfg) != RESULT_OK) {
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+    Serial.println("[audio] pager codec init failed");
+#endif
+    return false;
+  }
+  if (g_pager_codec.configI2S(audio_driver::CODEC_MODE_DECODE, &cfg.i2s) != RESULT_OK) {
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+    Serial.println("[audio] pager codec i2s config failed");
+#endif
+    return false;
+  }
+  if (g_pager_codec.ctrlStateActive(audio_driver::CODEC_MODE_DECODE, true) != RESULT_OK) {
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+    Serial.println("[audio] pager codec start failed");
+#endif
+    return false;
+  }
+
+  (void)g_pager_codec.setVoiceVolume(kPagerAudioVolIdle);
+  (void)g_pager_codec.setVoiceMute(true);
+  g_pager_codec_ready = true;
+  return true;
+}
+
+bool ensurePagerI2sReady() {
+  if (g_pager_i2s_ready) {
+    return true;
+  }
+
+  if (!ensurePagerCodecReady()) {
+    return false;
+  }
+
+  i2s_config_t i2s_cfg = {};
+  i2s_cfg.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX);
+  i2s_cfg.sample_rate = static_cast<int>(kPagerI2sSampleRate);
+  i2s_cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  i2s_cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  if (!pagerAudioSelectCommFormat(&i2s_cfg)) {
+    return false;
+  }
+  i2s_cfg.intr_alloc_flags = 0;
+  i2s_cfg.dma_buf_count = 6;
+  i2s_cfg.dma_buf_len = 256;
+  i2s_cfg.use_apll = false;
+  i2s_cfg.tx_desc_auto_clear = true;
+  i2s_cfg.fixed_mclk = 0;
+
+  esp_err_t i2s_err = i2s_driver_install(kPagerI2sPort, &i2s_cfg, 0, nullptr);
+  if (i2s_err == ESP_ERR_INVALID_STATE) {
+    i2s_driver_uninstall(kPagerI2sPort);
+    i2s_err = i2s_driver_install(kPagerI2sPort, &i2s_cfg, 0, nullptr);
+  }
+  if (i2s_err != ESP_OK) {
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+    Serial.printf("[audio] pager i2s install failed err=%d\n", static_cast<int>(i2s_err));
+#endif
+    return false;
+  }
+
+  i2s_pin_config_t i2s_pins = {};
+  i2s_pins.bck_io_num = kPagerI2sBck;
+  i2s_pins.ws_io_num = kPagerI2sWs;
+  i2s_pins.data_out_num = kPagerI2sDout;
+  i2s_pins.data_in_num = I2S_PIN_NO_CHANGE;
+#if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
+  i2s_pins.mck_io_num = kPagerI2sMclk;
+#endif
+  if (i2s_set_pin(kPagerI2sPort, &i2s_pins) != ESP_OK) {
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+    Serial.println("[audio] pager i2s set pin failed");
+#endif
+    i2s_driver_uninstall(kPagerI2sPort);
+    return false;
+  }
+
+  if (i2s_set_clk(kPagerI2sPort, static_cast<int>(kPagerI2sSampleRate), I2S_BITS_PER_SAMPLE_16BIT,
+                  I2S_CHANNEL_STEREO) != ESP_OK) {
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+    Serial.println("[audio] pager i2s set clk failed");
+#endif
+    i2s_driver_uninstall(kPagerI2sPort);
+    return false;
+  }
+
+  i2s_zero_dma_buffer(kPagerI2sPort);
+  g_pager_i2s_ready = true;
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+  Serial.println("[audio] pager codec/i2s ready");
+#endif
+  return true;
+}
+
+void pagerStartPlaybackIfNeeded() {
+  if (g_pager_playback_active) {
+    return;
+  }
+
+  if (!g_pager_amp_on) {
+    (void)pagerSetAmp(true);
+    delay(8);
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+    Serial.println("[audio] pager amp on");
+#endif
+  }
+
+  (void)g_pager_codec.setVoiceVolume(kPagerAudioVolActive);
+  i2s_zero_dma_buffer(kPagerI2sPort);
+
+  int16_t pre_roll[64 * 2] = {};
+  size_t pre_roll_written = 0;
+  (void)i2s_write(kPagerI2sPort, pre_roll, sizeof(pre_roll), &pre_roll_written, pdMS_TO_TICKS(10));
+
+  (void)g_pager_codec.setVoiceMute(false);
+  g_pager_playback_active = true;
+}
+
+void pagerStopPlayback() {
+  if (!g_pager_playback_active) {
+    return;
+  }
+
+  int16_t tail[128 * 2] = {};
+  size_t tail_written = 0;
+  (void)i2s_write(kPagerI2sPort, tail, sizeof(tail), &tail_written, pdMS_TO_TICKS(20));
+
+  (void)g_pager_codec.setVoiceMute(true);
+  i2s_zero_dma_buffer(kPagerI2sPort);
+  (void)g_pager_codec.setVoiceVolume(kPagerAudioVolIdle);
+  (void)pagerSetAmp(false);
+  g_pager_playback_active = false;
+#if PLUMERIA_PAGER_AUDIO_DEBUG
+  Serial.println("[audio] pager playback stop");
+#endif
+}
+
+void playPagerTone(float frequency_hz, uint32_t duration_ms) {
+  if (frequency_hz <= 0.0f || duration_ms == 0 || !ensurePagerI2sReady()) {
+    return;
+  }
+
+  pagerStartPlaybackIfNeeded();
+
+  int16_t tone_samples[kPagerToneChunkSamples * 2] = {};
+  uint32_t frames_remaining = static_cast<uint32_t>((kPagerI2sSampleRate * duration_ms) / 1000UL);
+  if (frames_remaining == 0) {
+    frames_remaining = 1;
+  }
+
+  const float phase_step = (kTwoPi * frequency_hz) / static_cast<float>(kPagerI2sSampleRate);
+  float phase = 0.0f;
+  while (frames_remaining > 0) {
+    const uint32_t chunk = frames_remaining > kPagerToneChunkSamples ? kPagerToneChunkSamples : frames_remaining;
+    for (uint32_t i = 0; i < chunk; i++) {
+      const int16_t sample = static_cast<int16_t>(sinf(phase) * 7000.0f);
+      tone_samples[i * 2] = sample;
+      tone_samples[i * 2 + 1] = sample;
+      phase += phase_step;
+      if (phase >= kTwoPi) {
+        phase -= kTwoPi;
+      }
+    }
+
+    size_t bytes_written = 0;
+    const size_t bytes_to_write = chunk * 2 * sizeof(int16_t);
+    if (i2s_write(kPagerI2sPort, tone_samples, bytes_to_write, &bytes_written,
+                  pdMS_TO_TICKS(30)) != ESP_OK) {
+      break;
+    }
+    if (bytes_written < bytes_to_write) {
+      break;
+    }
+    frames_remaining -= chunk;
+  }
+
+  i2s_zero_dma_buffer(kPagerI2sPort);
+}
+#endif
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(PLUMERIA_NOTIFICATION_PIN)
+#define PLUMERIA_HAS_HELTEC_BUZZER_BACKEND 1
+constexpr int kHeltecBuzzerPin = PLUMERIA_NOTIFICATION_PIN;
+#elif defined(PIN_BUZZER)
+#define PLUMERIA_HAS_HELTEC_BUZZER_BACKEND 1
+constexpr int kHeltecBuzzerPin = PIN_BUZZER;
+#endif
+#ifdef PLUMERIA_HAS_HELTEC_BUZZER_BACKEND
+bool g_heltec_buzzer_ready = false;
+
+void playHeltecTone(float frequency_hz, uint32_t duration_ms) {
+  if (frequency_hz <= 0.0f || duration_ms == 0) {
+    return;
+  }
+  if (!g_heltec_buzzer_ready) {
+    pinMode(kHeltecBuzzerPin, OUTPUT);
+    g_heltec_buzzer_ready = true;
+  }
+  tone(static_cast<uint8_t>(kHeltecBuzzerPin), static_cast<unsigned int>(frequency_hz),
+       static_cast<unsigned long>(duration_ms));
+}
+#endif
 #endif
 
 const char* radioPresetDisplayName(const char* region) {
@@ -1952,6 +2391,20 @@ bool StandaloneUi::ensureContactActionsPopupBuilt() {
   lv_label_set_text(contacts_actions_admin_label_, "(A)dmin");
   lv_obj_center(contacts_actions_admin_label_);
 
+  contacts_actions_refresh_btn_ = lv_btn_create(contacts_actions_panel_);
+  lv_obj_set_width(contacts_actions_refresh_btn_, LV_PCT(49));
+  lv_obj_set_height(contacts_actions_refresh_btn_, 28);
+  lv_obj_add_style(contacts_actions_refresh_btn_, &style_button_, 0);
+  lv_obj_add_style(contacts_actions_refresh_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(contacts_actions_refresh_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(contacts_actions_refresh_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(contacts_actions_refresh_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(contacts_actions_refresh_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+  contacts_actions_refresh_label_ = lv_label_create(contacts_actions_refresh_btn_);
+  lv_obj_add_style(contacts_actions_refresh_label_, &style_text_main_, 0);
+  lv_label_set_text(contacts_actions_refresh_label_, "(R)efresh");
+  lv_obj_center(contacts_actions_refresh_label_);
+
   // Reparent the existing Path/Ignore/Del buttons into the pop-up as full-width
   // rows; their existing handlers/actions are preserved.
   lv_obj_t* reparent[3] = { contacts_path_btn_, contacts_ignore_btn_, contacts_del_btn_ };
@@ -1983,6 +2436,9 @@ bool StandaloneUi::ensureContactActionsPopupBuilt() {
 
   if (key_group_) {
     lv_group_add_obj(key_group_, contacts_actions_admin_btn_);
+    if (contacts_actions_refresh_btn_) {
+      lv_group_add_obj(key_group_, contacts_actions_refresh_btn_);
+    }
     if (contacts_actions_close_btn_) {
       lv_group_add_obj(key_group_, contacts_actions_close_btn_);
     }
@@ -2000,11 +2456,19 @@ void StandaloneUi::openContactActionsPopup() {
   contacts_actions_open_ = true;
   const mesh::MeshContactSummary& sel = contacts_cache_[contacts_selected_index_];
   const bool is_admin = (sel.type == 2 || sel.type == 3);
+  const bool is_repeater = (sel.type == 2);
   if (contacts_actions_admin_btn_) {
     if (is_admin) {
       lv_obj_clear_flag(contacts_actions_admin_btn_, LV_OBJ_FLAG_HIDDEN);
     } else {
       lv_obj_add_flag(contacts_actions_admin_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (contacts_actions_refresh_btn_) {
+    if (is_repeater) {
+      lv_obj_clear_flag(contacts_actions_refresh_btn_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(contacts_actions_refresh_btn_, LV_OBJ_FLAG_HIDDEN);
     }
   }
   if (contacts_ignore_label_) {
@@ -2013,8 +2477,14 @@ void StandaloneUi::openContactActionsPopup() {
   lv_obj_clear_flag(contacts_actions_backdrop_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(contacts_actions_backdrop_);
   if (key_group_) {
-    lv_obj_t* first = (is_admin && contacts_actions_admin_btn_) ? contacts_actions_admin_btn_
-                                                                : contacts_path_btn_;
+    lv_obj_t* first = nullptr;
+    if (is_admin && contacts_actions_admin_btn_) {
+      first = contacts_actions_admin_btn_;
+    } else if (is_repeater && contacts_actions_refresh_btn_) {
+      first = contacts_actions_refresh_btn_;
+    } else {
+      first = contacts_path_btn_;
+    }
     if (first) {
       lv_group_focus_obj(first);
     }
@@ -5618,6 +6088,7 @@ void StandaloneUi::closeContactsDialog(bool focus_chat) {
   contacts_open_ = false;
   contacts_nav_focused_ = false;
   contacts_dm_open_ = false;
+  repeater_poll_target_key_[0] = '\0';
   closeContactsPathDialog();
   closeContactActionsPopup();
   pending_contacts_show_ = false;
@@ -6725,6 +7196,8 @@ void StandaloneUi::refreshCfgDialog() {
 
   lv_label_set_text(cfg_row_labels_[kCfgRowRepeater],
                     web_settings.repeater_mode ? "Repeater: ON" : "Repeater: OFF");
+  lv_label_set_text(cfg_row_labels_[kCfgRowNotifications],
+                    web_settings.notifications_enabled ? "Notifications: ON" : "Notifications: OFF");
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   lv_label_set_text(cfg_row_labels_[kCfgRowExportConfig], "Export Config to SD");
   lv_label_set_text(cfg_row_labels_[kCfgRowImportConfig], "Import Config from SD");
@@ -7699,6 +8172,30 @@ void StandaloneUi::activateCfgSelection() {
       }
       break;
     }
+    case kCfgRowNotifications: {
+      plumeria::web::WebSettings web_settings{};
+      plumeria::web::loadSettings(&web_settings);
+      const bool next = !web_settings.notifications_enabled;
+      char err[96] = {};
+      if (plumeria::web::setNotificationsEnabled(next, err, sizeof(err))) {
+        strncpy(cfg_status_text_, next ? "Notifications enabled" : "Notifications disabled",
+                sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, next ? "Notifications ON" : "Notifications OFF",
+                sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+        if (next) {
+          triggerMessageNotificationChime();
+        }
+      } else {
+        strncpy(cfg_status_text_, err[0] ? err : "Notifications toggle failed",
+                sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+      break;
+    }
     case kCfgRowRepeater: {
       // Enabling is routed through the confirm dialog (see cfgActionNeedsConfirm),
       // so reaching here means we are toggling repeater mode OFF.
@@ -7993,6 +8490,157 @@ void StandaloneUi::syncChannelsFromMeshIfNeeded(uint32_t now_ms) {
   }
 
   setChannels(channel_names, exported_count);
+}
+
+void StandaloneUi::pollRepeaterTelemetryIfNeeded(uint32_t now_ms) {
+  (void)now_ms;
+  if (!contacts_open_ || contacts_dm_open_ || !mesh_adapter_ || contacts_count_ == 0 ||
+      contacts_selected_index_ >= contacts_count_) {
+    repeater_poll_target_key_[0] = '\0';
+    return;
+  }
+
+  const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+  if (selected.type != 2 || selected.public_key_hex[0] == '\0') {
+    repeater_poll_target_key_[0] = '\0';
+    return;
+  }
+
+  if (strcmp(repeater_poll_target_key_, selected.public_key_hex) != 0) {
+    strncpy(repeater_poll_target_key_, selected.public_key_hex, sizeof(repeater_poll_target_key_) - 1);
+    repeater_poll_target_key_[sizeof(repeater_poll_target_key_) - 1] = '\0';
+    mesh_adapter_->requestContactTelemetryByPublicKeyHex(repeater_poll_target_key_);
+    return;
+  }
+}
+
+void StandaloneUi::triggerMessageNotificationChime() {
+  if (!plumeria::web::notificationsEnabled()) {
+    return;
+  }
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) || \
+    (defined(DEVICE_HELTEC_V4_EXPANSION) && defined(PLUMERIA_HAS_HELTEC_BUZZER_BACKEND))
+  message_chime_active_ = true;
+  message_chime_note_index_ = 0;
+  message_chime_next_ms_ = 0;
+#endif
+}
+
+void StandaloneUi::serviceMessageNotificationChime(uint32_t now_ms) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  if (!plumeria::web::notificationsEnabled()) {
+    message_chime_active_ = false;
+    message_chime_note_index_ = 0;
+    message_chime_next_ms_ = 0;
+    return;
+  }
+  if (!message_chime_active_) {
+    return;
+  }
+  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
+    message_chime_active_ = false;
+    message_chime_next_ms_ = 0;
+    return;
+  }
+  if (message_chime_next_ms_ != 0 && static_cast<int32_t>(now_ms - message_chime_next_ms_) < 0) {
+    return;
+  }
+
+  M5Cardputer.Speaker.setVolume(192);
+  M5Cardputer.Speaker.tone(kMessageChimeHz[message_chime_note_index_], kMessageChimeNoteMs, 0, true);
+  message_chime_note_index_++;
+  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
+    message_chime_active_ = false;
+    message_chime_next_ms_ = 0;
+  } else {
+    message_chime_next_ms_ = now_ms + kMessageChimeNoteMs;
+  }
+#elif defined(DEVICE_TDECK)
+  if (!plumeria::web::notificationsEnabled()) {
+    message_chime_active_ = false;
+    message_chime_note_index_ = 0;
+    message_chime_next_ms_ = 0;
+    return;
+  }
+  if (!message_chime_active_) {
+    return;
+  }
+  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
+    message_chime_active_ = false;
+    message_chime_next_ms_ = 0;
+    return;
+  }
+  if (message_chime_next_ms_ != 0 && static_cast<int32_t>(now_ms - message_chime_next_ms_) < 0) {
+    return;
+  }
+
+  playTdeckTone(kMessageChimeHz[message_chime_note_index_], kMessageChimeNoteMs);
+  message_chime_note_index_++;
+  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
+    message_chime_active_ = false;
+    message_chime_next_ms_ = 0;
+  } else {
+    message_chime_next_ms_ = now_ms + kMessageChimeNoteMs;
+  }
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+  if (!plumeria::web::notificationsEnabled()) {
+    pagerStopPlayback();
+    message_chime_active_ = false;
+    message_chime_note_index_ = 0;
+    message_chime_next_ms_ = 0;
+    return;
+  }
+  if (!message_chime_active_) {
+    return;
+  }
+  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
+    message_chime_active_ = false;
+    message_chime_next_ms_ = 0;
+    return;
+  }
+  if (message_chime_next_ms_ != 0 && static_cast<int32_t>(now_ms - message_chime_next_ms_) < 0) {
+    return;
+  }
+
+  playPagerTone(kMessageChimeHz[message_chime_note_index_], kMessageChimeNoteMs);
+  message_chime_note_index_++;
+  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
+    pagerStopPlayback();
+    message_chime_active_ = false;
+    message_chime_next_ms_ = 0;
+  } else {
+    message_chime_next_ms_ = now_ms + kMessageChimeNoteMs;
+  }
+#elif defined(DEVICE_HELTEC_V4_EXPANSION) && defined(PLUMERIA_HAS_HELTEC_BUZZER_BACKEND)
+  if (!plumeria::web::notificationsEnabled()) {
+    message_chime_active_ = false;
+    message_chime_note_index_ = 0;
+    message_chime_next_ms_ = 0;
+    return;
+  }
+  if (!message_chime_active_) {
+    return;
+  }
+  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
+    message_chime_active_ = false;
+    message_chime_next_ms_ = 0;
+    return;
+  }
+  if (message_chime_next_ms_ != 0 && static_cast<int32_t>(now_ms - message_chime_next_ms_) < 0) {
+    return;
+  }
+
+  playHeltecTone(kMessageChimeHz[message_chime_note_index_], kMessageChimeNoteMs);
+  message_chime_note_index_++;
+  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
+    message_chime_active_ = false;
+    message_chime_next_ms_ = 0;
+  } else {
+    message_chime_next_ms_ = now_ms + kMessageChimeNoteMs;
+  }
+#else
+  (void)now_ms;
+#endif
 }
 
 void StandaloneUi::focusCurrentZoneObject() {
@@ -10208,6 +10856,18 @@ void StandaloneUi::handleKey(uint32_t key) {
         activateContactsAction(1);
         return;
       }
+      if (kKeyboardNavEnabled && norm_key == 'r') {
+        closeContactActionsPopup();
+        if (contacts_count_ > 0 && contacts_selected_index_ < contacts_count_) {
+          const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+          if (selected.type == 2 && mesh_adapter_) {
+            mesh_adapter_->requestContactTelemetryByPublicKeyHex(selected.public_key_hex);
+            snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Telemetry refresh requested");
+            refreshContactsDialog(false);
+          }
+        }
+        return;
+      }
       if (kKeyboardNavEnabled && norm_key == 'p') {
         closeContactActionsPopup();
         openContactsPathDialog();
@@ -10251,6 +10911,17 @@ void StandaloneUi::handleKey(uint32_t key) {
     }
     if (kKeyboardNavEnabled && norm_key == 'a') {
       openContactActionsPopup();
+      return;
+    }
+    if (kKeyboardNavEnabled && norm_key == 'r') {
+      if (contacts_count_ > 0 && contacts_selected_index_ < contacts_count_) {
+        const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+        if (selected.type == 2 && mesh_adapter_) {
+          mesh_adapter_->requestContactTelemetryByPublicKeyHex(selected.public_key_hex);
+          snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Telemetry refresh requested");
+          refreshContactsDialog(false);
+        }
+      }
       return;
     }
     if (kKeyboardNavEnabled && norm_key == 'm') {
@@ -10914,6 +11585,17 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
       if ((target == contacts_actions_admin_btn_) || hasAncestor(target, contacts_actions_admin_btn_)) {
         closeContactActionsPopup();
         activateContactsAction(1);  // Admin
+      } else if ((target == contacts_actions_refresh_btn_) || (target == contacts_actions_refresh_label_) ||
+                 hasAncestor(target, contacts_actions_refresh_btn_)) {
+        closeContactActionsPopup();
+        if (contacts_count_ > 0 && contacts_selected_index_ < contacts_count_ && mesh_adapter_) {
+          const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+          if (selected.type == 2) {
+            mesh_adapter_->requestContactTelemetryByPublicKeyHex(selected.public_key_hex);
+            snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Telemetry refresh requested");
+            refreshContactsDialog(false);
+          }
+        }
       } else if ((target == contacts_path_btn_) || (target == contacts_path_label_) ||
                  hasAncestor(target, contacts_path_btn_)) {
         closeContactActionsPopup();
@@ -11315,6 +11997,8 @@ void StandaloneUi::loop() {
   }
 
   syncChannelsFromMeshIfNeeded(now);
+  pollRepeaterTelemetryIfNeeded(now);
+  serviceMessageNotificationChime(now);
   sampleLiveMetrics(now);
   refreshClockIfNeeded(now);
   refreshUnreadPulse(now);
@@ -11428,6 +12112,13 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   }
 
   if (event.type == mesh::MeshEventType::Info) {
+    if (strcmp(event.text, "__telemetry_updated__") == 0) {
+      if (contacts_open_ && !contacts_dm_open_) {
+        refreshContactsDialog(true);
+      }
+      return;
+    }
+
     int16_t snr_db = 0;
     int16_t rssi_dbm = 0;
     if (parseRadioInfoSample(event.text, &snr_db, &rssi_dbm)) {
@@ -11529,6 +12220,7 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
     room_ingest_last_text_hash_ = stableTextHash(event.text);
     room_ingest_last_ms_ = millis();
     appendDmLine(event.channel_name, event.peer_key, dm_line, ChatLineKind::Rx, event_epoch);
+    triggerMessageNotificationChime();
     return;
   }
 
@@ -11560,6 +12252,7 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   char display_text[96] = {};
   snprintf(display_text, sizeof(display_text), "[%s] %s", hhmm, event.text);
   const uint32_t event_epoch = nowEpochSecondsOrZero();
+  triggerMessageNotificationChime();
 
   // Room traffic can arrive as channel events; mirror matching room traffic
   // into DM history/panels so room conversations stay live.

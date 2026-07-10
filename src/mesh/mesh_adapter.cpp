@@ -5,6 +5,7 @@
 #include <SPI.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include <new>
 
@@ -17,6 +18,7 @@
 #include <helpers/TransportKeyStore.h>
 #include <helpers/radiolib/CustomSX1262.h>
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
+#include <helpers/sensors/LPPDataHelpers.h>
 #include <SHA256.h>
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #include <M5Unified.h>
@@ -49,6 +51,7 @@ constexpr char kContactsBlobKey[] = "contacts_blob";
 constexpr char kChannelsCountKey[] = "channels_cnt";
 constexpr char kChannelsBlobKey[] = "channels_blob";
 constexpr char kContactTelemetryBlobKey[] = "ctel_blob";
+constexpr char kUiTelemetryUpdatedInfo[] = "__telemetry_updated__";
 
 struct PersistedContact {
   uint8_t pub_key[32];
@@ -168,6 +171,91 @@ bool hexToBytes(const char* hex, uint8_t* out, size_t out_len) {
     out[i] = static_cast<uint8_t>((hi << 4) | lo);
   }
 
+  return true;
+}
+
+bool decodeContactTelemetryLpp(const uint8_t* data, uint8_t len, uint16_t* out_feat1, uint16_t* out_feat2) {
+  if (!data || len < 3 || !out_feat1 || !out_feat2) {
+    return false;
+  }
+
+  bool parsed_any = false;
+  bool have_batt_mv = false;
+  bool have_env_pct = false;
+  uint16_t batt_mv = 0;
+  uint8_t env_pct = 0;
+
+  LPPReader reader(data, len);
+  uint8_t channel = 0;
+  uint8_t type = 0;
+  while (reader.readHeader(channel, type)) {
+    switch (type) {
+      case LPP_VOLTAGE: {
+        float volts = 0.0f;
+        if (reader.readVoltage(volts)) {
+          parsed_any = true;
+          if (volts > 0.0f) {
+            long mv = lroundf(volts * 1000.0f);
+            if (mv < 0) {
+              mv = 0;
+            }
+            if (mv > 65535) {
+              mv = 65535;
+            }
+            batt_mv = static_cast<uint16_t>(mv);
+            have_batt_mv = batt_mv > 0;
+          }
+        }
+        break;
+      }
+      case LPP_RELATIVE_HUMIDITY: {
+        float pct = 0.0f;
+        if (reader.readRelativeHumidity(pct)) {
+          parsed_any = true;
+          long rounded = lroundf(pct);
+          if (rounded < 0) {
+            rounded = 0;
+          }
+          if (rounded > 100) {
+            rounded = 100;
+          }
+          env_pct = static_cast<uint8_t>(rounded);
+          have_env_pct = env_pct > 0;
+        }
+        break;
+      }
+      case LPP_TEMPERATURE: {
+        float ignored_temp = 0.0f;
+        if (reader.readTemperature(ignored_temp)) {
+          parsed_any = true;
+        }
+        break;
+      }
+      default:
+        reader.skipData(type);
+        break;
+    }
+  }
+
+  if (!parsed_any) {
+    return false;
+  }
+
+  uint16_t feat1 = 0;
+  uint16_t feat2 = 0;
+  if (have_batt_mv) {
+    feat1 = batt_mv;
+  }
+  if (have_env_pct) {
+    feat2 = env_pct;
+  }
+
+  if (feat1 == 0 && feat2 == 0) {
+    return false;
+  }
+
+  *out_feat1 = feat1;
+  *out_feat2 = feat2;
   return true;
 }
 
@@ -994,6 +1082,7 @@ class StandaloneChatMesh : public BaseChatMesh {
   void onContactResponse(const ContactInfo& contact, const uint8_t* data, uint8_t len) override {
     if (adapter_) {
       adapter_->handleLoginResponse(static_cast<const void*>(&contact), data, len);
+      adapter_->handleContactTelemetryResponse(static_cast<const void*>(&contact), data, len);
     }
   }
 
@@ -2211,6 +2300,30 @@ bool MeshAdapter::sendAdminCommand(const char* public_key_hex, const char* comma
   return runtime_->mesh->sendCommandData(*contact, ts, 0, command, est_timeout) != MSG_SEND_FAILED;
 }
 
+bool MeshAdapter::requestContactTelemetryByPublicKeyHex(const char* public_key_hex) {
+  if (!ready_ || !runtime_ || !runtime_->mesh || !public_key_hex) {
+    return false;
+  }
+
+  uint8_t pub_key[PUB_KEY_SIZE] = {};
+  if (!hexToBytes(public_key_hex, pub_key, sizeof(pub_key))) {
+    return false;
+  }
+
+  ContactInfo* contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (!contact) {
+    return false;
+  }
+
+  if (contact->type != 2) {
+    return false;
+  }
+
+  uint32_t tag = 0;
+  uint32_t est_timeout = 0;
+  return runtime_->mesh->sendRequest(*contact, REQ_TYPE_GET_STATUS, tag, est_timeout) != MSG_SEND_FAILED;
+}
+
 void MeshAdapter::handleLoginResponse(const void* contact_ptr, const uint8_t* data, uint8_t len) {
   if (!pending_login_active_ || !contact_ptr || !data || len < 5) {
     return;
@@ -2257,6 +2370,32 @@ void MeshAdapter::handleCommandData(const void* contact_ptr, const char* text) {
   const ContactInfo* contact = static_cast<const ContactInfo*>(contact_ptr);
   const char* nm = (contact->name[0] != '\0') ? contact->name : "(unnamed)";
   queueAdminCommandResponse(contact->id.pub_key, nm, text);
+}
+
+void MeshAdapter::handleContactTelemetryResponse(const void* contact_ptr, const uint8_t* data, uint8_t len) {
+  if (!contact_ptr || !data || len == 0) {
+    return;
+  }
+
+  // Guard against interpreting login replies as telemetry.
+  if ((len >= 6 && data[4] == 'O' && data[5] == 'K') ||
+      (len >= 5 && data[4] == RESP_SERVER_LOGIN_OK)) {
+    return;
+  }
+
+  const ContactInfo* contact = static_cast<const ContactInfo*>(contact_ptr);
+  if (contact->type != 2) {
+    return;
+  }
+
+  uint16_t feat1 = 0;
+  uint16_t feat2 = 0;
+  if (!decodeContactTelemetryLpp(data, len, &feat1, &feat2)) {
+    return;
+  }
+
+  noteContactAdvertTelemetry(contact->id.pub_key, 2, feat1, feat2);
+  queueInfo(kUiTelemetryUpdatedInfo);
 }
 
 void MeshAdapter::checkLoginTimeout(uint32_t now_ms) {
