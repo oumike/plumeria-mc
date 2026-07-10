@@ -1060,13 +1060,27 @@ label{display:block;font-size:.85rem;color:#b7cadd;margin-top:6px}
 input,select,button,textarea{width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #355674;background:#0f1a28;color:#e7eef6;font:inherit}
 button{margin-top:8px;background:#2c9bc8;border-color:#2c9bc8;font-weight:700}
 small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.tabs{display:flex;gap:8px;margin:0 0 10px}.tabbtn{width:auto;min-width:120px;margin-top:0;background:#1a2b3a}.tabbtn.active{background:#2c9bc8}
-.tab{display:none}.tab.active{display:block}.contact-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-#contacts{list-style:none;padding-left:0;max-height:220px;overflow:auto;margin:0}
-#contacts li{display:flex;gap:6px;align-items:center;margin:0 0 6px}
-#contacts .name{flex:1}.mini{width:auto;min-width:70px;margin-top:0;padding:4px 6px;font-size:.78rem}
-#map{height:280px;border:1px solid #2a435d;border-radius:8px}
-@media(max-width:760px){.row,.contact-grid{grid-template-columns:1fr}}
+.tabs{display:flex;gap:8px;margin:0 0 10px;flex-wrap:wrap}.tabbtn{width:auto;min-width:120px;margin-top:0;background:#1a2b3a}.tabbtn.active{background:#2c9bc8}
+.tab{display:none}.tab.active{display:block}
+.contacts-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}
+.contacts-toolbar small{align-self:center;justify-self:end}
+#contacts{list-style:none;padding-left:0;margin:10px 0 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;align-items:start}
+#contacts li{display:flex;flex-direction:column;gap:8px;border:1px solid #2a435d;border-radius:8px;background:#0f1a28;padding:10px}
+#contacts li.active{border-color:#2c9bc8;box-shadow:0 0 0 1px rgba(44,155,200,.35) inset}
+#contacts .card-top{display:flex;flex-direction:column;gap:6px;flex:1}
+#contacts .contact-name{font-weight:700;font-size:.92rem;line-height:1.2;word-break:break-word}
+#contacts .contact-meta{font-size:.75rem;color:#9bb1c5;line-height:1.25}
+#contacts .key-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:start}
+#contacts .key-text{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:.72rem;line-height:1.2;color:#cfe2f4;white-space:normal;overflow-wrap:anywhere;word-break:break-all}
+#contacts .actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:auto}
+.mini{width:100%;margin-top:0;padding:6px 10px;font-size:.78rem;min-height:34px;white-space:nowrap}
+#map{height:300px;border:1px solid #2a435d;border-radius:8px}
+.util-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.util-row button{margin-top:0}
+.import-panel{margin-top:10px;padding:10px;border:1px solid #355674;border-radius:8px;background:#101d2d}
+.import-panel h4{margin:0 0 8px;font-size:.92rem;color:#9fe7ff}
+@media(max-width:760px){.row,.contacts-toolbar,.util-row{grid-template-columns:1fr}}
+@media(max-width:520px){#contacts .actions{grid-template-columns:1fr}}
 </style>
 </head><body><div class='wrap'>
 <h1>Plumeria Web Config</h1>
@@ -1074,6 +1088,7 @@ small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 <div class='tabs'>
 <button type='button' id='tab_btn_config' class='tabbtn active' onclick='showTab("config")'>Configuration</button>
 <button type='button' id='tab_btn_contacts' class='tabbtn' onclick='showTab("contacts")'>Contacts</button>
+<button type='button' id='tab_btn_heatmap' class='tabbtn' onclick='showTab("heatmap")'>Heat Map</button>
 <button type='button' id='tab_btn_utils' class='tabbtn' onclick='showTab("utils")'>Utilities</button>
 </div>
 
@@ -1138,30 +1153,40 @@ small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 </div>
 
 <div id='tab_contacts' class='tab'>
-<section><h3>Contacts Map</h3><div id='map'></div><small id='map_meta'>No points yet.</small></section>
 <section><h3>Contacts</h3>
-<div class='contact-grid'>
-<ul id='contacts'></ul>
-<div id='contact_detail'>Select a contact.</div>
+<div class='contacts-toolbar'>
+<label style='margin-top:0'>Filter by name<input id='contacts_filter' type='text' placeholder='Type part of a contact name'></label>
+<small id='contacts_meta'>No contacts loaded.</small>
 </div>
+<ul id='contacts'></ul>
+<small id='contacts_empty' style='display:none'>No contacts match the current filter.</small>
 </section>
+</div>
+
+<div id='tab_heatmap' class='tab'>
+<section><h3>Contacts Heat Map</h3><div id='map'></div><small id='map_meta'>No points yet.</small><br><small>Ignored contacts are excluded.</small></section>
 </div>
 
 <div id='tab_utils' class='tab'>
 <section><h3>Advert Utilities</h3>
+<div class='util-row'>
 <button type='button' onclick='utilAdvertLocal()'>Advert Local (Zero Hop)</button>
 <button type='button' onclick='utilAdvertFlood()'>Advert Flood</button>
+</div>
 </section>
 <section><h3>Config Utilities</h3>
 <button type='button' onclick='utilExportConfig()'>Export Config</button>
+<div class='import-panel'>
+<h4>Import Config</h4>
 <label>Import Config File<input id='util_cfg_file' type='file' accept='.yaml,.yml,.txt'></label>
 <button type='button' onclick='utilImportConfig()'>Import Config</button>
+</div>
 <small id='util_status'>Ready.</small>
 </section>
 </div>
 
 <script>
-let statusCache=null,presets={},contactsCache=[],selContact='';
+let statusCache=null,presets={},contactsCache=[],selContact='',contactsFilter='';
 let map=null,layer=null,leafletLoading=false;
 let nodeNameDirty=false,locationDirty=false,wifiDirty=false,radioDirty=false,timezoneDirty=false;
 const fallbackPresets={
@@ -1176,7 +1201,7 @@ const fallbackPresets={
   "BR_902":{freq:904.750,bw:62.5,sf:8,cr:5,pwr:22}
 };
 
-function showTab(tab){['config','contacts','utils'].forEach(t=>{const p=document.getElementById('tab_'+t),b=document.getElementById('tab_btn_'+t);if(p)p.classList.toggle('active',t===tab);if(b)b.classList.toggle('active',t===tab);});if(tab==='contacts'){setTimeout(drawMap,10);}}
+function showTab(tab){['config','contacts','heatmap','utils'].forEach(t=>{const p=document.getElementById('tab_'+t),b=document.getElementById('tab_btn_'+t);if(p)p.classList.toggle('active',t===tab);if(b)b.classList.toggle('active',t===tab);});if(tab==='heatmap'){setTimeout(drawMap,10);}}
 async function jget(u){const r=await fetch(u);return r.json();}
 async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(b)});return r.json();}
 function tzOffsetMinutes(tz){try{const p=new Intl.DateTimeFormat('en-US',{timeZone:tz,timeZoneName:'longOffset'}).formatToParts(new Date());const v=(p.find(x=>x.type==='timeZoneName')||{}).value||'';const m=v.match(/([+-])(\d{1,2})(?::?(\d{2}))?/);if(m){const s=m[1]==='-'?-1:1,h=parseInt(m[2],10)||0,n=parseInt(m[3]||'0',10)||0;return s*(h*60+n);}}catch(_e){}return 0;}
@@ -1193,6 +1218,7 @@ function bindDirtyTracking(){
   const tz=document.getElementById('timezone');
   if(tz){tz.addEventListener('input',()=>{timezoneDirty=true;});tz.addEventListener('change',()=>{timezoneDirty=true;});}
 }
+function bindContactsFilter(){const el=document.getElementById('contacts_filter');if(!el)return;el.addEventListener('input',()=>{contactsFilter=String(el.value||'').trim().toLowerCase();renderContacts();});}
 function applyRegionPreset(){const r=document.getElementById('region');if(!r)return;const d=(presets&&presets[r.value])||fallbackPresets[r.value];if(!d)return;document.getElementById('freq').value=d.freq;document.getElementById('bw').value=d.bw;document.getElementById('sf').value=d.sf;document.getElementById('cr').value=d.cr;document.getElementById('pwr').value=d.pwr;radioDirty=true;}
 function bindRegionPresetUi(){const r=document.getElementById('region');if(r){r.onchange=applyRegionPreset;}const b=document.getElementById('apply_region_defaults');if(b){b.onclick=applyRegionPreset;}}
 
@@ -1280,13 +1306,13 @@ async function loadStatus(force=false){
 
 async function loadChannels(){const c=await jget('/api/channels');const ul=document.getElementById('channels');ul.innerHTML='';(c.channels||[]).forEach(n=>{const li=document.createElement('li');li.textContent=n;if(n!=='Public'){const b=document.createElement('button');b.className='mini';b.textContent='Remove';b.onclick=async()=>{await jpost('/api/channels/remove',{name:n});await loadChannels();};li.appendChild(b);}ul.appendChild(li);});}
 
-function renderContactDetail(){const d=document.getElementById('contact_detail');if(!selContact){d.textContent='Select a contact.';return;}const c=contactsCache.find(x=>x.pubkey===selContact);if(!c){d.textContent='Contact not found.';return;}const lat=Number(c.gps_lat),lon=Number(c.gps_lon);d.innerHTML='<div><strong>Name:</strong> '+(c.name||'(unnamed)')+'</div><div><strong>Public Key:</strong> '+(c.pubkey||'')+'</div><div><strong>Favorite:</strong> '+(c.favorite?'Yes':'No')+'</div><div><strong>Last Heard:</strong> '+String(c.lastmod||0)+'</div><div><strong>GPS:</strong> '+(validCoord(lat,lon)?(lat.toFixed(6)+', '+lon.toFixed(6)):'Unavailable')+'</div>';}
+async function copyTextToClipboard(text){if(!text)return false;try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(text);return true;}}catch(_e){}try{const ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','readonly');ta.style.position='fixed';ta.style.opacity='0';ta.style.left='-1000px';document.body.appendChild(ta);ta.focus();ta.select();const ok=document.execCommand('copy');document.body.removeChild(ta);return !!ok;}catch(_e){return false;}}
 
 function ensureLeaflet(){return new Promise(resolve=>{if(window.L){resolve(true);return;}if(leafletLoading){setTimeout(()=>ensureLeaflet().then(resolve),120);return;}leafletLoading=true;if(!document.getElementById('leaflet_css')){const l=document.createElement('link');l.id='leaflet_css';l.rel='stylesheet';l.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.appendChild(l);}if(!document.getElementById('leaflet_js')){const s=document.createElement('script');s.id='leaflet_js';s.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';s.onload=()=>{leafletLoading=false;resolve(!!window.L);};s.onerror=()=>{leafletLoading=false;resolve(false);};document.head.appendChild(s);}else{const w=()=>{if(window.L){leafletLoading=false;resolve(true);}else setTimeout(w,120);};w();}});}
 
-async function drawMap(){const meta=document.getElementById('map_meta');const ok=await ensureLeaflet();if(!ok){if(meta)meta.textContent='Map tiles unavailable (offline).';return;}if(!map){map=L.map('map',{zoomControl:true,attributionControl:true});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);layer=L.layerGroup().addTo(map);}layer.clearLayers();const pts=[];contactsCache.forEach(c=>{const lat=Number(c.gps_lat),lon=Number(c.gps_lon);if(validCoord(lat,lon))pts.push({lat,lon,name:c.name||'(unnamed)',key:c.pubkey,self:false});});if(statusCache){const lat=Number(statusCache.node_lat),lon=Number(statusCache.node_lon);if(validCoord(lat,lon))pts.push({lat,lon,name:statusCache.node_name||'Me',key:'__self__',self:true});}pts.forEach(p=>{const m=L.circleMarker([p.lat,p.lon],{radius:p.self?7:6,color:p.self?'#59e4a7':'#ffc078',weight:2,fillOpacity:1}).addTo(layer);m.bindTooltip(p.self?'ME':p.name,{permanent:false});m.on('click',()=>{if(!p.self){selContact=p.key;renderContactDetail();renderContacts();}});});if(pts.length){map.setView([pts[0].lat,pts[0].lon],pts[0].self?13:8);}else{map.setView([0,0],2);}if(meta)meta.textContent=pts.length?('Points: '+pts.length):'No points yet.';setTimeout(()=>map.invalidateSize(false),0);}
+async function drawMap(){const panel=document.getElementById('tab_heatmap');if(!panel||!panel.classList.contains('active'))return;const meta=document.getElementById('map_meta');const ok=await ensureLeaflet();if(!ok){if(meta)meta.textContent='Map tiles unavailable (offline).';return;}if(!map){map=L.map('map',{zoomControl:true,attributionControl:true});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);layer=L.layerGroup().addTo(map);}layer.clearLayers();const pts=[];contactsCache.forEach(c=>{if(c.ignored)return;const lat=Number(c.gps_lat),lon=Number(c.gps_lon);if(validCoord(lat,lon))pts.push({lat,lon,name:c.name||'(unnamed)',key:c.pubkey,self:false,lastmod:Number(c.lastmod||0)});});if(statusCache){const lat=Number(statusCache.node_lat),lon=Number(statusCache.node_lon);if(validCoord(lat,lon))pts.push({lat,lon,name:statusCache.node_name||'Me',key:'__self__',self:true,lastmod:0});}const nowSec=Math.floor(Date.now()/1000);pts.forEach(p=>{const age=(p.lastmod>0&&p.lastmod<4100000000)?Math.max(0,nowSec-p.lastmod):0;const intensity=p.self?1:Math.max(0.25,1-(age/(24*3600)));L.circleMarker([p.lat,p.lon],{radius:p.self?18:14,stroke:false,fillColor:p.self?'#59e4a7':'#ff9f43',fillOpacity:p.self?0.30:(0.10*intensity)}).addTo(layer);const m=L.circleMarker([p.lat,p.lon],{radius:p.self?7:6,color:p.self?'#59e4a7':'#ffc078',weight:2,fillOpacity:0.95}).addTo(layer);m.bindTooltip(p.self?'ME':p.name,{permanent:false});m.on('click',()=>{if(!p.self){selContact=p.key;renderContacts();}});});if(pts.length){map.setView([pts[0].lat,pts[0].lon],pts[0].self?13:8);}else{map.setView([0,0],2);}if(meta)meta.textContent=pts.length?('Points: '+pts.length):'No points yet.';setTimeout(()=>map.invalidateSize(false),0);}
 
-function renderContacts(){const ul=document.getElementById('contacts');ul.innerHTML='';if(!contactsCache.length){const li=document.createElement('li');li.textContent='No contacts heard yet';ul.appendChild(li);renderContactDetail();drawMap();return;}contactsCache.forEach(c=>{const li=document.createElement('li');const n=document.createElement('button');n.className='name mini';n.textContent=c.name||'(unnamed)';n.onclick=()=>{selContact=c.pubkey;renderContactDetail();drawMap();};const f=document.createElement('button');f.className='mini';f.textContent=c.favorite?'Unfavorite':'Favorite';f.onclick=async()=>{await jpost('/api/contacts/favorite',{pubkey:c.pubkey,favorite:c.favorite?'0':'1'});await loadContacts();};const d=document.createElement('button');d.className='mini';d.textContent='Delete';d.onclick=async()=>{if(!confirm('Delete contact?'))return;await jpost('/api/contacts/remove',{pubkey:c.pubkey});await loadContacts();};li.appendChild(n);li.appendChild(f);li.appendChild(d);ul.appendChild(li);});if(!selContact&&contactsCache.length)selContact=contactsCache[0].pubkey;renderContactDetail();drawMap();}
+function renderContacts(){const ul=document.getElementById('contacts');const meta=document.getElementById('contacts_meta');const empty=document.getElementById('contacts_empty');if(!ul)return;ul.innerHTML='';const source=Array.isArray(contactsCache)?contactsCache:[];const filter=contactsFilter;const visible=filter.length?source.filter(c=>String(c.name||'').toLowerCase().includes(filter)):source;if(meta)meta.textContent=visible.length+' shown / '+source.length+' total';if(!visible.length){if(empty){empty.style.display='block';empty.textContent=source.length?'No contacts match the current filter.':'No contacts heard yet.';}drawMap();return;}if(empty)empty.style.display='none';visible.forEach(c=>{const li=document.createElement('li');if(selContact&&selContact===c.pubkey){li.classList.add('active');}li.onclick=(ev)=>{if(ev.target&&ev.target.tagName==='BUTTON')return;selContact=c.pubkey;renderContacts();drawMap();};const top=document.createElement('div');top.className='card-top';const name=document.createElement('div');name.className='contact-name';name.textContent=c.name||'(unnamed)';const lat=Number(c.gps_lat),lon=Number(c.gps_lon);const hasLoc=validCoord(lat,lon);const metaLine=document.createElement('div');metaLine.className='contact-meta';metaLine.textContent='Last heard: '+String(c.lastmod||0)+(hasLoc?(' | GPS: '+lat.toFixed(5)+', '+lon.toFixed(5)):' | GPS: unavailable');const keyRow=document.createElement('div');keyRow.className='key-row';const keyText=document.createElement('div');keyText.className='key-text';keyText.textContent=c.pubkey||'';const copy=document.createElement('button');copy.className='mini';copy.type='button';copy.textContent='Copy';copy.onclick=async()=>{const ok=await copyTextToClipboard(c.pubkey||'');copy.textContent=ok?'Copied':'Copy failed';setTimeout(()=>{copy.textContent='Copy';},900);};keyRow.appendChild(keyText);keyRow.appendChild(copy);top.appendChild(name);top.appendChild(metaLine);top.appendChild(keyRow);const actions=document.createElement('div');actions.className='actions';const f=document.createElement('button');f.className='mini';f.type='button';f.textContent=c.favorite?'Unfavorite':'Favorite';f.onclick=async()=>{await jpost('/api/contacts/favorite',{pubkey:c.pubkey,favorite:c.favorite?'0':'1'});await loadContacts();};const d=document.createElement('button');d.className='mini';d.type='button';d.textContent='Delete';d.onclick=async()=>{if(!confirm('Delete contact?'))return;await jpost('/api/contacts/remove',{pubkey:c.pubkey});await loadContacts();};actions.appendChild(f);actions.appendChild(d);li.appendChild(top);li.appendChild(actions);ul.appendChild(li);});if(!selContact&&visible.length){selContact=visible[0].pubkey;}drawMap();}
 
 async function loadContacts(){const c=await jget('/api/contacts');contactsCache=Array.isArray(c.contacts)?c.contacts:[];contactsCache.sort((a,b)=>{if(!!a.favorite!==!!b.favorite)return a.favorite?-1:1;return Number(b.lastmod||0)-Number(a.lastmod||0);});renderContacts();}
 
@@ -1299,7 +1325,7 @@ async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{}
 function utilExportConfig(){window.location='/api/util/export';}
 async function utilImportConfig(){const status=document.getElementById('util_status');const input=document.getElementById('util_cfg_file');if(!input||!input.files||input.files.length===0){if(status)status.textContent='Choose a config file first.';return;}const file=input.files[0];const text=await file.text();const r=await jpost('/api/util/import',{content:text});if(status)status.textContent=(r&&r.message)?r.message:((r&&r.error)||'done');}
 
-async function boot(){try{await loadPresets();bindDirtyTracking();await loadStatus(true);await loadChannels();await loadContacts();setInterval(()=>{loadStatus(false);loadContacts();},5000);}catch(e){document.getElementById('meta').textContent='UI init failed: '+e;}}
+async function boot(){try{await loadPresets();bindDirtyTracking();bindContactsFilter();await loadStatus(true);await loadChannels();await loadContacts();setInterval(()=>{loadStatus(false);loadContacts();},5000);}catch(e){document.getElementById('meta').textContent='UI init failed: '+e;}}
 boot();
 </script>
 </div></body></html>
@@ -1669,6 +1695,8 @@ void handleContacts() {
       payload += jsonString(g_contacts_web_buf[i].public_key_hex);
       payload += ",\"favorite\":";
       payload += g_contacts_web_buf[i].favorite ? "true" : "false";
+      payload += ",\"ignored\":";
+      payload += g_contacts_web_buf[i].ignored ? "true" : "false";
       payload += ",\"type\":";
       payload += String(static_cast<unsigned>(g_contacts_web_buf[i].type));
       payload += ",\"lastmod\":";

@@ -132,8 +132,14 @@ class StandaloneUi {
   void closeDmDialog(bool focus_chat = false);
   void appendDmLine(const char* contact_name, const char* contact_key, const char* text, ChatLineKind kind,
                     uint32_t timestamp_epoch = 0);
+  bool hasStoredIncomingDmDuplicate(const char* contact_name, const char* contact_key,
+                                    const char* incoming_text,
+                                    uint32_t max_timestamp_epoch = 0) const;
   void rebuildDmDialog();
   void clearDmPanel();
+  bool clearStoredDmConversation(const char* contact_name, const char* contact_key,
+                                 bool prefer_name_match = false);
+  void clearActiveDmConversation(bool from_contacts_view);
   void openHelpDialog();
   void closeHelpDialog();
   void openLiveDialog();
@@ -290,8 +296,11 @@ class StandaloneUi {
   lv_obj_t* contacts_last_heard_label_ = nullptr;
   lv_obj_t* contacts_telemetry_label_ = nullptr;
   lv_obj_t* contacts_dm_panel_ = nullptr;
+  lv_obj_t* contacts_dm_clear_btn_ = nullptr;
+  lv_obj_t* contacts_dm_clear_label_ = nullptr;
   lv_obj_t* contacts_dm_new_btn_ = nullptr;
   lv_obj_t* contacts_dm_new_label_ = nullptr;
+  lv_obj_t* contacts_dm_hint_label_ = nullptr;
   lv_obj_t* contacts_path_btn_ = nullptr;
   lv_obj_t* contacts_path_label_ = nullptr;
   lv_obj_t* contacts_ignore_btn_ = nullptr;
@@ -315,11 +324,14 @@ class StandaloneUi {
   lv_obj_t* contacts_path_close_label_ = nullptr;
   lv_obj_t* dm_dialog_ = nullptr;
   lv_obj_t* dm_title_label_ = nullptr;
+  lv_obj_t* dm_clear_btn_ = nullptr;
+  lv_obj_t* dm_clear_label_ = nullptr;
   lv_obj_t* dm_new_btn_ = nullptr;
   lv_obj_t* dm_new_label_ = nullptr;
   lv_obj_t* dm_panel_ = nullptr;
   lv_obj_t* dm_close_btn_ = nullptr;
   lv_obj_t* dm_close_label_ = nullptr;
+  lv_obj_t* dm_hint_label_ = nullptr;
   lv_obj_t* dm_rows_[kMaxChatRows]{};
   size_t dm_row_count_ = 0;
   lv_obj_t* dm_pending_ack_label_ = nullptr;
@@ -341,6 +353,11 @@ class StandaloneUi {
   lv_obj_t* admin_pw_cancel_btn_ = nullptr;
   bool admin_pw_open_ = false;
   bool admin_pw_save_ = false;
+  bool admin_join_after_login_ = false;
+  uint32_t room_join_replay_dedup_until_ms_ = 0;
+  uint32_t room_join_replay_snapshot_epoch_ = 0;
+  char room_join_replay_key_[65] = {};
+  char room_join_replay_name_[32] = {};
 
   // Admin screen (blank for now)
   lv_obj_t* admin_screen_dialog_ = nullptr;
@@ -520,6 +537,10 @@ class StandaloneUi {
   char pending_local_echo_channel_[32]{};
   char pending_local_echo_text_[96]{};
   uint32_t pending_local_echo_deadline_ms_ = 0;
+  uint32_t room_ingest_last_name_hash_ = 0;
+  uint32_t room_ingest_last_key_hash_ = 0;
+  uint32_t room_ingest_last_text_hash_ = 0;
+  uint32_t room_ingest_last_ms_ = 0;
   bool unread_channels_[kChannelCount]{};
   mesh::MeshContactSummary contacts_cache_[kMaxContactsUi]{};
 

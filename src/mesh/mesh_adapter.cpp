@@ -843,11 +843,72 @@ class StandaloneChatMesh : public BaseChatMesh {
 
   void onSignedMessageRecv(const ContactInfo& contact, ::mesh::Packet* packet, uint32_t sender_timestamp,
                            const uint8_t* sender_prefix, const char* text) override {
-    (void)contact;
-    (void)packet;
     (void)sender_timestamp;
-    (void)sender_prefix;
-    (void)text;
+    if (!regionMatches(packet)) {
+      return;
+    }
+
+    const ContactInfo* conversation_contact = &contact;
+    const ContactInfo* sender_contact = &contact;
+
+    if (sender_prefix) {
+      ContactInfo* prefix_contact = lookupContactByPubKey(sender_prefix, 4);
+      if (prefix_contact) {
+        if (prefix_contact->type == ADV_TYPE_ROOM) {
+          // Signed room packets can arrive through intermediaries; keep room as thread identity.
+          conversation_contact = prefix_contact;
+          sender_contact = &contact;
+        } else if (contact.type == ADV_TYPE_ROOM) {
+          // Packet source is the room; prefix resolves to original sender.
+          conversation_contact = &contact;
+          sender_contact = prefix_contact;
+        } else {
+          sender_contact = prefix_contact;
+        }
+      }
+    }
+
+    char conversation_name[32] = {};
+    if (conversation_contact->name[0] != '\0') {
+      strncpy(conversation_name, conversation_contact->name, sizeof(conversation_name) - 1);
+      conversation_name[sizeof(conversation_name) - 1] = '\0';
+    } else {
+      strncpy(conversation_name, "(unnamed)", sizeof(conversation_name) - 1);
+      conversation_name[sizeof(conversation_name) - 1] = '\0';
+    }
+
+    char conversation_key[65] = {};
+    bytesToHex(conversation_contact->id.pub_key, PUB_KEY_SIZE, conversation_key, sizeof(conversation_key));
+    if (adapter_->isContactIgnoredByPublicKeyHex(conversation_key)) {
+      return;
+    }
+
+    const char* msg = text ? text : "";
+    char sender_label[24] = {};
+
+    if (sender_contact && sender_contact != conversation_contact && sender_contact->type != ADV_TYPE_ROOM &&
+        sender_contact->name[0] != '\0') {
+      strncpy(sender_label, sender_contact->name, sizeof(sender_label) - 1);
+      sender_label[sizeof(sender_label) - 1] = '\0';
+    } else if (sender_prefix) {
+      snprintf(sender_label, sizeof(sender_label), "[%02X%02X%02X%02X]",
+               static_cast<unsigned>(sender_prefix[0]),
+               static_cast<unsigned>(sender_prefix[1]),
+               static_cast<unsigned>(sender_prefix[2]),
+               static_cast<unsigned>(sender_prefix[3]));
+    } else if (sender_contact && sender_contact != conversation_contact && sender_contact->type != ADV_TYPE_ROOM) {
+      char sender_short_hex[9] = {};
+      bytesToHex(sender_contact->id.pub_key, 4, sender_short_hex, sizeof(sender_short_hex));
+      snprintf(sender_label, sizeof(sender_label), "[%s]", sender_short_hex);
+    }
+
+    if (sender_label[0] != '\0') {
+      char signed_msg[96] = {};
+      snprintf(signed_msg, sizeof(signed_msg), "%s: %s", sender_label, msg);
+      adapter_->queueDirectMessage(conversation_name, conversation_key, signed_msg);
+    } else {
+      adapter_->queueDirectMessage(conversation_name, conversation_key, msg);
+    }
   }
 
   void onGroupDataRecv(::mesh::Packet* packet, uint8_t type, const ::mesh::GroupChannel& channel,

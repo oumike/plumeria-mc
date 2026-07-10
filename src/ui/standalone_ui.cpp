@@ -5,6 +5,8 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <esp_heap_caps.h>
+#include <nvs.h>
 #include <esp_vfs_fat.h>
 #include <lvgl.h>
 #include <math.h>
@@ -141,6 +143,8 @@ constexpr uint32_t kChatPersistFlushMs = 2000;
 constexpr uint32_t kDmPersistFlushMs = 1000;
 constexpr uint32_t kDmRetentionPruneMs = 300000;
 constexpr uint32_t kDmRetentionSeconds = 10UL * 24UL * 60UL * 60UL;
+// NVS blob capacity is limited; persist only a bounded recent DM window.
+constexpr size_t kMaxPersistedDmRows = 28;
 constexpr uint32_t kAdvertPopupAutoCloseMs = 2000;
 constexpr size_t kDmDialogRecentLimit = 30;
 constexpr uint32_t kChannelSyncMs = 1000;
@@ -308,17 +312,19 @@ const char* kHelpBodyText =
 #else
 const char* kHelpBodyText =
   "Keyboard shortcuts:\n"
-  "h = Help (global except compose)\n"
+  "h = Open channel list (main screen)\n"
+  "HELP shortcut = Open this screen\n"
   "l = Live feed\n"
-  "c = Config\n"
+  "c = Config (main), Contact list (in Contacts)\n"
   "o = Contacts\n"
   "m = Compose to current room\n"
   "z = Advert zero-hop\n"
   "f = Advert flood\n"
-  "m = DM from Contacts\n"
+  "m = DM from Contacts (non-room)\n"
+  "j = Join selected room (Contacts)\n"
   "p = Path trace from Contacts\n"
   "d = Delete contact (from Contacts)\n"
-  "j = up, k = down (arrows also work)\n"
+  "j/k = up/down (arrows also work)\n"
   "Backspace = close current dialog";
 #endif
 
@@ -461,6 +467,18 @@ char asciiUpper(char c) {
   return c;
 }
 
+uint32_t stableTextHash(const char* text) {
+  if (!text || text[0] == '\0') {
+    return 0;
+  }
+  uint32_t h = 2166136261u;  // FNV-1a
+  for (size_t i = 0; text[i] != '\0'; i++) {
+    h ^= static_cast<uint8_t>(text[i]);
+    h *= 16777619u;
+  }
+  return h;
+}
+
 bool dmNameLikelyMatch(const char* a, const char* b) {
   if (!a || !b) {
     return false;
@@ -486,6 +504,12 @@ bool dmNameLikelyMatch(const char* a, const char* b) {
   }
 
   if (len_a == len_b) {
+    return true;
+  }
+
+  // Room names may include dynamic suffixes (e.g., sender tags) after the base name.
+  const char extra = (len_a > len_b) ? a[min_len] : b[min_len];
+  if (extra == ' ' || extra == '[' || extra == '(' || extra == ':' || extra == '-' || extra == '_') {
     return true;
   }
 
@@ -1906,13 +1930,16 @@ bool StandaloneUi::ensureContactActionsPopupBuilt() {
   lv_obj_set_style_bg_opa(contacts_actions_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(contacts_actions_panel_, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(contacts_actions_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(contacts_actions_panel_, 4, LV_PART_MAIN);
   lv_obj_set_style_pad_row(contacts_actions_panel_, 4, LV_PART_MAIN);
-  lv_obj_set_flex_flow(contacts_actions_panel_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_flow(contacts_actions_panel_, LV_FLEX_FLOW_ROW_WRAP);
+  lv_obj_set_flex_align(contacts_actions_panel_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_START);
   lv_obj_clear_flag(contacts_actions_panel_, LV_OBJ_FLAG_SCROLLABLE);
 
   // Admin (fresh button; shown only for repeater/room contacts).
   contacts_actions_admin_btn_ = lv_btn_create(contacts_actions_panel_);
-  lv_obj_set_width(contacts_actions_admin_btn_, LV_PCT(100));
+  lv_obj_set_width(contacts_actions_admin_btn_, LV_PCT(49));
   lv_obj_set_height(contacts_actions_admin_btn_, 28);
   lv_obj_add_style(contacts_actions_admin_btn_, &style_button_, 0);
   lv_obj_add_style(contacts_actions_admin_btn_, &style_button_focused_, LV_STATE_FOCUSED);
@@ -1934,14 +1961,14 @@ bool StandaloneUi::ensureContactActionsPopupBuilt() {
       continue;
     }
     lv_obj_set_parent(b, contacts_actions_panel_);
-    lv_obj_set_width(b, LV_PCT(100));
+    lv_obj_set_width(b, LV_PCT(49));
     lv_obj_set_height(b, 28);
     lv_obj_clear_flag(b, LV_OBJ_FLAG_HIDDEN);  // visibility now follows the backdrop
   }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
   contacts_actions_close_btn_ = lv_btn_create(contacts_actions_panel_);
-  lv_obj_set_width(contacts_actions_close_btn_, LV_PCT(100));
+  lv_obj_set_width(contacts_actions_close_btn_, LV_PCT(49));
   lv_obj_set_height(contacts_actions_close_btn_, 28);
   lv_obj_add_style(contacts_actions_close_btn_, &style_button_, 0);
   lv_obj_add_style(contacts_actions_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
@@ -2140,6 +2167,31 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
     lv_label_set_long_mode(contacts_telemetry_label_, LV_LABEL_LONG_WRAP);
     lv_label_set_text(contacts_telemetry_label_, "Telemetry: -");
 
+  #if defined(DEVICE_HELTEC_V4_EXPANSION)
+    contacts_dm_clear_btn_ = lv_btn_create(contacts_dialog_);
+    if (!contacts_dm_clear_btn_) {
+      contacts_init_failed = true;
+      break;
+    }
+    lv_obj_set_size(contacts_dm_clear_btn_, 56, 18);
+    lv_obj_align(contacts_dm_clear_btn_, LV_ALIGN_TOP_RIGHT, -60, 18);
+    lv_obj_add_style(contacts_dm_clear_btn_, &style_button_, 0);
+    lv_obj_add_style(contacts_dm_clear_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(contacts_dm_clear_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(contacts_dm_clear_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(contacts_dm_clear_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    lv_obj_add_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
+
+    contacts_dm_clear_label_ = lv_label_create(contacts_dm_clear_btn_);
+    if (!contacts_dm_clear_label_) {
+      contacts_init_failed = true;
+      break;
+    }
+    lv_obj_add_style(contacts_dm_clear_label_, &style_text_main_, 0);
+    lv_label_set_text(contacts_dm_clear_label_, "CLEAR");
+    lv_obj_center(contacts_dm_clear_label_);
+
     contacts_dm_new_btn_ = lv_btn_create(contacts_dialog_);
     if (!contacts_dm_new_btn_) {
       contacts_init_failed = true;
@@ -2163,6 +2215,27 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
     lv_obj_add_style(contacts_dm_new_label_, &style_text_main_, 0);
     lv_label_set_text(contacts_dm_new_label_, "NEW");
     lv_obj_center(contacts_dm_new_label_);
+    contacts_dm_hint_label_ = nullptr;
+  #else
+    contacts_dm_clear_btn_ = nullptr;
+    contacts_dm_clear_label_ = nullptr;
+    contacts_dm_new_btn_ = nullptr;
+    contacts_dm_new_label_ = nullptr;
+
+    contacts_dm_hint_label_ = lv_label_create(contacts_dialog_);
+    if (!contacts_dm_hint_label_) {
+      contacts_init_failed = true;
+      break;
+    }
+    lv_obj_add_style(contacts_dm_hint_label_, &style_text_dim_, 0);
+    lv_obj_set_style_text_font(contacts_dm_hint_label_, compactUiFont(), 0);
+    lv_obj_set_width(contacts_dm_hint_label_, LV_PCT(100));
+    lv_label_set_long_mode(contacts_dm_hint_label_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(contacts_dm_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(contacts_dm_hint_label_, "Enter for new message, c to clear messages");
+    lv_obj_align(contacts_dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_add_flag(contacts_dm_hint_label_, LV_OBJ_FLAG_HIDDEN);
+  #endif
 
     contacts_dm_panel_ = lv_obj_create(contacts_dialog_);
     if (!contacts_dm_panel_) {
@@ -2290,8 +2363,11 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
   contacts_last_heard_label_ = nullptr;
   contacts_telemetry_label_ = nullptr;
   contacts_dm_panel_ = nullptr;
+  contacts_dm_clear_btn_ = nullptr;
+  contacts_dm_clear_label_ = nullptr;
   contacts_dm_new_btn_ = nullptr;
   contacts_dm_new_label_ = nullptr;
+  contacts_dm_hint_label_ = nullptr;
   memset(contacts_action_rows_, 0, sizeof(contacts_action_rows_));
   memset(contacts_action_labels_, 0, sizeof(contacts_action_labels_));
   return false;
@@ -2507,15 +2583,23 @@ void StandaloneUi::buildLayout() {
   // Admin/Path/Ignore/Del buttons. Path/Ignore/Del above are reparented into
   // that pop-up when it is first built; they start hidden here.
   contacts_actions_btn_ = lv_btn_create(header_bar_);
-  // Content-sized width so the internal padding is real space between the label
-  // and the border (a fixed width with a centered label would hide it).
-  lv_obj_set_size(contacts_actions_btn_, LV_SIZE_CONTENT, selector_h);
+  lv_obj_set_size(contacts_actions_btn_, 72, selector_h);
   lv_obj_align(contacts_actions_btn_, LV_ALIGN_RIGHT_MID, -2, 0);
   lv_obj_add_style(contacts_actions_btn_, &style_button_, 0);
   lv_obj_add_style(contacts_actions_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  // Match the contact selector button's internal horizontal padding.
-  lv_obj_set_style_pad_left(contacts_actions_btn_, 3, LV_PART_MAIN);
-  lv_obj_set_style_pad_right(contacts_actions_btn_, 3, LV_PART_MAIN);
+  // Keep visible inner spacing between label and button border in all states.
+  lv_obj_set_style_pad_left(contacts_actions_btn_, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_right(contacts_actions_btn_, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_top(contacts_actions_btn_, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_bottom(contacts_actions_btn_, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_left(contacts_actions_btn_, 6, LV_PART_MAIN | LV_STATE_FOCUSED);
+  lv_obj_set_style_pad_right(contacts_actions_btn_, 6, LV_PART_MAIN | LV_STATE_FOCUSED);
+  lv_obj_set_style_pad_top(contacts_actions_btn_, 2, LV_PART_MAIN | LV_STATE_FOCUSED);
+  lv_obj_set_style_pad_bottom(contacts_actions_btn_, 2, LV_PART_MAIN | LV_STATE_FOCUSED);
+  lv_obj_set_layout(contacts_actions_btn_, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(contacts_actions_btn_, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(contacts_actions_btn_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(contacts_actions_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_add_event_cb(contacts_actions_btn_, onFocusableEvent, LV_EVENT_KEY, this);
   lv_obj_add_event_cb(contacts_actions_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
@@ -2526,7 +2610,6 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_style(contacts_actions_label_, &style_text_main_, 0);
   lv_obj_set_style_text_font(contacts_actions_label_, header_font, 0);
   lv_label_set_text(contacts_actions_label_, "(A)ctions");
-  lv_obj_center(contacts_actions_label_);
 
   chat_panel_ = lv_obj_create(main_panel_);
   lv_obj_set_pos(chat_panel_, 0, chat_y);
@@ -2629,7 +2712,6 @@ void StandaloneUi::buildLayout() {
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
   lv_obj_add_event_cb(compose_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
 #endif
-
   compose_title_label_ = lv_label_create(compose_dialog_);
   lv_obj_add_style(compose_title_label_, &style_text_main_, 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -2876,8 +2958,11 @@ void StandaloneUi::buildLayout() {
   contacts_last_heard_label_ = nullptr;
   contacts_telemetry_label_ = nullptr;
   contacts_dm_panel_ = nullptr;
+  contacts_dm_clear_btn_ = nullptr;
+  contacts_dm_clear_label_ = nullptr;
   contacts_dm_new_btn_ = nullptr;
   contacts_dm_new_label_ = nullptr;
+  contacts_dm_hint_label_ = nullptr;
   contacts_nav_focused_ = false;
   contacts_dm_open_ = false;
   memset(contacts_action_rows_, 0, sizeof(contacts_action_rows_));
@@ -2899,6 +2984,21 @@ void StandaloneUi::buildLayout() {
   lv_obj_align(dm_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
+  dm_clear_btn_ = lv_btn_create(dm_dialog_);
+  lv_obj_set_size(dm_clear_btn_, 56, 18);
+  lv_obj_align(dm_clear_btn_, LV_ALIGN_BOTTOM_RIGHT, -60, -30);
+  lv_obj_add_style(dm_clear_btn_, &style_button_, 0);
+  lv_obj_add_style(dm_clear_btn_, &style_button_focused_, LV_STATE_FOCUSED);
+  lv_obj_clear_flag(dm_clear_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(dm_clear_btn_, onFocusableEvent, LV_EVENT_KEY, this);
+  lv_obj_add_event_cb(dm_clear_btn_, onDmEvent, LV_EVENT_PRESSED, this);
+  lv_obj_add_event_cb(dm_clear_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
+
+  dm_clear_label_ = lv_label_create(dm_clear_btn_);
+  lv_obj_add_style(dm_clear_label_, &style_text_main_, 0);
+  lv_label_set_text(dm_clear_label_, "CLEAR");
+  lv_obj_center(dm_clear_label_);
+
   dm_new_btn_ = lv_btn_create(dm_dialog_);
   lv_obj_set_size(dm_new_btn_, 56, 18);
   lv_obj_align(dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -30);
@@ -2913,9 +3013,21 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_style(dm_new_label_, &style_text_main_, 0);
   lv_label_set_text(dm_new_label_, "NEW");
   lv_obj_center(dm_new_label_);
+  dm_hint_label_ = nullptr;
 #else
+  dm_clear_btn_ = nullptr;
+  dm_clear_label_ = nullptr;
   dm_new_btn_ = nullptr;
   dm_new_label_ = nullptr;
+
+  dm_hint_label_ = lv_label_create(dm_dialog_);
+  lv_obj_add_style(dm_hint_label_, &style_text_dim_, 0);
+  lv_obj_set_style_text_font(dm_hint_label_, compactUiFont(), 0);
+  lv_obj_set_width(dm_hint_label_, LV_PCT(100));
+  lv_label_set_long_mode(dm_hint_label_, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_align(dm_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_text(dm_hint_label_, "Enter for new message, c to clear messages");
+  lv_obj_align(dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
 #endif
 
   dm_panel_ = lv_obj_create(dm_dialog_);
@@ -2923,7 +3035,7 @@ void StandaloneUi::buildLayout() {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
   lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(lv_obj_get_height(dm_dialog_) - 42));
 #else
-  lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(lv_obj_get_height(dm_dialog_) - 22));
+  lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(lv_obj_get_height(dm_dialog_) - 34));
 #endif
   lv_obj_add_style(dm_panel_, &style_chat_, 0);
   lv_obj_set_scroll_dir(dm_panel_, LV_DIR_VER);
@@ -2954,6 +3066,9 @@ void StandaloneUi::buildLayout() {
 
   // Keep overlay controls above the scrollable message panel.
   lv_obj_move_foreground(dm_close_btn_);
+  if (dm_clear_btn_) {
+    lv_obj_move_foreground(dm_clear_btn_);
+  }
   if (dm_new_btn_) {
     lv_obj_move_foreground(dm_new_btn_);
   }
@@ -3387,8 +3502,17 @@ void StandaloneUi::bindInputGroup() {
       lv_group_add_obj(key_group_, contacts_action_rows_[i]);
     }
   }
+  if (contacts_dm_clear_btn_) {
+    lv_group_add_obj(key_group_, contacts_dm_clear_btn_);
+  }
+  if (contacts_dm_new_btn_) {
+    lv_group_add_obj(key_group_, contacts_dm_new_btn_);
+  }
   if (dm_new_btn_) {
     lv_group_add_obj(key_group_, dm_new_btn_);
+  }
+  if (dm_clear_btn_) {
+    lv_group_add_obj(key_group_, dm_clear_btn_);
   }
   if (dm_panel_) {
     lv_group_add_obj(key_group_, dm_panel_);
@@ -3981,8 +4105,59 @@ void StandaloneUi::refreshSelectorVisuals() {
   }
 
   lv_label_set_text(channel_selector_caret_, "");
-  const lv_coord_t dropdown_min_w =
-      static_cast<lv_coord_t>((kDropdownNameMaxChars + 3) * 7 + 16);
+  const lv_coord_t dropdown_min_w = static_cast<lv_coord_t>((kDropdownNameMaxChars + 3) * 7 + 16);
+  lv_coord_t dropdown_panel_w = clampCoord(dropdown_min_w, selector_w, selector_max_w) + 12;
+  if (contacts_mode && header_bar_) {
+    lv_coord_t max_row_text_w = 0;
+    const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
+    const lv_font_t* row_font =
+        (channel_dropdown_labels_[0]
+             ? reinterpret_cast<const lv_font_t*>(
+                   lv_obj_get_style_text_font(channel_dropdown_labels_[0], LV_PART_MAIN))
+             : nullptr);
+    const lv_coord_t letter_space =
+        channel_dropdown_labels_[0]
+            ? lv_obj_get_style_text_letter_space(channel_dropdown_labels_[0], LV_PART_MAIN)
+            : 0;
+    const lv_coord_t line_space =
+        channel_dropdown_labels_[0]
+            ? lv_obj_get_style_text_line_space(channel_dropdown_labels_[0], LV_PART_MAIN)
+            : 0;
+    for (uint8_t i = 0; i < contacts_option_count; i++) {
+      const mesh::MeshContactSummary& contact = contacts_cache_[i];
+      char display_name[80] = {};
+      char row_text[96] = {};
+      formatChannelLabelForSelector(contact.name, 0, display_name, sizeof(display_name));
+
+      const bool unread_contact =
+          has_unread_dm_ &&
+          ((last_dm_sender_key_[0] != '\0' && contact.public_key_hex[0] != '\0' &&
+            strcmp(last_dm_sender_key_, contact.public_key_hex) == 0) ||
+           dmNameLikelyMatch(last_dm_sender_name_, contact.name));
+
+      const char* type_prefix =
+          (contact.type == 2) ? "(R) " : ((contact.type == 3) ? "(Ro) " : "");
+      snprintf(row_text, sizeof(row_text), "%s%s%s%s", contact.favorite ? "* " : "", type_prefix,
+               display_name, unread_contact ? " !" : "");
+
+      lv_point_t txt_size{};
+      lv_txt_get_size(&txt_size, row_text, row_font, letter_space, line_space, LV_COORD_MAX,
+                      LV_TEXT_FLAG_NONE);
+      if (txt_size.x > max_row_text_w) {
+        max_row_text_w = txt_size.x;
+      }
+    }
+
+    if (max_row_text_w > 0) {
+      const lv_coord_t desired_contacts_w = static_cast<lv_coord_t>(max_row_text_w + 30);
+      lv_coord_t contacts_max_w = static_cast<lv_coord_t>(lv_obj_get_width(header_bar_) - 4);
+      const lv_coord_t contacts_min_w = static_cast<lv_coord_t>(selector_w + 12);
+      if (contacts_max_w < contacts_min_w) {
+        contacts_max_w = contacts_min_w;
+      }
+      dropdown_panel_w = clampCoord(desired_contacts_w, contacts_min_w, contacts_max_w);
+    }
+  }
   lv_obj_set_width(channel_selector_btn_, selector_w);
   lv_obj_align(channel_selector_btn_, LV_ALIGN_LEFT_MID, 2, 0);
   lv_obj_set_width(channel_selector_label_,
@@ -3990,7 +4165,7 @@ void StandaloneUi::refreshSelectorVisuals() {
                                                 ? selector_w - (selector_label_pad * 2)
                                                 : 1));
   lv_obj_align(channel_selector_label_, LV_ALIGN_LEFT_MID, selector_label_pad, 0);
-  lv_obj_set_width(channel_dropdown_panel_, clampCoord(dropdown_min_w, selector_w, selector_max_w) + 12);
+  lv_obj_set_width(channel_dropdown_panel_, dropdown_panel_w);
 
   bool has_unread_channel = false;
   for (uint8_t i = 0; i < configured_channel_count_; i++) {
@@ -4060,23 +4235,44 @@ void StandaloneUi::refreshDropdownVisuals() {
 
     lv_obj_clear_flag(channel_dropdown_rows_[i], LV_OBJ_FLAG_HIDDEN);
 
-    char display_name[48] = {};
-    char row_text[48];
+    char display_name[80] = {};
+    char row_text[96] = {};
     if (contacts_mode) {
       const mesh::MeshContactSummary& contact = contacts_cache_[i];
-      formatChannelLabelForDropdown(contact.name, display_name, sizeof(display_name));
+      // Contacts list rows should show full names (no dropdown truncation).
+      formatChannelLabelForSelector(contact.name, 0, display_name, sizeof(display_name));
       const bool unread_contact =
           has_unread_dm_ &&
           ((last_dm_sender_key_[0] != '\0' && contact.public_key_hex[0] != '\0' &&
             strcmp(last_dm_sender_key_, contact.public_key_hex) == 0) ||
            dmNameLikelyMatch(last_dm_sender_name_, contact.name));
-      snprintf(row_text, sizeof(row_text), "%s%s%s", contact.favorite ? "* " : "", display_name,
-               unread_contact ? " !" : "");
+      const char* type_prefix =
+          (contact.type == 2) ? "(R) " : ((contact.type == 3) ? "(Ro) " : "");
+      snprintf(row_text, sizeof(row_text), "%s%s%s%s", contact.favorite ? "* " : "", type_prefix,
+               display_name, unread_contact ? " !" : "");
     } else {
       formatChannelLabelForDropdown(configured_channel_names_[i], display_name, sizeof(display_name));
       snprintf(row_text, sizeof(row_text), "%s%s", display_name, unread_channels_[i] ? " !" : "");
     }
     lv_label_set_text(channel_dropdown_labels_[i], row_text);
+    if (contacts_mode) {
+      // If the screen cannot fit the full row text, auto-scroll instead of clipping.
+      lv_coord_t label_w = lv_obj_get_content_width(channel_dropdown_rows_[i]);
+      if (label_w < 1) {
+        label_w = 1;
+      }
+      lv_obj_set_width(channel_dropdown_labels_[i], label_w);
+#if defined(LV_LABEL_LONG_SCROLL_CIRC)
+      lv_label_set_long_mode(channel_dropdown_labels_[i], LV_LABEL_LONG_SCROLL_CIRC);
+#elif defined(LV_LABEL_LONG_SCROLL_CIRCULAR)
+      lv_label_set_long_mode(channel_dropdown_labels_[i], LV_LABEL_LONG_SCROLL_CIRCULAR);
+#else
+      lv_label_set_long_mode(channel_dropdown_labels_[i], LV_LABEL_LONG_SCROLL);
+#endif
+    } else {
+      lv_obj_set_width(channel_dropdown_labels_[i], LV_SIZE_CONTENT);
+      lv_label_set_long_mode(channel_dropdown_labels_[i], LV_LABEL_LONG_CLIP);
+    }
 
     lv_obj_remove_style(channel_dropdown_rows_[i], &style_dropdown_active_, 0);
     lv_obj_remove_style(channel_dropdown_rows_[i], &style_dropdown_highlight_, 0);
@@ -4205,6 +4401,9 @@ void StandaloneUi::openComposeDialog() {
     if (dm_close_btn_) {
       lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
     }
+    if (dm_clear_btn_) {
+      lv_obj_clear_flag(dm_clear_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
     if (dm_new_btn_) {
       lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -4300,6 +4499,9 @@ void StandaloneUi::openOnboardingComposePrompt(const char* placeholder, uint16_t
     if (dm_close_btn_) {
       lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
     }
+    if (dm_clear_btn_) {
+      lv_obj_clear_flag(dm_clear_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
     if (dm_new_btn_) {
       lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -4370,6 +4572,9 @@ void StandaloneUi::closeComposeDialog(bool restore_chat_focus) {
     if (dm_close_btn_) {
       lv_obj_add_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
     }
+    if (dm_clear_btn_) {
+      lv_obj_add_flag(dm_clear_btn_, LV_OBJ_FLAG_CLICKABLE);
+    }
     if (dm_new_btn_) {
       lv_obj_add_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -4385,6 +4590,9 @@ void StandaloneUi::closeComposeDialog(bool restore_chat_focus) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (dm_close_btn_) {
       lv_obj_move_foreground(dm_close_btn_);
+    }
+    if (dm_clear_btn_) {
+      lv_obj_move_foreground(dm_clear_btn_);
     }
     if (dm_new_btn_) {
       lv_obj_move_foreground(dm_new_btn_);
@@ -4495,7 +4703,10 @@ void StandaloneUi::onOpenContactsDialogAsync(void* user_data) {
 
   char line[96] = {};
   for (int i = 0; i < count; i++) {
-    snprintf(line, sizeof(line), "[CT] %s%s", contacts[i].favorite ? "* " : "", contacts[i].name);
+    const char* type_prefix =
+      (contacts[i].type == 2) ? "(R) " : ((contacts[i].type == 3) ? "(Ro) " : "");
+    snprintf(line, sizeof(line), "[CT] %s%s%s", contacts[i].favorite ? "* " : "", type_prefix,
+         contacts[i].name);
     ui->appendChatLine(line, ChatLineKind::Normal);
   }
 }
@@ -4526,6 +4737,9 @@ void StandaloneUi::onContactsPostOpenAsync(void* user_data) {
   }
   if (ui->contacts_dm_new_btn_) {
     lv_obj_add_flag(ui->contacts_dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
+  }
+  if (ui->contacts_dm_clear_btn_) {
+    lv_obj_add_flag(ui->contacts_dm_clear_btn_, LV_OBJ_FLAG_CLICKABLE);
   }
   for (uint8_t i = 0; i < kContactActionCount; i++) {
     if (ui->contacts_action_rows_[i]) {
@@ -4733,7 +4947,7 @@ bool StandaloneUi::handleComposeKey(uint32_t key) {
 void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
   if (!contacts_dialog_ || !contacts_status_label_ || !contacts_detail_info_panel_ || !contacts_full_name_label_ ||
       !contacts_lat_lon_label_ || !contacts_last_heard_label_ || !contacts_telemetry_label_ ||
-      !contacts_dm_panel_ || !contacts_dm_new_btn_) {
+      !contacts_dm_panel_) {
     return;
   }
   for (uint8_t i = 0; i < kContactActionCount; i++) {
@@ -4845,7 +5059,15 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
       lv_obj_invalidate(contacts_detail_panel_);
     }
 #endif
-    lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_dm_new_btn_) {
+      lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (contacts_dm_clear_btn_) {
+      lv_obj_add_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (contacts_dm_hint_label_) {
+      lv_obj_add_flag(contacts_dm_hint_label_, LV_OBJ_FLAG_HIDDEN);
+    }
     if (contacts_actions_btn_) {
       lv_obj_add_flag(contacts_actions_btn_, LV_OBJ_FLAG_HIDDEN);
     }
@@ -4904,9 +5126,9 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
   }
   if (contacts_action_labels_[2]) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(contacts_action_labels_[2], "DM");
+    lv_label_set_text(contacts_action_labels_[2], selected.type == 3 ? "Join" : "DM");
 #else
-    lv_label_set_text(contacts_action_labels_[2], "D(M)");
+    lv_label_set_text(contacts_action_labels_[2], selected.type == 3 ? "(J)oin" : "D(M)");
 #endif
   }
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -4956,10 +5178,37 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     }
     lv_obj_clear_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_pos(contacts_dm_panel_, 0, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), LV_PCT(100));
-    lv_obj_clear_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(contacts_dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
-    lv_obj_move_foreground(contacts_dm_new_btn_);
+    if (contacts_dm_new_btn_) {
+      lv_obj_clear_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_align(contacts_dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
+      lv_obj_move_foreground(contacts_dm_new_btn_);
+    }
+    if (contacts_dm_clear_btn_) {
+      lv_obj_clear_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_align(contacts_dm_clear_btn_, LV_ALIGN_BOTTOM_RIGHT, -60, -2);
+      lv_obj_move_foreground(contacts_dm_clear_btn_);
+    }
+    if (contacts_dm_hint_label_) {
+      lv_obj_add_flag(contacts_dm_hint_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+#else
+    const lv_coord_t helper_h = 16;
+    const lv_coord_t dm_full_h = dialog_h > helper_h ? static_cast<lv_coord_t>(dialog_h - helper_h) : 14;
+    lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), dm_full_h);
+    if (contacts_dm_hint_label_) {
+      lv_obj_clear_flag(contacts_dm_hint_label_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_align(contacts_dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
+      lv_obj_move_foreground(contacts_dm_hint_label_);
+    }
+    if (contacts_dm_new_btn_) {
+      lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (contacts_dm_clear_btn_) {
+      lv_obj_add_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
     lv_obj_add_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
     // Hide the Contact Actions button in the DM sub-view; NEW owns the top-right.
     if (contacts_actions_btn_) {
@@ -4977,7 +5226,15 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     lv_obj_add_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_pos(contacts_dm_panel_, 0, 42);
     lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), dm_panel_collapsed_h);
-    lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    if (contacts_dm_new_btn_) {
+      lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (contacts_dm_clear_btn_) {
+      lv_obj_add_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (contacts_dm_hint_label_) {
+      lv_obj_add_flag(contacts_dm_hint_label_, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_clear_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
     // Show the Contact Actions button in the detail view; it opens the pop-up
     // holding Admin/Path/Ignore/Del.
@@ -5300,6 +5557,9 @@ bool StandaloneUi::openContactsDialog() {
     if (contacts_dm_panel_ && lv_obj_get_group(contacts_dm_panel_) != key_group_) {
       lv_group_add_obj(key_group_, contacts_dm_panel_);
     }
+    if (contacts_dm_clear_btn_ && lv_obj_get_group(contacts_dm_clear_btn_) != key_group_) {
+      lv_group_add_obj(key_group_, contacts_dm_clear_btn_);
+    }
     if (contacts_dm_new_btn_ && lv_obj_get_group(contacts_dm_new_btn_) != key_group_) {
       lv_group_add_obj(key_group_, contacts_dm_new_btn_);
     }
@@ -5483,12 +5743,18 @@ void StandaloneUi::activateContactsAction(uint8_t action_idx) {
 
   if (action_idx == 1) {
     if (selected.type == 2 || selected.type == 3) {
+      admin_join_after_login_ = false;
       openAdminPasswordDialog(selected.name, selected.public_key_hex, selected.type);
     }
     return;
   }
 
   if (action_idx == 2) {
+    if (selected.type == 3) {
+      admin_join_after_login_ = true;
+      openAdminPasswordDialog(selected.name, selected.public_key_hex, selected.type);
+      return;
+    }
     contacts_dm_open_ = true;
     has_unread_dm_ = false;
     refreshShortcutVisuals();
@@ -5689,7 +5955,11 @@ void StandaloneUi::openAdminPasswordDialog(const char* contact_name, const char*
 
   // Set title with contact name
   char title[48] = {};
-  snprintf(title, sizeof(title), "Admin: %s", admin_target_name_[0] ? admin_target_name_ : "?");
+  if (admin_join_after_login_ && admin_target_type_ == 3) {
+    snprintf(title, sizeof(title), "Join Room: %s", admin_target_name_[0] ? admin_target_name_ : "?");
+  } else {
+    snprintf(title, sizeof(title), "Admin: %s", admin_target_name_[0] ? admin_target_name_ : "?");
+  }
   lv_label_set_text(admin_pw_title_label_, title);
 
   // Load saved password
@@ -5726,6 +5996,9 @@ void StandaloneUi::closeAdminPasswordDialog() {
     lv_obj_add_flag(admin_pw_dialog_, LV_OBJ_FLAG_HIDDEN);
   }
   admin_pw_open_ = false;
+  if (admin_login_state_ != AdminLoginState::Sending && admin_login_state_ != AdminLoginState::Pending) {
+    admin_join_after_login_ = false;
+  }
 
   if (contacts_open_) {
     resetPointerInputState();
@@ -5759,6 +6032,22 @@ void StandaloneUi::submitAdminPassword() {
   admin_login_state_ = ok ? AdminLoginState::Pending : AdminLoginState::Failed;
 
   closeAdminPasswordDialog();
+
+  if (admin_join_after_login_ && admin_target_type_ == 3) {
+    if (ok) {
+      snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Joining room: %s",
+               admin_target_name_[0] ? admin_target_name_ : "?");
+    } else {
+      snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Room join send failed");
+      admin_join_after_login_ = false;
+    }
+    if (contacts_open_) {
+      refreshContactsDialog(false);
+      focusCurrentZoneObject();
+    }
+    return;
+  }
+
   openAdminScreen(admin_target_name_);
 }
 
@@ -6123,6 +6412,64 @@ void StandaloneUi::applyAdminLoginEvent(const mesh::MeshEvent& event) {
   // Only apply if the event matches the contact we are currently authenticating against.
   if (admin_target_key_[0] == '\0') return;
   if (strcasecmp(event.peer_key, admin_target_key_) != 0) return;
+
+  if (admin_join_after_login_ && admin_target_type_ == 3) {
+    switch (event.type) {
+      case mesh::MeshEventType::LoginSuccess:
+        admin_login_state_ = AdminLoginState::Success;
+        admin_is_admin_ = (event.login_perm != 0);
+        admin_login_acl_ = event.login_acl_perm;
+        admin_login_fw_ver_ = event.login_fw_ver;
+        room_join_replay_dedup_until_ms_ = millis() + 4000;
+        room_join_replay_snapshot_epoch_ = nowEpochSecondsOrZero();
+        strncpy(room_join_replay_key_, admin_target_key_, sizeof(room_join_replay_key_) - 1);
+        room_join_replay_key_[sizeof(room_join_replay_key_) - 1] = '\0';
+        strncpy(room_join_replay_name_, admin_target_name_, sizeof(room_join_replay_name_) - 1);
+        room_join_replay_name_[sizeof(room_join_replay_name_) - 1] = '\0';
+        contacts_nav_focused_ = false;
+        contacts_dm_open_ = true;
+        has_unread_dm_ = false;
+        refreshShortcutVisuals();
+        snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Joined room: %s",
+                 admin_target_name_[0] ? admin_target_name_ : "?");
+        admin_join_after_login_ = false;
+        if (contacts_open_) {
+          refreshContactsDialog(false);
+          focusCurrentZoneObject();
+        }
+        return;
+      case mesh::MeshEventType::LoginFail:
+        admin_login_state_ = AdminLoginState::Failed;
+        admin_is_admin_ = false;
+        room_join_replay_dedup_until_ms_ = 0;
+        room_join_replay_snapshot_epoch_ = 0;
+        room_join_replay_key_[0] = '\0';
+        room_join_replay_name_[0] = '\0';
+        snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Room join failed");
+        admin_join_after_login_ = false;
+        if (contacts_open_) {
+          refreshContactsDialog(false);
+          focusCurrentZoneObject();
+        }
+        return;
+      case mesh::MeshEventType::LoginTimeout:
+        admin_login_state_ = AdminLoginState::TimedOut;
+        admin_is_admin_ = false;
+        room_join_replay_dedup_until_ms_ = 0;
+        room_join_replay_snapshot_epoch_ = 0;
+        room_join_replay_key_[0] = '\0';
+        room_join_replay_name_[0] = '\0';
+        snprintf(contacts_status_text_, sizeof(contacts_status_text_), "Room join timed out");
+        admin_join_after_login_ = false;
+        if (contacts_open_) {
+          refreshContactsDialog(false);
+          focusCurrentZoneObject();
+        }
+        return;
+      default:
+        return;
+    }
+  }
 
   switch (event.type) {
     case mesh::MeshEventType::LoginSuccess:
@@ -7915,6 +8262,167 @@ void StandaloneUi::clearDmPanel() {
   dm_pending_ack_label_ = nullptr;
 }
 
+bool StandaloneUi::clearStoredDmConversation(const char* contact_name, const char* contact_key,
+                                             bool prefer_name_match) {
+  if (!contact_name || contact_name[0] == '\0' || stored_dm_count_ == 0) {
+    return false;
+  }
+
+  const size_t snapshot_count = stored_dm_count_;
+  auto* kept = static_cast<StoredDmLine*>(malloc(snapshot_count * sizeof(StoredDmLine)));
+  if (!kept) {
+    return false;
+  }
+  memset(kept, 0, snapshot_count * sizeof(StoredDmLine));
+  size_t kept_count = 0;
+  bool removed_any = false;
+  const bool target_has_key = contact_key && contact_key[0] != '\0';
+
+  for (size_t i = 0; i < snapshot_count; i++) {
+    const size_t idx = (stored_dm_head_ + i) % kMaxStoredChatRows;
+    const StoredDmLine& line = stored_dm_[idx];
+    const bool line_has_key = line.contact_key[0] != '\0';
+    bool conversation_match = false;
+    if (prefer_name_match) {
+      conversation_match = dmNameLikelyMatch(contact_name, line.contact_name);
+    } else if (target_has_key) {
+      if (line_has_key) {
+        conversation_match = (strcmp(contact_key, line.contact_key) == 0);
+      } else {
+        // Legacy rows may not have a key; fall back to name only for keyless rows.
+        conversation_match = dmNameLikelyMatch(contact_name, line.contact_name);
+      }
+    } else {
+      conversation_match = dmNameLikelyMatch(contact_name, line.contact_name);
+    }
+
+    if (conversation_match) {
+      removed_any = true;
+      continue;
+    }
+
+    if (kept_count < snapshot_count) {
+      kept[kept_count++] = line;
+    }
+  }
+
+  if (!removed_any) {
+    free(kept);
+    return false;
+  }
+
+  memset(stored_dm_, 0, sizeof(stored_dm_));
+  for (size_t i = 0; i < kept_count; i++) {
+    stored_dm_[i] = kept[i];
+  }
+  free(kept);
+
+  stored_dm_head_ = 0;
+  stored_dm_count_ = kept_count;
+  dm_history_dirty_ = true;
+  dm_pending_ack_label_ = nullptr;
+  dm_pending_ack_stored_idx_ = SIZE_MAX;
+  dm_pending_ack_count_ = 0;
+  dm_pending_ack_contact_key_[0] = '\0';
+  dm_pending_ack_contact_name_[0] = '\0';
+  dm_pending_ack_hhmm_[0] = '\0';
+  dm_pending_ack_snippet_[0] = '\0';
+  return true;
+}
+
+void StandaloneUi::clearActiveDmConversation(bool from_contacts_view) {
+  const char* target_name = nullptr;
+  const char* target_key = nullptr;
+  bool target_is_room = false;
+
+  if (from_contacts_view) {
+    if (!contacts_open_ || !contacts_dm_open_ || contacts_count_ == 0 ||
+        contacts_selected_index_ >= contacts_count_) {
+      return;
+    }
+    const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+    target_name = selected.name;
+    target_key = selected.public_key_hex;
+    target_is_room = (selected.type == 3);
+  } else {
+    if (!dm_open_) {
+      return;
+    }
+    target_name = dm_active_name_;
+    target_key = dm_active_key_;
+
+    // DM dialog does not track contact type directly; infer room contacts from cache.
+    if (contacts_count_ > 0) {
+      const int idx = findContactIndexByIdentity(contacts_cache_, contacts_count_, target_key, target_name);
+      if (idx >= 0 && contacts_cache_[idx].type == 3) {
+        target_is_room = true;
+      }
+    }
+  }
+
+  if (!target_name || target_name[0] == '\0') {
+    return;
+  }
+
+  if (!clearStoredDmConversation(target_name, target_key, target_is_room)) {
+    return;
+  }
+
+  if (dm_open_) {
+    rebuildDmDialog();
+  }
+  if (contacts_open_ && contacts_dm_open_) {
+    rebuildContactsDmPanel();
+  }
+}
+
+bool StandaloneUi::hasStoredIncomingDmDuplicate(const char* contact_name, const char* contact_key,
+                                                const char* incoming_text,
+                                                uint32_t max_timestamp_epoch) const {
+  if (!contact_name || contact_name[0] == '\0' || !incoming_text || incoming_text[0] == '\0' ||
+      stored_dm_count_ == 0) {
+    return false;
+  }
+
+  const bool incoming_has_key = contact_key && contact_key[0] != '\0';
+  for (size_t i = 0; i < stored_dm_count_; i++) {
+    const size_t rev = stored_dm_count_ - 1 - i;
+    const size_t idx = (stored_dm_head_ + rev) % kMaxStoredChatRows;
+    const StoredDmLine& line = stored_dm_[idx];
+
+    if (line.kind != ChatLineKind::Rx || line.contact_name[0] == '\0' || line.text[0] == '\0') {
+      continue;
+    }
+    if (max_timestamp_epoch != 0) {
+      if (line.timestamp_epoch == 0 || line.timestamp_epoch > max_timestamp_epoch) {
+        continue;
+      }
+    }
+
+    const bool line_has_key = line.contact_key[0] != '\0';
+    const bool key_match = incoming_has_key && line_has_key && strcmp(contact_key, line.contact_key) == 0;
+    const bool name_match = dmNameLikelyMatch(contact_name, line.contact_name);
+    if (!key_match && !name_match) {
+      continue;
+    }
+
+    const char* payload = line.text;
+    const char* after_time = strstr(line.text, "] ");
+    if (after_time) {
+      const char* after_sender = strstr(after_time + 2, ": ");
+      if (after_sender && after_sender[2] != '\0') {
+        payload = after_sender + 2;
+      }
+    }
+
+    if (strcmp(payload, incoming_text) == 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_key, const char* text,
                                 ChatLineKind kind, uint32_t timestamp_epoch) {
   if (!contact_name || contact_name[0] == '\0' || !text || text[0] == '\0') {
@@ -8077,6 +8585,10 @@ void StandaloneUi::rebuildDmDialog() {
   lv_obj_set_size(dm_dialog_, dlg_w, dlg_h);
   lv_obj_set_pos(dm_panel_, 2, 18);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (dm_clear_btn_) {
+    lv_obj_set_size(dm_clear_btn_, 56, 18);
+    lv_obj_align(dm_clear_btn_, LV_ALIGN_BOTTOM_RIGHT, -60, -30);
+  }
   if (dm_new_btn_) {
     lv_obj_set_size(dm_new_btn_, 56, 18);
     lv_obj_align(dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -30);
@@ -8087,7 +8599,7 @@ void StandaloneUi::rebuildDmDialog() {
   }
   lv_coord_t panel_h = static_cast<lv_coord_t>(dlg_h - 42);
 #else
-  lv_coord_t panel_h = static_cast<lv_coord_t>(dlg_h - 22);
+  lv_coord_t panel_h = static_cast<lv_coord_t>(dlg_h - 34);
 #endif
   if (panel_h < 40) {
     panel_h = 40;
@@ -8098,8 +8610,16 @@ void StandaloneUi::rebuildDmDialog() {
   if (dm_close_btn_) {
     lv_obj_move_foreground(dm_close_btn_);
   }
+  if (dm_clear_btn_) {
+    lv_obj_move_foreground(dm_clear_btn_);
+  }
   if (dm_new_btn_) {
     lv_obj_move_foreground(dm_new_btn_);
+  }
+#else
+  if (dm_hint_label_) {
+    lv_obj_align(dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_move_foreground(dm_hint_label_);
   }
 #endif
 
@@ -8241,7 +8761,7 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
     #if defined(DEVICE_HELTEC_V4_EXPANSION)
       lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(dlg_h - 42));
     #else
-      lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(dlg_h - 22));
+      lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(dlg_h - 34));
     #endif
       lv_obj_add_style(dm_panel_, &style_chat_, 0);
       lv_obj_set_scroll_dir(dm_panel_, LV_DIR_VER);
@@ -8330,6 +8850,10 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
     lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
   }
+  if (dm_clear_btn_) {
+    lv_obj_clear_flag(dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(dm_clear_btn_, LV_OBJ_FLAG_CLICKABLE);
+  }
   if (dm_new_btn_) {
     lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
@@ -8339,8 +8863,16 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
   if (dm_close_btn_) {
     lv_obj_move_foreground(dm_close_btn_);
   }
+  if (dm_clear_btn_) {
+    lv_obj_move_foreground(dm_clear_btn_);
+  }
   if (dm_new_btn_) {
     lv_obj_move_foreground(dm_new_btn_);
+  }
+#else
+  if (dm_hint_label_) {
+    lv_obj_align(dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_move_foreground(dm_hint_label_);
   }
 #endif
   lv_obj_update_layout(dm_dialog_);
@@ -8367,6 +8899,9 @@ void StandaloneUi::closeDmDialog(bool focus_chat) {
   }
   if (dm_close_btn_) {
     lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_CLICKABLE);
+  }
+  if (dm_clear_btn_) {
+    lv_obj_clear_flag(dm_clear_btn_, LV_OBJ_FLAG_CLICKABLE);
   }
   if (dm_new_btn_) {
     lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
@@ -9077,80 +9612,25 @@ bool StandaloneUi::pruneStoredDmByRetention(uint32_t now_epoch) {
 }
 
 bool StandaloneUi::loadDmHistoryFromFs() {
-  Preferences prefs;
-  if (!prefs.begin(kUiPrefsNs, false)) {
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open(kUiPrefsNs, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
     return false;
   }
 
-  if (!prefs.isKey(kDmHistoryBlobKey)) {
-    prefs.end();
-    return false;
+  // Fail-safe: do not parse persisted DM blobs at boot. Corrupt DM history in
+  // NVS has repeatedly caused heap assertions on this target; runtime DM
+  // history remains fully functional and is rebuilt from new traffic.
+  size_t blob_len = 0;
+  err = nvs_get_blob(handle, kDmHistoryBlobKey, nullptr, &blob_len);
+  if (err == ESP_OK && blob_len > 0) {
+    (void)nvs_erase_key(handle, kDmHistoryBlobKey);
+    (void)nvs_erase_key(handle, kDmHistoryCountKey);
+    (void)nvs_commit(handle);
   }
-
-  const size_t blob_len = prefs.getBytesLength(kDmHistoryBlobKey);
-  if (blob_len < sizeof(PersistedDmLine)) {
-    prefs.end();
-    return false;
-  }
-
-  int count = static_cast<int>(blob_len / sizeof(PersistedDmLine));
-  const uint16_t declared = prefs.getUShort(kDmHistoryCountKey, static_cast<uint16_t>(count));
-  if (declared > 0 && declared < static_cast<uint16_t>(count)) {
-    count = declared;
-  }
-
-  if (count > static_cast<int>(kMaxStoredChatRows)) {
-    count = static_cast<int>(kMaxStoredChatRows);
-  }
-
-  const size_t to_read = static_cast<size_t>(count) * sizeof(PersistedDmLine);
-  auto* persisted_buf = static_cast<PersistedDmLine*>(malloc(to_read));
-  if (!persisted_buf) {
-    prefs.end();
-    return false;
-  }
-  memset(persisted_buf, 0, to_read);
-  const size_t got = prefs.getBytes(kDmHistoryBlobKey, persisted_buf, to_read);
-  prefs.end();
-
-  const int loaded_count = static_cast<int>(got / sizeof(PersistedDmLine));
-  if (loaded_count <= 0) {
-    free(persisted_buf);
-    return false;
-  }
-
-  memset(stored_dm_, 0, sizeof(stored_dm_));
-  stored_dm_head_ = 0;
-  stored_dm_count_ = 0;
-
-  for (int i = 0; i < loaded_count && stored_dm_count_ < kMaxStoredChatRows; i++) {
-    const PersistedDmLine& persisted = persisted_buf[i];
-    if (persisted.contact_name[0] == '\0' || persisted.text[0] == '\0') {
-      continue;
-    }
-
-    size_t write_index = (stored_dm_head_ + stored_dm_count_) % kMaxStoredChatRows;
-    StoredDmLine& out = stored_dm_[write_index];
-    strncpy(out.contact_name, persisted.contact_name, sizeof(out.contact_name) - 1);
-    out.contact_name[sizeof(out.contact_name) - 1] = '\0';
-    strncpy(out.contact_key, persisted.contact_key, sizeof(out.contact_key) - 1);
-    out.contact_key[sizeof(out.contact_key) - 1] = '\0';
-    strncpy(out.text, persisted.text, sizeof(out.text) - 1);
-    out.text[sizeof(out.text) - 1] = '\0';
-    out.kind = (persisted.kind <= static_cast<uint8_t>(ChatLineKind::Error))
-                   ? static_cast<ChatLineKind>(persisted.kind)
-                   : ChatLineKind::Normal;
-    out.timestamp_epoch = persisted.timestamp_epoch;
-    stored_dm_count_++;
-  }
-
-  free(persisted_buf);
-
-  const bool pruned = pruneStoredDmByRetention(nowEpochSecondsOrZero());
-  if (!pruned) {
-    dm_history_dirty_ = false;
-  }
-  return stored_dm_count_ > 0;
+  nvs_close(handle);
+  dm_history_dirty_ = false;
+  return false;
 }
 
 bool StandaloneUi::saveDmHistoryToFs() {
@@ -9159,49 +9639,69 @@ bool StandaloneUi::saveDmHistoryToFs() {
     return false;
   }
 
-  const size_t count = stored_dm_count_ > kMaxStoredChatRows ? kMaxStoredChatRows : stored_dm_count_;
-  const size_t blob_len = count * sizeof(PersistedDmLine);
-  PersistedDmLine* persisted_buf = nullptr;
-  if (count > 0) {
-    persisted_buf = static_cast<PersistedDmLine*>(malloc(blob_len));
-    if (!persisted_buf) {
-      prefs.end();
-      return false;
+  const size_t available_count =
+      stored_dm_count_ > kMaxStoredChatRows ? kMaxStoredChatRows : stored_dm_count_;
+  size_t persist_count = available_count > kMaxPersistedDmRows ? kMaxPersistedDmRows : available_count;
+
+  bool ok = false;
+  bool removed_existing_once = false;
+  while (true) {
+    const size_t blob_len = persist_count * sizeof(PersistedDmLine);
+    PersistedDmLine* persisted_buf = nullptr;
+
+    if (persist_count > 0) {
+      persisted_buf = static_cast<PersistedDmLine*>(malloc(blob_len));
+      if (!persisted_buf) {
+        break;
+      }
+      memset(persisted_buf, 0, blob_len);
+
+      // Persist newest entries first so recent room/chat continuity survives trimming.
+      const size_t start_offset = available_count > persist_count ? (available_count - persist_count) : 0;
+      for (size_t i = 0; i < persist_count; i++) {
+        const size_t idx = (stored_dm_head_ + start_offset + i) % kMaxStoredChatRows;
+        PersistedDmLine& persisted = persisted_buf[i];
+        strncpy(persisted.contact_name, stored_dm_[idx].contact_name, sizeof(persisted.contact_name) - 1);
+        persisted.contact_name[sizeof(persisted.contact_name) - 1] = '\0';
+        strncpy(persisted.contact_key, stored_dm_[idx].contact_key, sizeof(persisted.contact_key) - 1);
+        persisted.contact_key[sizeof(persisted.contact_key) - 1] = '\0';
+        strncpy(persisted.text, stored_dm_[idx].text, sizeof(persisted.text) - 1);
+        persisted.text[sizeof(persisted.text) - 1] = '\0';
+        persisted.kind = static_cast<uint8_t>(stored_dm_[idx].kind);
+        persisted.timestamp_epoch = stored_dm_[idx].timestamp_epoch;
+      }
+
+      const size_t wrote = prefs.putBytes(kDmHistoryBlobKey, persisted_buf, blob_len);
+      ok = (wrote == blob_len);
+      free(persisted_buf);
+    } else {
+      ok = !prefs.isKey(kDmHistoryBlobKey) || prefs.remove(kDmHistoryBlobKey);
     }
-    memset(persisted_buf, 0, blob_len);
+
+    if (ok) {
+      prefs.putUShort(kDmHistoryCountKey, static_cast<uint16_t>(persist_count));
+      break;
+    }
+
+    // If an old oversized blob exists, remove it once and retry before shrinking.
+    if (!removed_existing_once && prefs.isKey(kDmHistoryBlobKey)) {
+      if (prefs.remove(kDmHistoryBlobKey)) {
+        removed_existing_once = true;
+        continue;
+      }
+    }
+
+    // Retry with a smaller payload if NVS has limited free space.
+    if (persist_count <= 8) {
+      break;
+    }
+    persist_count /= 2;
   }
 
-  for (size_t i = 0; i < count; i++) {
-    size_t idx = (stored_dm_head_ + i) % kMaxStoredChatRows;
-    PersistedDmLine& persisted = persisted_buf[i];
-    strncpy(persisted.contact_name, stored_dm_[idx].contact_name, sizeof(persisted.contact_name) - 1);
-    persisted.contact_name[sizeof(persisted.contact_name) - 1] = '\0';
-    strncpy(persisted.contact_key, stored_dm_[idx].contact_key, sizeof(persisted.contact_key) - 1);
-    persisted.contact_key[sizeof(persisted.contact_key) - 1] = '\0';
-    strncpy(persisted.text, stored_dm_[idx].text, sizeof(persisted.text) - 1);
-    persisted.text[sizeof(persisted.text) - 1] = '\0';
-    persisted.kind = static_cast<uint8_t>(stored_dm_[idx].kind);
-    persisted.timestamp_epoch = stored_dm_[idx].timestamp_epoch;
-  }
-
-  bool ok = true;
-  if (count > 0) {
-    const size_t wrote = prefs.putBytes(kDmHistoryBlobKey, persisted_buf, blob_len);
-    if (wrote != blob_len) {
-      ok = false;
-    }
-  } else if (prefs.isKey(kDmHistoryBlobKey)) {
-    if (!prefs.remove(kDmHistoryBlobKey)) {
-      ok = false;
-    }
-  }
-
-  prefs.putUShort(kDmHistoryCountKey, static_cast<uint16_t>(count));
   prefs.end();
-  if (persisted_buf) {
-    free(persisted_buf);
-  }
   if (!ok) {
+    // Avoid continuous one-second retries (and log spam) when NVS is full.
+    dm_history_dirty_ = false;
     return false;
   }
 
@@ -9404,13 +9904,12 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
-  // Global shortcut: open/close Help from any screen except compose.
-  if (kKeyboardNavEnabled && norm_key == 'h') {
-    if (help_open_) {
-      closeHelpDialog();
-    } else {
-      openHelpDialog();
-    }
+  // Main-screen shortcut: open channel list (while not typing/inside dialogs).
+  if (kKeyboardNavEnabled && norm_key == 'h' && !cfg_open_ && !contacts_open_ && !dm_open_ &&
+      !help_open_ && !live_open_ && !admin_pw_open_ && !admin_cmd_open_ && !admin_screen_open_ &&
+      !advert_popup_open_) {
+    setFocusZone(FocusZone::Selector);
+    openChannelDropdown();
     return;
   }
 
@@ -9588,6 +10087,10 @@ void StandaloneUi::handleKey(uint32_t key) {
       closeDmDialog(false);
       return;
     }
+    if (focused == dm_clear_btn_ && (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r')) {
+      clearActiveDmConversation(false);
+      return;
+    }
     if (focused == dm_new_btn_ && (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r')) {
       compose_dm_mode_ = true;
       compose_return_to_dm_ = true;
@@ -9621,6 +10124,12 @@ void StandaloneUi::handleKey(uint32_t key) {
       lv_obj_scroll_by(dm_panel_, 0, kMsgScrollStep, LV_ANIM_OFF);
       return;
     }
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (norm_key == 'c' || norm_key == 'C') {
+      clearActiveDmConversation(false);
+      return;
+    }
+#endif
     return;
   }
 
@@ -9719,6 +10228,23 @@ void StandaloneUi::handleKey(uint32_t key) {
 
     const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
 
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (kKeyboardNavEnabled && norm_key == 'c') {
+      if (contacts_count_ > 0 && !channel_dropdown_open_ && !contacts_dm_open_) {
+        if (now - last_selector_action_ms_ < kNavDebounceMs) {
+          return;
+        }
+        last_selector_action_ms_ = now;
+        contacts_dropdown_guard_until_ms_ = now + kContactsDropdownEnterGuardMs;
+        contacts_nav_focused_ = true;
+        contacts_dm_open_ = false;
+        refreshContactsDialog(false);
+        openChannelDropdown();
+        return;
+      }
+    }
+#endif
+
     if (kKeyboardNavEnabled && norm_key == 'f') {
       activateContactsAction(0);
       return;
@@ -9728,9 +10254,23 @@ void StandaloneUi::handleKey(uint32_t key) {
       return;
     }
     if (kKeyboardNavEnabled && norm_key == 'm') {
+      if (contacts_count_ > 0 && contacts_selected_index_ < contacts_count_ &&
+          contacts_cache_[contacts_selected_index_].type == 3) {
+        return;
+      }
       activateContactsAction(2);
       return;
     }
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (kKeyboardNavEnabled && norm_key == 'j') {
+      if (!channel_dropdown_open_ && !contacts_nav_focused_ && !contacts_dm_open_ &&
+          contacts_count_ > 0 && contacts_selected_index_ < contacts_count_ &&
+          contacts_cache_[contacts_selected_index_].type == 3) {
+        activateContactsAction(2);
+        return;
+      }
+    }
+#endif
     if (kKeyboardNavEnabled && norm_key == 'd') {
       openContactDeleteConfirm();
       return;
@@ -9829,11 +10369,11 @@ void StandaloneUi::handleKey(uint32_t key) {
         }
         return;
       }
-      if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+      if (norm_key == LV_KEY_UP) {
         moveContactsSelection(-1);
         return;
       }
-      if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+      if (norm_key == LV_KEY_DOWN) {
         moveContactsSelection(1);
         return;
       }
@@ -9845,6 +10385,12 @@ void StandaloneUi::handleKey(uint32_t key) {
         startComposeForSelectedContact();
         return;
       }
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (norm_key == 'c' || norm_key == 'C') {
+        clearActiveDmConversation(true);
+        return;
+      }
+#endif
       if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
         if (contacts_dm_panel_) {
           lv_obj_scroll_by(contacts_dm_panel_, 0, -kMsgScrollStep, LV_ANIM_OFF);
@@ -10247,6 +10793,16 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
           }
         }
 
+        if (dm_clear_btn_) {
+          lv_area_t clear_area{};
+          lv_obj_get_coords(dm_clear_btn_, &clear_area);
+          if (pt.x >= clear_area.x1 && pt.x <= clear_area.x2 && pt.y >= clear_area.y1 &&
+              pt.y <= clear_area.y2) {
+            clearActiveDmConversation(false);
+            return;
+          }
+        }
+
         lv_area_t dm_area{};
         lv_obj_get_coords(dm_dialog_, &dm_area);
         if (pt.x >= dm_area.x1 && pt.x <= dm_area.x2 && pt.y >= dm_area.y1 && pt.y <= dm_area.y2) {
@@ -10270,6 +10826,10 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
       strncpy(compose_target_channel_, dm_active_name_, sizeof(compose_target_channel_) - 1);
       compose_target_channel_[sizeof(compose_target_channel_) - 1] = '\0';
       lv_async_call(onOpenComposeDialogAsync, this);
+      return;
+    }
+    if ((target == dm_clear_btn_) || (target == dm_clear_label_) || hasAncestor(target, dm_clear_btn_)) {
+      clearActiveDmConversation(false);
       return;
     }
 
@@ -10384,6 +10944,15 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
       contacts_dm_open_ = true;
       refreshContactsDialog(false);
       startComposeForSelectedContact();
+      return;
+    }
+
+    if ((target == contacts_dm_clear_btn_) || (target == contacts_dm_clear_label_) ||
+        hasAncestor(target, contacts_dm_clear_btn_)) {
+      contacts_nav_focused_ = false;
+      contacts_dm_open_ = true;
+      refreshContactsDialog(false);
+      clearActiveDmConversation(true);
       return;
     }
 
@@ -10561,8 +11130,8 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
         ui->focus_zone_ = FocusZone::Shortcuts;
         ui->selected_shortcut_ = kShortcutContacts;
       }
-      if (target == ui->dm_new_btn_ || target == ui->dm_new_label_ || target == ui->dm_close_btn_ ||
-          target == ui->dm_close_label_) {
+      if (target == ui->dm_new_btn_ || target == ui->dm_new_label_ || target == ui->dm_clear_btn_ ||
+          target == ui->dm_clear_label_ || target == ui->dm_close_btn_ || target == ui->dm_close_label_) {
         ui->focus_zone_ = FocusZone::Shortcuts;
         ui->selected_shortcut_ = kShortcutContacts;
       }
@@ -10632,6 +11201,8 @@ void StandaloneUi::onFocusableEvent(lv_event_t* event) {
         }
       }
       if ((target == ui->contacts_dm_panel_) || hasAncestor(target, ui->contacts_dm_panel_) ||
+          (target == ui->contacts_dm_clear_btn_) || (target == ui->contacts_dm_clear_label_) ||
+          hasAncestor(target, ui->contacts_dm_clear_btn_) ||
           (target == ui->contacts_dm_new_btn_) || (target == ui->contacts_dm_new_label_) ||
           hasAncestor(target, ui->contacts_dm_new_btn_)) {
         ui->contacts_nav_focused_ = false;
@@ -10877,10 +11448,42 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   }
 
   if (event.type == mesh::MeshEventType::DirectMessage) {
+    if (room_join_replay_dedup_until_ms_ != 0) {
+      const bool dedup_window_active = static_cast<int32_t>(millis() - room_join_replay_dedup_until_ms_) < 0;
+      if (!dedup_window_active) {
+        room_join_replay_dedup_until_ms_ = 0;
+        room_join_replay_snapshot_epoch_ = 0;
+        room_join_replay_key_[0] = '\0';
+        room_join_replay_name_[0] = '\0';
+      } else {
+        const bool replay_has_key = room_join_replay_key_[0] != '\0';
+        const bool line_has_key = event.peer_key[0] != '\0';
+        const bool replay_key_match = replay_has_key && line_has_key &&
+                                      strcmp(room_join_replay_key_, event.peer_key) == 0;
+        const bool replay_name_match = dmNameLikelyMatch(room_join_replay_name_, event.channel_name);
+        if ((replay_key_match || replay_name_match) &&
+            hasStoredIncomingDmDuplicate(event.channel_name, event.peer_key, event.text,
+                                         room_join_replay_snapshot_epoch_)) {
+          return;
+        }
+      }
+    }
+
+    bool direct_room_match = false;
+    if (contacts_count_ > 0) {
+      const int direct_idx =
+          findContactIndexByIdentity(contacts_cache_, contacts_count_, event.peer_key, event.channel_name);
+      direct_room_match = (direct_idx >= 0 && contacts_cache_[direct_idx].type == 3);
+    }
+
     const uint32_t event_epoch = nowEpochSecondsOrZero();
     char live_line[128] = {};
-    snprintf(live_line, sizeof(live_line), "[%s] DM %s: %s", hhmm,
-             event.channel_name[0] != '\0' ? event.channel_name : "(unnamed)", event.text);
+    if (direct_room_match) {
+      snprintf(live_line, sizeof(live_line), "[%s] DM %s", hhmm, event.text);
+    } else {
+      snprintf(live_line, sizeof(live_line), "[%s] DM %s: %s", hhmm,
+               event.channel_name[0] != '\0' ? event.channel_name : "(unnamed)", event.text);
+    }
     appendLiveFeedLine(live_line, ChatLineKind::Rx);
 
     strncpy(last_dm_sender_name_, event.channel_name, sizeof(last_dm_sender_name_) - 1);
@@ -10914,10 +11517,17 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
       has_unread_dm_ = false;
       refreshShortcutVisuals();
     }
-    char initials[12] = {};
-    abbreviateContactName(event.channel_name, initials, sizeof(initials));
     char dm_line[112] = {};
-    snprintf(dm_line, sizeof(dm_line), "[%s] %s: %s", hhmm, initials, event.text);
+    if (direct_room_match) {
+      snprintf(dm_line, sizeof(dm_line), "[%s] %s", hhmm, event.text);
+    } else {
+      snprintf(dm_line, sizeof(dm_line), "[%s] %s: %s", hhmm,
+               event.channel_name[0] != '\0' ? event.channel_name : "(unnamed)", event.text);
+    }
+    room_ingest_last_name_hash_ = stableTextHash(event.channel_name);
+    room_ingest_last_key_hash_ = stableTextHash(event.peer_key);
+    room_ingest_last_text_hash_ = stableTextHash(event.text);
+    room_ingest_last_ms_ = millis();
     appendDmLine(event.channel_name, event.peer_key, dm_line, ChatLineKind::Rx, event_epoch);
     return;
   }
@@ -10930,11 +11540,6 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   snprintf(live_line, sizeof(live_line), "[%s] CH %s: %s", hhmm,
            event.channel_name[0] != '\0' ? event.channel_name : "(unknown)", event.text);
   appendLiveFeedLine(live_line, ChatLineKind::Rx);
-
-  const int channel_index = findConfiguredChannelIndex(event.channel_name);
-  if (channel_index < 0) {
-    return;
-  }
 
   if (pending_local_echo_deadline_ms_ != 0) {
     const uint32_t now = millis();
@@ -10955,6 +11560,44 @@ void StandaloneUi::applyEvent(const mesh::MeshEvent& event) {
   char display_text[96] = {};
   snprintf(display_text, sizeof(display_text), "[%s] %s", hhmm, event.text);
   const uint32_t event_epoch = nowEpochSecondsOrZero();
+
+  // Room traffic can arrive as channel events; mirror matching room traffic
+  // into DM history/panels so room conversations stay live.
+  bool room_dm_match = false;
+  const char* room_key = "";
+  if (contacts_open_ && contacts_dm_open_ && contacts_count_ > 0 && contacts_selected_index_ < contacts_count_) {
+    const mesh::MeshContactSummary& selected = contacts_cache_[contacts_selected_index_];
+    if (selected.type == 3 && dmNameLikelyMatch(selected.name, event.channel_name)) {
+      room_dm_match = true;
+      room_key = selected.public_key_hex;
+    }
+  }
+  if (!room_dm_match && dm_open_) {
+    const int active_idx = findContactIndexByIdentity(contacts_cache_, contacts_count_, dm_active_key_, dm_active_name_);
+    if (active_idx >= 0 && contacts_cache_[active_idx].type == 3 &&
+        dmNameLikelyMatch(dm_active_name_, event.channel_name)) {
+      room_dm_match = true;
+      room_key = dm_active_key_;
+    }
+  }
+  if (room_dm_match) {
+    const uint32_t room_key_hash = stableTextHash((room_key && room_key[0] != '\0') ? room_key : "");
+    const bool recent_dupe =
+        (room_ingest_last_ms_ != 0 && static_cast<int32_t>(millis() - room_ingest_last_ms_) < 2500) &&
+        room_ingest_last_name_hash_ == stableTextHash(event.channel_name) &&
+        room_ingest_last_text_hash_ == stableTextHash(event.text) &&
+        room_ingest_last_key_hash_ == room_key_hash;
+    if (!recent_dupe) {
+      appendDmLine(event.channel_name, room_key, display_text, ChatLineKind::Rx, event_epoch);
+    }
+    has_unread_dm_ = false;
+    refreshShortcutVisuals();
+  }
+
+  const int channel_index = findConfiguredChannelIndex(event.channel_name);
+  if (channel_index < 0) {
+    return;
+  }
 
   pushChannelHistoryLine(event.channel_name, display_text, ChatLineKind::Rx, event_epoch);
 
