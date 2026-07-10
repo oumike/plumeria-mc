@@ -1,4 +1,6 @@
-# plumeria-mc
+# Plumeria for MeshCore
+
+**Website:** : <https://plumeria.sumat.org/>
 
 Empty multi-target ESP32 firmware scaffold based on the same release/build flow used in camillia-mt.
 
