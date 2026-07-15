@@ -17,6 +17,13 @@ env_out_name() {
     esac
 }
 
+env_flash_size() {
+    case "$1" in
+        cardputer-cap) echo "8MB" ;;
+        *)             echo "16MB" ;;
+    esac
+}
+
 has_env() {
     local env_name="$1"
     grep -q "^\[env:${env_name}\]" platformio.ini
@@ -98,7 +105,7 @@ echo "$TAG" > VERSION
 echo "Updated VERSION to $TAG"
 
 # Build firmware
-clear_previous_builds
+# clear_previous_builds
 
 echo "Building firmware..."
 BUILD_ARGS=()
@@ -116,6 +123,24 @@ fi
 ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
 echo "Build successful."
 
+# Resolve toolchain assets needed for factory image merge.
+BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
+    -name boot_app0.bin 2>/dev/null | head -1)
+if [[ -z "$BOOT_APP0" ]]; then
+    echo "Error: boot_app0.bin not found in PlatformIO packages." >&2
+    echo "Run 'pio run' once to install framework assets." >&2
+    exit 1
+fi
+
+if python -m esptool version >/dev/null 2>&1; then
+    ESPTOOL="python -m esptool"
+elif command -v esptool.py >/dev/null 2>&1; then
+    ESPTOOL="esptool.py"
+else
+    echo "Error: esptool not found. Run: pip install esptool" >&2
+    exit 1
+fi
+
 # Stage release artifacts
 echo "Staging release artifacts to dist/..."
 mkdir -p dist
@@ -127,13 +152,27 @@ for env_name in "${RELEASE_ENVS[@]}"; do
 
     build_dir=".pio/build/${env_name}"
     out_name="$(env_out_name "$env_name")"
+    flash_size="$(env_flash_size "$env_name")"
 
     if [[ ! -f "${build_dir}/firmware.bin" ]]; then
         echo "Warning: ${build_dir}/firmware.bin not found, skipping ${env_name}."
         continue
     fi
 
-    cp "${build_dir}/firmware.bin" "dist/plumeria-mc-${out_name}-${TAG}.bin"
+    factory_out="dist/plumeria-mc-${out_name}-${TAG}.bin"
+    ota_out="dist/plumeria-mc-${out_name}-${TAG}-ota.bin"
+
+    $ESPTOOL --chip esp32s3 merge-bin \
+        -o "${factory_out}" \
+        --flash-mode dio \
+        --flash-freq 80m \
+        --flash-size "${flash_size}" \
+        0x0     "${build_dir}/bootloader.bin" \
+        0x8000  "${build_dir}/partitions.bin" \
+        0xe000  "${BOOT_APP0}" \
+        0x10000 "${build_dir}/firmware.bin"
+
+    cp "${build_dir}/firmware.bin" "${ota_out}"
 
     if [[ -f "${build_dir}/firmware.elf" ]]; then
         cp "${build_dir}/firmware.elf" "dist/plumeria-mc-${out_name}-${TAG}.elf"

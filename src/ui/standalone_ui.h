@@ -42,9 +42,9 @@ class StandaloneUi {
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 4;
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
-  static constexpr uint8_t kCfgRowCount = 9;
+  static constexpr uint8_t kCfgRowCount = 10;
 #else
-  static constexpr uint8_t kCfgRowCount = 12;
+  static constexpr uint8_t kCfgRowCount = 13;
 #endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
   static constexpr uint8_t kContactActionCount = 4;  // Fav, Admin, DM, Close
@@ -54,7 +54,9 @@ class StandaloneUi {
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-  static constexpr size_t kMaxStoredChatRows = 110;
+  static constexpr size_t kMaxStoredChatRows = 108;
+#elif defined(DEVICE_TDECK)
+  static constexpr size_t kMaxStoredChatRows = 116;
 #else
   static constexpr size_t kMaxStoredChatRows = 120;
 #endif
@@ -164,6 +166,7 @@ class StandaloneUi {
   void openAdvertPopup(const char* text, bool is_error);
   void closeAdvertPopup();
   bool setGpsEnabled(bool enabled);
+  void performOtaUpdate();
   bool exportConfigToSd();
   bool importConfigFromSd();
   bool deleteConfigFromSd();

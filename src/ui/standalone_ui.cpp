@@ -5,6 +5,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <nvs.h>
 #include <esp_vfs_fat.h>
@@ -15,6 +16,7 @@
 #include <time.h>
 
 #include "web/web_config.h"
+#include "ota/ota_update.h"
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #include <M5Cardputer.h>
@@ -38,6 +40,14 @@
 
 #ifndef PLUMERIA_PAGER_AUDIO_DEBUG
 #define PLUMERIA_PAGER_AUDIO_DEBUG 0
+#endif
+
+#ifndef PLUMERIA_OTA_ENABLED
+#define PLUMERIA_OTA_ENABLED 1
+#endif
+
+#ifndef APP_VERSION
+#define APP_VERSION "dev"
 #endif
 
 #if PLUMERIA_CONTACTS_TRACE
@@ -159,6 +169,8 @@ constexpr uint32_t kChatPersistFlushMs = 2000;
 constexpr uint32_t kDmPersistFlushMs = 1000;
 constexpr uint32_t kDmRetentionPruneMs = 300000;
 constexpr uint32_t kDmRetentionSeconds = 10UL * 24UL * 60UL * 60UL;
+constexpr uint32_t kOtaWifiConnectTimeoutMs = 15000;
+constexpr uint32_t kOtaRebootDelayMs = 900;
 // NVS blob capacity is limited; persist only a bounded recent DM window.
 constexpr size_t kMaxPersistedDmRows = 28;
 constexpr uint32_t kAdvertPopupAutoCloseMs = 2000;
@@ -354,6 +366,7 @@ const char* kCfgRowLabels[] = {
   "Mesh Region",
   "Repeater",
   "Notifications",
+  "OTA Update",
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   "Export Config",
   "Import Config",
@@ -370,10 +383,11 @@ constexpr uint8_t kCfgRowMultiAck = 5;
 constexpr uint8_t kCfgRowMeshRegion = 6;
 constexpr uint8_t kCfgRowRepeater = 7;
 constexpr uint8_t kCfgRowNotifications = 8;
+constexpr uint8_t kCfgRowOtaUpdate = 9;
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
-constexpr uint8_t kCfgRowExportConfig = 9;
-constexpr uint8_t kCfgRowImportConfig = 10;
-constexpr uint8_t kCfgRowDeleteConfig = 11;
+constexpr uint8_t kCfgRowExportConfig = 10;
+constexpr uint8_t kCfgRowImportConfig = 11;
+constexpr uint8_t kCfgRowDeleteConfig = 12;
 #endif
 
 constexpr uint8_t kMessageChimeNoteCount = 3;
@@ -1468,6 +1482,40 @@ void setErrText(char* out_err, size_t out_err_size, const char* text) {
   }
   strncpy(out_err, text, out_err_size - 1);
   out_err[out_err_size - 1] = '\0';
+}
+
+bool ensureOtaWifiConnected(char* out_err, size_t out_err_size) {
+  setErrText(out_err, out_err_size, "");
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
+  }
+
+  plumeria::web::WebSettings web_settings{};
+  plumeria::web::loadSettings(&web_settings);
+  if (web_settings.wifi_ssid[0] == '\0') {
+    setErrText(out_err, out_err_size, "WiFi SSID not configured");
+    return false;
+  }
+
+  const wifi_mode_t mode = WiFi.getMode();
+  if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
+    WiFi.mode(WIFI_AP_STA);
+  } else {
+    WiFi.mode(WIFI_STA);
+  }
+  WiFi.begin(web_settings.wifi_ssid, web_settings.wifi_pass);
+
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if ((millis() - start) >= kOtaWifiConnectTimeoutMs) {
+      setErrText(out_err, out_err_size, "WiFi connect timeout");
+      return false;
+    }
+    delay(100);
+  }
+
+  return true;
 }
 
 void clearSdVfsRegistration() {
@@ -7198,6 +7246,11 @@ void StandaloneUi::refreshCfgDialog() {
                     web_settings.repeater_mode ? "Repeater: ON" : "Repeater: OFF");
   lv_label_set_text(cfg_row_labels_[kCfgRowNotifications],
                     web_settings.notifications_enabled ? "Notifications: ON" : "Notifications: OFF");
+#if PLUMERIA_OTA_ENABLED
+  lv_label_set_text(cfg_row_labels_[kCfgRowOtaUpdate], "OTA Update: Install latest release");
+#else
+  lv_label_set_text(cfg_row_labels_[kCfgRowOtaUpdate], "OTA Update: Disabled on this build");
+#endif
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   lv_label_set_text(cfg_row_labels_[kCfgRowExportConfig], "Export Config to SD");
   lv_label_set_text(cfg_row_labels_[kCfgRowImportConfig], "Import Config from SD");
@@ -7365,6 +7418,79 @@ bool StandaloneUi::setGpsEnabled(bool enabled) {
     refreshHeaderVisuals();
   }
   return ok;
+}
+
+void StandaloneUi::performOtaUpdate() {
+#if PLUMERIA_OTA_ENABLED
+  char err[160] = {};
+  if (!ensureOtaWifiConnected(err, sizeof(err))) {
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "OTA failed: %s", err[0] ? err : "WiFi unavailable");
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    strncpy(cfg_action_text_, "OTA failed", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    return;
+  }
+
+  strncpy(cfg_status_text_, "Checking latest release...", sizeof(cfg_status_text_) - 1);
+  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+  strncpy(cfg_action_text_, "OTA check", sizeof(cfg_action_text_) - 1);
+  cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+  refreshCfgDialog();
+  lv_timer_handler();
+
+  plumeria::ota::preferExternalHeap();
+
+  plumeria::ota::OtaCheckResult check{};
+  if (!plumeria::ota::checkLatestRelease(check) || !check.ok) {
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "OTA check failed: %s",
+             check.error[0] ? check.error : "unknown error");
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    strncpy(cfg_action_text_, "OTA failed", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    return;
+  }
+
+  if (!check.update_available) {
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Already up to date (%s)", APP_VERSION);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    strncpy(cfg_action_text_, "No update", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    return;
+  }
+
+  snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Installing %s...", check.latest_tag);
+  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+  strncpy(cfg_action_text_, "OTA install", sizeof(cfg_action_text_) - 1);
+  cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+  refreshCfgDialog();
+  lv_timer_handler();
+
+  err[0] = '\0';
+  if (!plumeria::ota::installLatestRelease(check.latest_tag[0] ? check.latest_tag : nullptr,
+                                           err,
+                                           sizeof(err))) {
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "OTA failed: %s",
+             err[0] ? err : "install failed");
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    strncpy(cfg_action_text_, "OTA failed", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    return;
+  }
+
+  snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Installed %s. Rebooting...", check.latest_tag);
+  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+  strncpy(cfg_action_text_, "OTA installed", sizeof(cfg_action_text_) - 1);
+  cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+  refreshCfgDialog();
+  lv_timer_handler();
+  delay(kOtaRebootDelayMs);
+  ESP.restart();
+#else
+  strncpy(cfg_status_text_, "OTA disabled on this build", sizeof(cfg_status_text_) - 1);
+  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+  strncpy(cfg_action_text_, "Disabled", sizeof(cfg_action_text_) - 1);
+  cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+#endif
 }
 
 bool StandaloneUi::importConfigFromSd() {
@@ -7801,6 +7927,13 @@ bool StandaloneUi::cfgActionNeedsConfirm(uint8_t row) const {
     plumeria::web::loadSettings(&s);
     return !s.repeater_mode;
   }
+  if (row == kCfgRowOtaUpdate) {
+#if PLUMERIA_OTA_ENABLED
+    return true;
+#else
+    return false;
+#endif
+  }
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   return row == kCfgRowExportConfig || row == kCfgRowImportConfig || row == kCfgRowDeleteConfig;
 #else
@@ -7811,6 +7944,9 @@ bool StandaloneUi::cfgActionNeedsConfirm(uint8_t row) const {
 const char* StandaloneUi::cfgConfirmActionText(uint8_t row) const {
   if (row == kCfgRowRepeater) {
     return "Enable Repeater mode? Forwards mesh traffic; higher airtime + battery use.";
+  }
+  if (row == kCfgRowOtaUpdate) {
+    return "Install latest OTA release now?";
   }
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   switch (row) {
@@ -7920,6 +8056,12 @@ void StandaloneUi::performCfgConfirmedAction(uint8_t row) {
     }
     return;
   }
+
+  if (row == kCfgRowOtaUpdate) {
+    performOtaUpdate();
+    return;
+  }
+
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   switch (row) {
     case kCfgRowExportConfig:
@@ -8211,6 +8353,17 @@ void StandaloneUi::activateCfgSelection() {
         strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
         cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
       }
+      break;
+    }
+    case kCfgRowOtaUpdate: {
+#if PLUMERIA_OTA_ENABLED
+      openCfgConfirmDialog(cfg_selected_row_);
+#else
+      strncpy(cfg_status_text_, "OTA disabled on this build", sizeof(cfg_status_text_) - 1);
+      cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+      strncpy(cfg_action_text_, "Disabled", sizeof(cfg_action_text_) - 1);
+      cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+#endif
       break;
     }
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)

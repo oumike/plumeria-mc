@@ -24,7 +24,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install PlatformIO
-        run: pip install platformio
+        run: pip install platformio esptool
 
       - name: Verify MeshCore layout
         run: |
@@ -69,20 +69,52 @@ jobs:
           PROJECT=plumeria-mc
           mkdir -p dist
 
+          BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
+            -name boot_app0.bin | head -1)
+          if [ -z "$BOOT_APP0" ]; then
+            echo "boot_app0.bin not found" >&2
+            exit 1
+          fi
+
           while IFS= read -r env; do
             case "$env" in
               tdeck)
                 suffix=tdeck
+                flash_size=16MB
+                ;;
+              cardputer-cap)
+                suffix=cardputer-cap
+                flash_size=8MB
                 ;;
               tlora-pager-tft)
                 suffix=tlora-pager-tft
+                flash_size=16MB
+                ;;
+              heltec-v4-expansion)
+                suffix=heltec
+                flash_size=16MB
+                ;;
+              heltec-v4-expansion-vertical)
+                suffix=heltec-vertical
+                flash_size=16MB
                 ;;
               *)
                 suffix="$env"
+                flash_size=16MB
                 ;;
             esac
 
-            cp ".pio/build/$env/firmware.bin" "dist/${PROJECT}-${suffix}-${TAG}.bin"
+            python -m esptool --chip esp32s3 merge-bin \
+              -o "dist/${PROJECT}-${suffix}-${TAG}.bin" \
+              --flash-mode dio \
+              --flash-freq 80m \
+              --flash-size "${flash_size}" \
+              0x0     ".pio/build/$env/bootloader.bin" \
+              0x8000  ".pio/build/$env/partitions.bin" \
+              0xe000  "$BOOT_APP0" \
+              0x10000 ".pio/build/$env/firmware.bin"
+
+            cp ".pio/build/$env/firmware.bin" "dist/${PROJECT}-${suffix}-${TAG}-ota.bin"
             cp ".pio/build/$env/firmware.elf" "dist/${PROJECT}-${suffix}-${TAG}.elf"
             cp ".pio/build/$env/firmware.map" "dist/${PROJECT}-${suffix}-${TAG}.map" 2>/dev/null || true
           done < built-envs.txt
