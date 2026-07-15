@@ -105,7 +105,7 @@ echo "$TAG" > VERSION
 echo "Updated VERSION to $TAG"
 
 # Build firmware
-# clear_previous_builds
+clear_previous_builds
 
 echo "Building firmware..."
 BUILD_ARGS=()
