@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <SPI.h>
+#include <esp_system.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -50,6 +51,7 @@ constexpr char kContactsCountKey[] = "contacts_cnt";
 constexpr char kContactsBlobKey[] = "contacts_blob";
 constexpr char kChannelsCountKey[] = "channels_cnt";
 constexpr char kChannelsBlobKey[] = "channels_blob";
+constexpr char kPendingChannelsBlobKey[] = "ch_pend_blob";
 constexpr char kContactTelemetryBlobKey[] = "ctel_blob";
 constexpr char kUiTelemetryUpdatedInfo[] = "__telemetry_updated__";
 
@@ -71,9 +73,79 @@ struct PersistedChannel {
   uint8_t secret[32];
 };
 
+struct PendingChannelConfig {
+  char name[32];
+  char psk_base64[65];
+};
+
 PersistedChannel g_channels_nvs_buf[MAX_GROUP_CHANNELS]{};
 PersistedContact g_contacts_nvs_buf[MAX_CONTACTS + MAX_ANON_CONTACTS]{};
 ChannelDetails g_channel_rollback_snapshot[MAX_GROUP_CHANNELS]{};
+PendingChannelConfig* g_pending_channels_nvs_buf = nullptr;
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+bool waitForBusyLow(int busy_pin, uint32_t timeout_ms, const char* phase) {
+  if (busy_pin < 0) {
+    return true;
+  }
+
+  pinMode(busy_pin, INPUT);
+  const uint32_t start = millis();
+  while ((millis() - start) < timeout_ms) {
+    if (digitalRead(busy_pin) == LOW) {
+      return true;
+    }
+    delay(1);
+  }
+
+  Serial.printf("[RADIO] busy stuck high phase=%s pin=%d level=%d\n",
+                phase ? phase : "unknown",
+                busy_pin,
+                digitalRead(busy_pin));
+  return false;
+}
+
+void pulseRadioResetPin(int rst_pin) {
+  if (rst_pin < 0) {
+    return;
+  }
+
+  pinMode(rst_pin, OUTPUT);
+  digitalWrite(rst_pin, LOW);
+  delay(2);
+  digitalWrite(rst_pin, HIGH);
+  delay(8);
+}
+
+bool preflightHeltecRadio(const plumeria::hal::RadioConfig& radio_config) {
+  if (radio_config.radio_busy >= 0) {
+    pinMode(radio_config.radio_busy, INPUT);
+    Serial.printf("[RADIO] busy preflight initial=%d pin=%d\n",
+                  digitalRead(radio_config.radio_busy),
+                  static_cast<int>(radio_config.radio_busy));
+  }
+
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    Serial.printf("[RADIO] preflight reset attempt=%d rst=%d\n",
+                  attempt + 1,
+                  static_cast<int>(radio_config.radio_rst));
+    pulseRadioResetPin(radio_config.radio_rst);
+    if (waitForBusyLow(radio_config.radio_busy, 800, "preflight")) {
+      Serial.println("[RADIO] preflight busy ready");
+      return true;
+    }
+  }
+
+  return false;
+}
+#endif
+
+PendingChannelConfig* ensurePendingChannelsBuffer() {
+  if (!g_pending_channels_nvs_buf) {
+    g_pending_channels_nvs_buf = new (std::nothrow) PendingChannelConfig[MAX_GROUP_CHANNELS];
+  }
+  return g_pending_channels_nvs_buf;
+}
 
 size_t encodeBase64(const uint8_t* src, size_t src_len, char* out, size_t out_size) {
   static const char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -347,6 +419,164 @@ int loadChannelsSnapshotFromNvs(PersistedChannel* out_channels, int max_channels
   return loaded;
 }
 
+int loadPendingChannelConfigsFromNvs(PendingChannelConfig* out_configs, int max_configs) {
+  if (!out_configs || max_configs <= 0) {
+    return 0;
+  }
+
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, false)) {
+    return 0;
+  }
+
+  const size_t blob_len = prefs.getBytesLength(kPendingChannelsBlobKey);
+  if (blob_len < sizeof(PendingChannelConfig)) {
+    prefs.end();
+    return 0;
+  }
+
+  int raw_count = static_cast<int>(blob_len / sizeof(PendingChannelConfig));
+  if (raw_count > max_configs) {
+    raw_count = max_configs;
+  }
+
+  memset(out_configs, 0, static_cast<size_t>(max_configs) * sizeof(PendingChannelConfig));
+  const size_t to_read = static_cast<size_t>(raw_count) * sizeof(PendingChannelConfig);
+  const size_t got = prefs.getBytes(kPendingChannelsBlobKey, out_configs, to_read);
+  prefs.end();
+  if (got < sizeof(PendingChannelConfig)) {
+    return 0;
+  }
+
+  int loaded = 0;
+  for (int i = 0; i < raw_count && loaded < max_configs; i++) {
+    if (out_configs[i].name[0] == '\0') {
+      continue;
+    }
+    if (i != loaded) {
+      out_configs[loaded] = out_configs[i];
+    }
+    out_configs[loaded].name[sizeof(out_configs[loaded].name) - 1] = '\0';
+    out_configs[loaded].psk_base64[sizeof(out_configs[loaded].psk_base64) - 1] = '\0';
+    loaded++;
+  }
+
+  return loaded;
+}
+
+bool savePendingChannelConfigsToNvs(const PendingChannelConfig* configs, int count) {
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, false)) {
+    return false;
+  }
+
+  bool ok = true;
+  if (count > 0 && configs) {
+    const size_t blob_len = static_cast<size_t>(count) * sizeof(PendingChannelConfig);
+    const size_t wrote = prefs.putBytes(kPendingChannelsBlobKey, configs, blob_len);
+    ok = (wrote == blob_len);
+  } else if (prefs.isKey(kPendingChannelsBlobKey)) {
+    ok = prefs.remove(kPendingChannelsBlobKey);
+  }
+
+  prefs.end();
+  return ok;
+}
+
+int buildPendingChannelsFromPersistedSnapshot(PendingChannelConfig* out_configs, int max_configs) {
+  if (!out_configs || max_configs <= 0) {
+    return 0;
+  }
+
+  memset(g_channels_nvs_buf, 0, sizeof(g_channels_nvs_buf));
+  const int persisted_count = loadChannelsSnapshotFromNvs(g_channels_nvs_buf, MAX_GROUP_CHANNELS);
+  int loaded = 0;
+  for (int i = 0; i < persisted_count && loaded < max_configs; i++) {
+    if (g_channels_nvs_buf[i].name[0] == '\0') {
+      continue;
+    }
+
+    PendingChannelConfig cfg{};
+    strncpy(cfg.name, g_channels_nvs_buf[i].name, sizeof(cfg.name) - 1);
+    cfg.name[sizeof(cfg.name) - 1] = '\0';
+
+    size_t secret_len = sizeof(g_channels_nvs_buf[i].secret);
+    bool upper_zero = true;
+    for (size_t j = 16; j < sizeof(g_channels_nvs_buf[i].secret); j++) {
+      if (g_channels_nvs_buf[i].secret[j] != 0) {
+        upper_zero = false;
+        break;
+      }
+    }
+    if (upper_zero) {
+      secret_len = 16;
+    }
+
+    if (encodeBase64(g_channels_nvs_buf[i].secret, secret_len, cfg.psk_base64, sizeof(cfg.psk_base64)) == 0) {
+      continue;
+    }
+
+    out_configs[loaded++] = cfg;
+  }
+
+  return loaded;
+}
+
+bool pendingContainsChannelName(const PendingChannelConfig* configs, int count, const char* name) {
+  if (!configs || count <= 0 || !name || name[0] == '\0') {
+    return false;
+  }
+
+  for (int i = 0; i < count; i++) {
+    if (strcmp(configs[i].name, name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ensurePendingIncludesPublic(PendingChannelConfig* configs, int* count, int max_configs) {
+  if (!configs || !count || max_configs <= 0) {
+    return false;
+  }
+
+  int n = *count;
+  if (n < 0) {
+    n = 0;
+  }
+  if (n > max_configs) {
+    n = max_configs;
+  }
+
+  int public_idx = -1;
+  for (int i = 0; i < n; i++) {
+    if (strcmp(configs[i].name, kPublicChannelName) == 0) {
+      public_idx = i;
+      break;
+    }
+  }
+
+  if (public_idx < 0) {
+    if (n >= max_configs) {
+      *count = n;
+      return false;
+    }
+
+    public_idx = n++;
+    memset(&configs[public_idx], 0, sizeof(configs[public_idx]));
+    strncpy(configs[public_idx].name, kPublicChannelName, sizeof(configs[public_idx].name) - 1);
+    configs[public_idx].name[sizeof(configs[public_idx].name) - 1] = '\0';
+  }
+
+  if (configs[public_idx].psk_base64[0] == '\0') {
+    strncpy(configs[public_idx].psk_base64, kPublicChannelPsk, sizeof(configs[public_idx].psk_base64) - 1);
+    configs[public_idx].psk_base64[sizeof(configs[public_idx].psk_base64) - 1] = '\0';
+  }
+
+  *count = n;
+  return true;
+}
+
 int loadContactsSnapshotFromNvs(PersistedContact* out_contacts, int max_contacts) {
   if (!out_contacts || max_contacts <= 0) {
     return 0;
@@ -419,6 +649,43 @@ bool loadIdentityFromNvs(::mesh::LocalIdentity* identity) {
 
   if (false) Serial.println("[PERSIST][ID] loaded from NVS");
   return true;
+}
+
+bool saveIdentityToNvs(::mesh::LocalIdentity* identity);
+
+bool generateIdentity(::mesh::LocalIdentity* out_identity) {
+  if (!out_identity) {
+    return false;
+  }
+
+  StdRNG rng;
+  const uint32_t seed = static_cast<uint32_t>(esp_random()) ^ static_cast<uint32_t>(micros());
+  rng.begin(static_cast<long>(seed));
+
+  *out_identity = ::mesh::LocalIdentity(&rng);
+  int attempts = 0;
+  while (attempts < 10 &&
+         (out_identity->pub_key[0] == 0x00 || out_identity->pub_key[0] == 0xFF)) {
+    *out_identity = ::mesh::LocalIdentity(&rng);
+    attempts++;
+  }
+  return !(out_identity->pub_key[0] == 0x00 || out_identity->pub_key[0] == 0xFF);
+}
+
+bool loadOrCreateIdentity(::mesh::LocalIdentity* out_identity) {
+  if (!out_identity) {
+    return false;
+  }
+
+  if (loadIdentityFromNvs(out_identity)) {
+    return true;
+  }
+
+  if (!generateIdentity(out_identity)) {
+    return false;
+  }
+
+  return saveIdentityToNvs(out_identity);
 }
 
 bool saveIdentityToNvs(::mesh::LocalIdentity* identity) {
@@ -1276,10 +1543,49 @@ struct MeshRuntime {
 #endif
 };
 
+void MeshAdapter::resetRuntime() {
+  ready_ = false;
+  adverts_unlocked_for_boot_ = false;
+
+  if (!runtime_) {
+    return;
+  }
+
+  if (runtime_->mesh) {
+    delete runtime_->mesh;
+    runtime_->mesh = nullptr;
+  }
+  if (runtime_->radio_driver) {
+    delete runtime_->radio_driver;
+    runtime_->radio_driver = nullptr;
+  }
+  if (runtime_->radio_chip) {
+    delete runtime_->radio_chip;
+    runtime_->radio_chip = nullptr;
+  }
+  if (runtime_->radio_module) {
+    delete runtime_->radio_module;
+    runtime_->radio_module = nullptr;
+  }
+
+  delete runtime_;
+  runtime_ = nullptr;
+}
+
 bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
   if (ready_) {
     return true;
   }
+
+  if (runtime_) {
+    resetRuntime();
+  }
+
+  auto fail = [&](const char* msg) {
+    queueInfo(msg);
+    resetRuntime();
+    return false;
+  };
 
   runtime_ = new MeshRuntime();
   if (!runtime_) {
@@ -1299,7 +1605,15 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
       static_cast<double>(radio_config.bandwidth_khz), static_cast<unsigned>(radio_config.spreading_factor),
       static_cast<unsigned>(radio_config.coding_rate), static_cast<int>(radio_config.tx_power_dbm));
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+  if (!preflightHeltecRadio(radio_config)) {
+    return fail("SX1262 preflight failed (busy line)");
+  }
+#endif
+
+  Serial.println("[RADIO] spi begin start");
   runtime_->lora_spi.begin(radio_config.spi_sck, radio_config.spi_miso, radio_config.spi_mosi);
+  Serial.println("[RADIO] spi begin done");
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
   m5::PI4IOE5V6408_Class ioexp(0x43, 400000, &m5::In_I2C);
@@ -1316,31 +1630,31 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
   runtime_->radio_module = new Module(radio_config.radio_cs, radio_config.radio_dio1, radio_config.radio_rst,
                                       radio_config.radio_busy, runtime_->lora_spi);
   if (!runtime_->radio_module) {
-    queueInfo("SX1262 module allocation failed");
-    return false;
+    return fail("SX1262 module allocation failed");
   }
 
   runtime_->radio_chip = new CustomSX1262(runtime_->radio_module);
   if (!runtime_->radio_chip) {
-    queueInfo("SX1262 radio allocation failed");
-    return false;
+    return fail("SX1262 radio allocation failed");
   }
 
+  Serial.println("[RADIO] std_init start");
   if (!runtime_->radio_chip->std_init(&runtime_->lora_spi)) {
-    queueInfo("SX1262 init failed");
-    return false;
+    return fail("SX1262 init failed");
   }
+  Serial.println("[RADIO] std_init done");
 
+  Serial.println("[RADIO] apply modem params start");
   runtime_->radio_chip->setFrequency(radio_config.frequency_mhz);
   runtime_->radio_chip->setBandwidth(radio_config.bandwidth_khz);
   runtime_->radio_chip->setSpreadingFactor(radio_config.spreading_factor);
   runtime_->radio_chip->setCodingRate(radio_config.coding_rate);
   runtime_->radio_chip->setOutputPower(radio_config.tx_power_dbm);
+  Serial.println("[RADIO] apply modem params done");
 
   runtime_->radio_driver = new CustomSX1262Wrapper(*runtime_->radio_chip, runtime_->board);
   if (!runtime_->radio_driver) {
-    queueInfo("Radio driver allocation failed");
-    return false;
+    return fail("Radio driver allocation failed");
   }
   runtime_->radio_driver->setRxBoostedGainMode(radio_config.rx_boosted_gain);
 
@@ -1348,8 +1662,7 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
   runtime_->mesh = new StandaloneChatMesh(*runtime_->radio_driver, runtime_->millis_clock, runtime_->fast_rng,
                                           runtime_->rtc_clock, runtime_->packet_manager, runtime_->tables, this);
   if (!runtime_->mesh) {
-    queueInfo("Mesh object allocation failed");
-    return false;
+    return fail("Mesh object allocation failed");
   }
 
   runtime_->mesh->setNodeName(kDefaultNodeName);
@@ -1377,25 +1690,67 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
     queueInfo("Loaded mesh identity");
   }
 
+  Serial.println("[RADIO] mesh beginStandalone start");
   runtime_->mesh->beginStandalone();
+  Serial.println("[RADIO] mesh beginStandalone done");
 
 #if defined(ENV_INCLUDE_GPS) && (ENV_INCLUDE_GPS == 1)
   runtime_->sensors.begin();
 #endif
 
-  bool loaded_channels = loadChannelsFromFs();
-  if (!loaded_channels) {
-    bool added_public = runtime_->mesh->ensurePublicChannel();
-    if (added_public) {
-      markChannelsDirty();
-      queueInfo("Seeded default channel: Public");
+  const bool loaded_channels = loadChannelsFromFs();
+
+  bool applied_pending_channels = false;
+  PendingChannelConfig* pending_channels = ensurePendingChannelsBuffer();
+  int pending_count = 0;
+  if (pending_channels) {
+    memset(pending_channels, 0, sizeof(PendingChannelConfig) * MAX_GROUP_CHANNELS);
+    pending_count = loadPendingChannelConfigsFromNvs(pending_channels, MAX_GROUP_CHANNELS);
+  }
+  if (pending_count > 0) {
+    bool apply_ok = true;
+    for (int i = 0; i < pending_count; i++) {
+      const char* psk_ptr = pending_channels[i].psk_base64[0] != '\0' ? pending_channels[i].psk_base64 : nullptr;
+      if (!runtime_->mesh->upsertChannel(pending_channels[i].name, psk_ptr)) {
+        apply_ok = false;
+        break;
+      }
     }
-  } else {
-    bool added_public = runtime_->mesh->ensurePublicChannel();
-    if (added_public) {
+
+    if (apply_ok) {
+      ChannelDetails channel{};
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        if (!runtime_->mesh->getChannel(i, channel)) {
+          continue;
+        }
+        if (channel.name[0] == '\0') {
+          continue;
+        }
+        if (strcmp(channel.name, kPublicChannelName) == 0) {
+          continue;
+        }
+        if (!pendingContainsChannelName(pending_channels, pending_count, channel.name)) {
+          runtime_->mesh->removeChannelByName(channel.name);
+        }
+      }
+
+      if (!savePendingChannelConfigsToNvs(nullptr, 0)) {
+        queueInfo("Warning: failed to clear pending channels");
+      }
+
+      applied_pending_channels = true;
       markChannelsDirty();
-      queueInfo("Added missing default channel: Public");
+      queueInfo("Applied pending channel updates");
+    } else {
+      queueInfo("Pending channel apply failed");
     }
+  }
+
+  const bool added_public = runtime_->mesh->ensurePublicChannel();
+  if (added_public) {
+    markChannelsDirty();
+    queueInfo((loaded_channels || applied_pending_channels) ? "Added missing default channel: Public"
+                                                            : "Seeded default channel: Public");
   }
 
   if (channels_dirty_) {
@@ -1464,6 +1819,10 @@ void MeshAdapter::loop() {
     }
     last_persist_flush_ms_ = now;
   }
+}
+
+bool MeshAdapter::isReady() const {
+  return ready_;
 }
 
 bool MeshAdapter::sendDirectMessage(const char* destination, const char* text) {
@@ -1537,8 +1896,13 @@ bool MeshAdapter::getPublicKeyHex(char* out_hex, size_t out_size) const {
   }
 
   out_hex[0] = '\0';
+
   if (!ready_ || !runtime_ || !runtime_->mesh) {
-    return false;
+    ::mesh::LocalIdentity persisted_identity;
+    if (!loadOrCreateIdentity(&persisted_identity)) {
+      return false;
+    }
+    return bytesToHex(persisted_identity.pub_key, PUB_KEY_SIZE, out_hex, out_size);
   }
 
   return bytesToHex(runtime_->mesh->self_id.pub_key, PUB_KEY_SIZE, out_hex, out_size);
@@ -1552,8 +1916,29 @@ bool MeshAdapter::getIdentityKeysHex(char* out_public_hex, size_t public_hex_siz
 
   out_public_hex[0] = '\0';
   out_private_hex[0] = '\0';
+
   if (!ready_ || !runtime_ || !runtime_->mesh) {
-    return false;
+    ::mesh::LocalIdentity persisted_identity;
+    if (!loadOrCreateIdentity(&persisted_identity)) {
+      return false;
+    }
+
+    static uint8_t identity_blob[PRV_KEY_SIZE + PUB_KEY_SIZE] = {};
+    memset(identity_blob, 0, sizeof(identity_blob));
+    const size_t blob_len = persisted_identity.writeTo(identity_blob, sizeof(identity_blob));
+    if (blob_len != sizeof(identity_blob)) {
+      return false;
+    }
+
+    if (!bytesToHex(persisted_identity.pub_key, PUB_KEY_SIZE, out_public_hex, public_hex_size)) {
+      out_private_hex[0] = '\0';
+      return false;
+    }
+    if (!bytesToHex(identity_blob, PRV_KEY_SIZE, out_private_hex, private_hex_size)) {
+      out_public_hex[0] = '\0';
+      return false;
+    }
+    return true;
   }
 
   static uint8_t identity_blob[PRV_KEY_SIZE + PUB_KEY_SIZE] = {};
@@ -1659,14 +2044,17 @@ int MeshAdapter::getGpsSatelliteCount() const {
 }
 
 bool MeshAdapter::setAdvertLocation(bool enabled, double latitude, double longitude) {
-  if (!ready_ || !runtime_ || !runtime_->mesh) {
-    return false;
-  }
-
   if (enabled) {
     if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
       return false;
     }
+  }
+
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    // Accept the setting even when mesh is not currently ready (for example,
+    // during guarded boot fallback paths). Callers persist settings and this
+    // value will be applied on a subsequent successful mesh bring-up.
+    return true;
   }
 
   runtime_->mesh->setAdvertLocation(enabled, latitude, longitude);
@@ -1794,11 +2182,68 @@ bool MeshAdapter::broadcastSelfAdvertFloodNow() {
 }
 
 int MeshAdapter::exportChannels(char names[][32], int max_names) {
-  if (!ready_ || !runtime_ || !runtime_->mesh || !names || max_names <= 0) {
+  if (!names || max_names <= 0) {
     return 0;
   }
 
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    PendingChannelConfig* pending_channels = ensurePendingChannelsBuffer();
+    int pending_count = 0;
+    if (pending_channels) {
+      memset(pending_channels, 0, sizeof(PendingChannelConfig) * MAX_GROUP_CHANNELS);
+      pending_count = loadPendingChannelConfigsFromNvs(pending_channels, MAX_GROUP_CHANNELS);
+    }
+    if (pending_count > 0) {
+      int exported = 0;
+      bool has_public = false;
+      for (int i = 0; i < pending_count && exported < max_names; i++) {
+        if (pending_channels[i].name[0] == '\0') {
+          continue;
+        }
+        if (strcmp(pending_channels[i].name, kPublicChannelName) == 0) {
+          has_public = true;
+        }
+        strncpy(names[exported], pending_channels[i].name, 31);
+        names[exported][31] = '\0';
+        exported++;
+      }
+
+      if (!has_public && exported < max_names) {
+        strncpy(names[exported], kPublicChannelName, 31);
+        names[exported][31] = '\0';
+        exported++;
+      }
+
+      return exported;
+    }
+
+    memset(g_channels_nvs_buf, 0, sizeof(g_channels_nvs_buf));
+    const int persisted_count = loadChannelsSnapshotFromNvs(g_channels_nvs_buf, MAX_GROUP_CHANNELS);
+    int exported = 0;
+    bool has_public = false;
+    for (int i = 0; i < persisted_count && exported < max_names; i++) {
+      if (g_channels_nvs_buf[i].name[0] == '\0') {
+        continue;
+      }
+      if (strcmp(g_channels_nvs_buf[i].name, kPublicChannelName) == 0) {
+        has_public = true;
+      }
+      strncpy(names[exported], g_channels_nvs_buf[i].name, 31);
+      names[exported][31] = '\0';
+      exported++;
+    }
+
+    if (!has_public && exported < max_names) {
+      strncpy(names[exported], kPublicChannelName, 31);
+      names[exported][31] = '\0';
+      exported++;
+    }
+
+    return exported;
+  }
+
   int exported = 0;
+  bool has_public = false;
   ChannelDetails channel{};
   for (int i = 0; i < MAX_GROUP_CHANNELS && exported < max_names; i++) {
     if (!runtime_->mesh->getChannel(i, channel)) {
@@ -1807,8 +2252,17 @@ int MeshAdapter::exportChannels(char names[][32], int max_names) {
     if (channel.name[0] == '\0') {
       continue;
     }
+    if (strcmp(channel.name, kPublicChannelName) == 0) {
+      has_public = true;
+    }
 
     strncpy(names[exported], channel.name, 31);
+    names[exported][31] = '\0';
+    exported++;
+  }
+
+  if (!has_public && exported < max_names) {
+    strncpy(names[exported], kPublicChannelName, 31);
     names[exported][31] = '\0';
     exported++;
   }
@@ -1817,11 +2271,97 @@ int MeshAdapter::exportChannels(char names[][32], int max_names) {
 }
 
 int MeshAdapter::exportChannelConfigs(MeshChannelConfig configs[], int max_configs) const {
-  if (!ready_ || !runtime_ || !runtime_->mesh || !configs || max_configs <= 0) {
+  if (!configs || max_configs <= 0) {
     return 0;
   }
 
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    PendingChannelConfig* pending_channels = ensurePendingChannelsBuffer();
+    int pending_count = 0;
+    if (pending_channels) {
+      memset(pending_channels, 0, sizeof(PendingChannelConfig) * MAX_GROUP_CHANNELS);
+      pending_count = loadPendingChannelConfigsFromNvs(pending_channels, MAX_GROUP_CHANNELS);
+    }
+    if (pending_count > 0) {
+      int exported = 0;
+      bool has_public = false;
+      for (int i = 0; i < pending_count && exported < max_configs; i++) {
+        if (pending_channels[i].name[0] == '\0') {
+          continue;
+        }
+        if (strcmp(pending_channels[i].name, kPublicChannelName) == 0) {
+          has_public = true;
+        }
+
+        MeshChannelConfig cfg{};
+        strncpy(cfg.name, pending_channels[i].name, sizeof(cfg.name) - 1);
+        cfg.name[sizeof(cfg.name) - 1] = '\0';
+        strncpy(cfg.psk_base64, pending_channels[i].psk_base64, sizeof(cfg.psk_base64) - 1);
+        cfg.psk_base64[sizeof(cfg.psk_base64) - 1] = '\0';
+        configs[exported++] = cfg;
+      }
+
+      if (!has_public && exported < max_configs) {
+        MeshChannelConfig cfg{};
+        strncpy(cfg.name, kPublicChannelName, sizeof(cfg.name) - 1);
+        cfg.name[sizeof(cfg.name) - 1] = '\0';
+        strncpy(cfg.psk_base64, kPublicChannelPsk, sizeof(cfg.psk_base64) - 1);
+        cfg.psk_base64[sizeof(cfg.psk_base64) - 1] = '\0';
+        configs[exported++] = cfg;
+      }
+
+      return exported;
+    }
+
+    memset(g_channels_nvs_buf, 0, sizeof(g_channels_nvs_buf));
+    const int persisted_count = loadChannelsSnapshotFromNvs(g_channels_nvs_buf, MAX_GROUP_CHANNELS);
+    int exported = 0;
+    bool has_public = false;
+    for (int i = 0; i < persisted_count && exported < max_configs; i++) {
+      if (g_channels_nvs_buf[i].name[0] == '\0') {
+        continue;
+      }
+      if (strcmp(g_channels_nvs_buf[i].name, kPublicChannelName) == 0) {
+        has_public = true;
+      }
+
+      MeshChannelConfig cfg{};
+      strncpy(cfg.name, g_channels_nvs_buf[i].name, sizeof(cfg.name) - 1);
+      cfg.name[sizeof(cfg.name) - 1] = '\0';
+
+      size_t secret_len = sizeof(g_channels_nvs_buf[i].secret);
+      bool upper_zero = true;
+      for (size_t j = 16; j < sizeof(g_channels_nvs_buf[i].secret); j++) {
+        if (g_channels_nvs_buf[i].secret[j] != 0) {
+          upper_zero = false;
+          break;
+        }
+      }
+      if (upper_zero) {
+        secret_len = 16;
+      }
+
+      if (encodeBase64(g_channels_nvs_buf[i].secret, secret_len, cfg.psk_base64, sizeof(cfg.psk_base64)) == 0) {
+        continue;
+      }
+
+      configs[exported++] = cfg;
+    }
+
+    if (!has_public && exported < max_configs) {
+      MeshChannelConfig cfg{};
+      strncpy(cfg.name, kPublicChannelName, sizeof(cfg.name) - 1);
+      cfg.name[sizeof(cfg.name) - 1] = '\0';
+      strncpy(cfg.psk_base64, kPublicChannelPsk, sizeof(cfg.psk_base64) - 1);
+      cfg.psk_base64[sizeof(cfg.psk_base64) - 1] = '\0';
+      configs[exported++] = cfg;
+    }
+
+    return exported;
+  }
+
   int exported = 0;
+  bool has_public = false;
   ChannelDetails channel{};
   for (int i = 0; i < MAX_GROUP_CHANNELS && exported < max_configs; i++) {
     if (!runtime_->mesh->getChannel(i, channel)) {
@@ -1829,6 +2369,9 @@ int MeshAdapter::exportChannelConfigs(MeshChannelConfig configs[], int max_confi
     }
     if (channel.name[0] == '\0') {
       continue;
+    }
+    if (strcmp(channel.name, kPublicChannelName) == 0) {
+      has_public = true;
     }
 
     MeshChannelConfig cfg{};
@@ -1851,6 +2394,15 @@ int MeshAdapter::exportChannelConfigs(MeshChannelConfig configs[], int max_confi
       continue;
     }
 
+    configs[exported++] = cfg;
+  }
+
+  if (!has_public && exported < max_configs) {
+    MeshChannelConfig cfg{};
+    strncpy(cfg.name, kPublicChannelName, sizeof(cfg.name) - 1);
+    cfg.name[sizeof(cfg.name) - 1] = '\0';
+    strncpy(cfg.psk_base64, kPublicChannelPsk, sizeof(cfg.psk_base64) - 1);
+    cfg.psk_base64[sizeof(cfg.psk_base64) - 1] = '\0';
     configs[exported++] = cfg;
   }
 
@@ -2413,8 +2965,64 @@ void MeshAdapter::checkLoginTimeout(uint32_t now_ms) {
 }
 
 bool MeshAdapter::addChannel(const char* channel_name, const char* psk_base64) {
-  if (!ready_ || !runtime_ || !runtime_->mesh || !channel_name || channel_name[0] == '\0') {
+  if (!channel_name || channel_name[0] == '\0') {
     return false;
+  }
+  if (channel_name[0] != '#' && (!psk_base64 || psk_base64[0] == '\0')) {
+    return false;
+  }
+
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    PendingChannelConfig* pending_channels = ensurePendingChannelsBuffer();
+    if (!pending_channels) {
+      return false;
+    }
+
+    memset(pending_channels, 0, sizeof(PendingChannelConfig) * MAX_GROUP_CHANNELS);
+    int pending_count = loadPendingChannelConfigsFromNvs(pending_channels, MAX_GROUP_CHANNELS);
+    if (pending_count <= 0) {
+      pending_count = buildPendingChannelsFromPersistedSnapshot(pending_channels, MAX_GROUP_CHANNELS);
+    }
+
+    int target_index = -1;
+    for (int i = 0; i < pending_count; i++) {
+      if (strcmp(pending_channels[i].name, channel_name) == 0) {
+        target_index = i;
+        break;
+      }
+    }
+
+    if (target_index < 0) {
+      if (pending_count >= MAX_GROUP_CHANNELS) {
+        return false;
+      }
+      target_index = pending_count++;
+      memset(&pending_channels[target_index], 0, sizeof(pending_channels[target_index]));
+      strncpy(pending_channels[target_index].name,
+              channel_name,
+              sizeof(pending_channels[target_index].name) - 1);
+      pending_channels[target_index].name[sizeof(pending_channels[target_index].name) - 1] = '\0';
+    }
+
+    if (psk_base64 && psk_base64[0] != '\0') {
+      strncpy(pending_channels[target_index].psk_base64,
+              psk_base64,
+              sizeof(pending_channels[target_index].psk_base64) - 1);
+      pending_channels[target_index].psk_base64[sizeof(pending_channels[target_index].psk_base64) - 1] = '\0';
+    } else {
+      pending_channels[target_index].psk_base64[0] = '\0';
+    }
+
+    if (!ensurePendingIncludesPublic(pending_channels, &pending_count, MAX_GROUP_CHANNELS)) {
+      return false;
+    }
+
+    if (!savePendingChannelConfigsToNvs(pending_channels, pending_count)) {
+      return false;
+    }
+
+    queueInfo("Queued channel update (mesh offline)");
+    return true;
   }
 
   if (false) Serial.printf("[PERSIST][CH] add request name=%s\n", channel_name);
@@ -2442,8 +3050,52 @@ bool MeshAdapter::addChannel(const char* channel_name, const char* psk_base64) {
 }
 
 bool MeshAdapter::removeChannel(const char* channel_name) {
-  if (!ready_ || !runtime_ || !runtime_->mesh || !channel_name || channel_name[0] == '\0') {
+  if (!channel_name || channel_name[0] == '\0') {
     return false;
+  }
+
+  if (strcmp(channel_name, kPublicChannelName) == 0) {
+    return false;
+  }
+
+  if (!ready_ || !runtime_ || !runtime_->mesh) {
+    PendingChannelConfig* pending_channels = ensurePendingChannelsBuffer();
+    if (!pending_channels) {
+      return false;
+    }
+
+    memset(pending_channels, 0, sizeof(PendingChannelConfig) * MAX_GROUP_CHANNELS);
+    int pending_count = loadPendingChannelConfigsFromNvs(pending_channels, MAX_GROUP_CHANNELS);
+    if (pending_count <= 0) {
+      pending_count = buildPendingChannelsFromPersistedSnapshot(pending_channels, MAX_GROUP_CHANNELS);
+    }
+
+    int target_index = -1;
+    for (int i = 0; i < pending_count; i++) {
+      if (strcmp(pending_channels[i].name, channel_name) == 0) {
+        target_index = i;
+        break;
+      }
+    }
+    if (target_index < 0) {
+      return false;
+    }
+
+    for (int i = target_index; i < pending_count - 1; i++) {
+      pending_channels[i] = pending_channels[i + 1];
+    }
+    pending_count--;
+
+    if (!ensurePendingIncludesPublic(pending_channels, &pending_count, MAX_GROUP_CHANNELS)) {
+      return false;
+    }
+
+    if (!savePendingChannelConfigsToNvs(pending_channels, pending_count)) {
+      return false;
+    }
+
+    queueInfo("Queued channel remove (mesh offline)");
+    return true;
   }
 
   if (false) Serial.printf("[PERSIST][CH] remove request name=%s\n", channel_name);

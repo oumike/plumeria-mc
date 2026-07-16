@@ -6,6 +6,8 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <esp_heap_caps.h>
 #include <nvs.h>
 #include <esp_vfs_fat.h>
@@ -15,8 +17,15 @@
 #include <string.h>
 #include <time.h>
 
+#ifndef PLUMERIA_OTA_ENABLED
+#define PLUMERIA_OTA_ENABLED 1
+#endif
+
 #include "web/web_config.h"
+#if PLUMERIA_OTA_ENABLED
 #include "ota/ota_update.h"
+#include "ota/ota_boot_mode.h"
+#endif
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #include <M5Cardputer.h>
@@ -40,10 +49,6 @@
 
 #ifndef PLUMERIA_PAGER_AUDIO_DEBUG
 #define PLUMERIA_PAGER_AUDIO_DEBUG 0
-#endif
-
-#ifndef PLUMERIA_OTA_ENABLED
-#define PLUMERIA_OTA_ENABLED 1
 #endif
 
 #ifndef APP_VERSION
@@ -171,6 +176,8 @@ constexpr uint32_t kDmRetentionPruneMs = 300000;
 constexpr uint32_t kDmRetentionSeconds = 10UL * 24UL * 60UL * 60UL;
 constexpr uint32_t kOtaWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kOtaRebootDelayMs = 900;
+constexpr uint32_t kOtaWorkerStackBytes = 16384;
+constexpr BaseType_t kOtaWorkerCore = 0;
 // NVS blob capacity is limited; persist only a bounded recent DM window.
 constexpr size_t kMaxPersistedDmRows = 28;
 constexpr uint32_t kAdvertPopupAutoCloseMs = 2000;
@@ -361,12 +368,12 @@ const char* kCfgRowLabels[] = {
   "Radio Preset",
   "Web Config",
   "GPS",
+  "OTA Update",
   "Multipaths",
   "Multi-ACK",
   "Mesh Region",
   "Repeater",
   "Notifications",
-  "OTA Update",
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   "Export Config",
   "Import Config",
@@ -378,12 +385,12 @@ constexpr uint8_t kCfgRowNodeName = 0;
 constexpr uint8_t kCfgRowRadioPreset = 1;
 constexpr uint8_t kCfgRowWebConfig = 2;
 constexpr uint8_t kCfgRowGps = 3;
-constexpr uint8_t kCfgRowMultipaths = 4;
-constexpr uint8_t kCfgRowMultiAck = 5;
-constexpr uint8_t kCfgRowMeshRegion = 6;
-constexpr uint8_t kCfgRowRepeater = 7;
-constexpr uint8_t kCfgRowNotifications = 8;
-constexpr uint8_t kCfgRowOtaUpdate = 9;
+constexpr uint8_t kCfgRowOtaUpdate = 4;
+constexpr uint8_t kCfgRowMultipaths = 5;
+constexpr uint8_t kCfgRowMultiAck = 6;
+constexpr uint8_t kCfgRowMeshRegion = 7;
+constexpr uint8_t kCfgRowRepeater = 8;
+constexpr uint8_t kCfgRowNotifications = 9;
 #if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
 constexpr uint8_t kCfgRowExportConfig = 10;
 constexpr uint8_t kCfgRowImportConfig = 11;
@@ -1498,6 +1505,12 @@ bool ensureOtaWifiConnected(char* out_err, size_t out_err_size) {
     return false;
   }
 
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+  // Prefer dynamic WiFi buffers for OTA so internal RAM can be allocated on
+  // demand during TLS startup instead of pre-reserving larger static pools.
+  WiFi.useStaticBuffers(false);
+#endif
+
   const wifi_mode_t mode = WiFi.getMode();
   if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
     WiFi.mode(WIFI_AP_STA);
@@ -1510,6 +1523,43 @@ bool ensureOtaWifiConnected(char* out_err, size_t out_err_size) {
   while (WiFi.status() != WL_CONNECTED) {
     if ((millis() - start) >= kOtaWifiConnectTimeoutMs) {
       setErrText(out_err, out_err_size, "WiFi connect timeout");
+      return false;
+    }
+    delay(100);
+  }
+
+  return true;
+}
+
+bool isLikelyOtaTlsLowMemError(const char* err) {
+  return err && strstr(err, "TLS init failed (low memory)") != nullptr;
+}
+
+bool recycleOtaWifiConnection(char* out_err, size_t out_err_size) {
+  setErrText(out_err, out_err_size, "");
+
+  plumeria::web::WebSettings web_settings{};
+  plumeria::web::loadSettings(&web_settings);
+  if (web_settings.wifi_ssid[0] == '\0') {
+    setErrText(out_err, out_err_size, "WiFi SSID not configured");
+    return false;
+  }
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+  WiFi.useStaticBuffers(false);
+#endif
+
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(160);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(web_settings.wifi_ssid, web_settings.wifi_pass);
+
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if ((millis() - start) >= kOtaWifiConnectTimeoutMs) {
+      setErrText(out_err, out_err_size, "WiFi reconnect timeout");
       return false;
     }
     delay(100);
@@ -2267,6 +2317,8 @@ void StandaloneUi::finishOnboardingAndReboot() {
 
 void StandaloneUi::declineConfirm() {
   const ConfirmKind kind = confirm_kind_;
+  Serial.printf("[OTADBG] declineConfirm kind=%u row=%u\n", static_cast<unsigned>(kind),
+                static_cast<unsigned>(confirm_pending_row_));
   closeConfirmDialog();
   switch (kind) {
     case ConfirmKind::CfgRow:
@@ -7247,7 +7299,7 @@ void StandaloneUi::refreshCfgDialog() {
   lv_label_set_text(cfg_row_labels_[kCfgRowNotifications],
                     web_settings.notifications_enabled ? "Notifications: ON" : "Notifications: OFF");
 #if PLUMERIA_OTA_ENABLED
-  lv_label_set_text(cfg_row_labels_[kCfgRowOtaUpdate], "OTA Update: Install latest release");
+  lv_label_set_text(cfg_row_labels_[kCfgRowOtaUpdate], "OTA Update");
 #else
   lv_label_set_text(cfg_row_labels_[kCfgRowOtaUpdate], "OTA Update: Disabled on this build");
 #endif
@@ -7422,74 +7474,279 @@ bool StandaloneUi::setGpsEnabled(bool enabled) {
 
 void StandaloneUi::performOtaUpdate() {
 #if PLUMERIA_OTA_ENABLED
-  char err[160] = {};
-  if (!ensureOtaWifiConnected(err, sizeof(err))) {
-    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "OTA failed: %s", err[0] ? err : "WiFi unavailable");
+  Serial.printf("[OTADBG] performOtaUpdate start running=%d\n", ota_worker_running_ ? 1 : 0);
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+  if (plumeria::ota::requestBootMode()) {
+    strncpy(cfg_status_text_, "Rebooting into OTA mode...", sizeof(cfg_status_text_) - 1);
     cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-    strncpy(cfg_action_text_, "OTA failed", sizeof(cfg_action_text_) - 1);
+    strncpy(cfg_action_text_, "OTA reboot", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    if (cfg_open_) {
+      refreshCfgDialog();
+    }
+    if (plumeria::web::running()) {
+      Serial.println("[OTADBG] stopping web config before OTA reboot");
+      plumeria::web::end();
+    }
+    Serial.println("[OTADBG] OTA requested via boot mode");
+    Serial.flush();
+    delay(180);
+    ESP.restart();
+    return;
+  }
+  Serial.println("[OTADBG] OTA boot-mode request failed; falling back to worker");
+#endif
+
+  if (ota_worker_running_) {
+    strncpy(cfg_status_text_, "OTA already in progress", sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    strncpy(cfg_action_text_, "OTA busy", sizeof(cfg_action_text_) - 1);
     cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
     return;
   }
+
+  ota_worker_running_ = true;
+  ota_worker_result_ready_ = false;
+  ota_worker_reboot_ = false;
+  ota_worker_action_[0] = '\0';
+  ota_worker_status_[0] = '\0';
 
   strncpy(cfg_status_text_, "Checking latest release...", sizeof(cfg_status_text_) - 1);
   cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
   strncpy(cfg_action_text_, "OTA check", sizeof(cfg_action_text_) - 1);
   cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
   refreshCfgDialog();
-  lv_timer_handler();
 
-  plumeria::ota::preferExternalHeap();
+  ota_restore_web_after_worker_ = false;
+  if (plumeria::web::running()) {
+    Serial.println("[OTADBG] stopping web config before OTA");
+    plumeria::web::end();
+    ota_restore_web_after_worker_ = true;
+  }
 
-  plumeria::ota::OtaCheckResult check{};
-  if (!plumeria::ota::checkLatestRelease(check) || !check.ok) {
-    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "OTA check failed: %s",
-             check.error[0] ? check.error : "unknown error");
+  BaseType_t task_ok = pdFAIL;
+  uint32_t chosen_stack = kOtaWorkerStackBytes;
+  BaseType_t chosen_core = kOtaWorkerCore;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+  static constexpr uint32_t kOtaStackCandidates[] = {
+    6144,
+    7168,
+    8192,
+    9216,
+    10240,
+    12288,
+    14336,
+    kOtaWorkerStackBytes,
+  };
+#else
+  static constexpr uint32_t kOtaStackCandidates[] = {
+      kOtaWorkerStackBytes,
+  };
+#endif
+
+  for (size_t i = 0; i < (sizeof(kOtaStackCandidates) / sizeof(kOtaStackCandidates[0])); i++) {
+    const uint32_t stack = kOtaStackCandidates[i];
+    task_ok = xTaskCreatePinnedToCore(&StandaloneUi::otaWorkerTask,
+                                      "ota_worker",
+                                      stack,
+                                      this,
+                                      1,
+                                      nullptr,
+                                      kOtaWorkerCore);
+    if (task_ok == pdPASS) {
+      chosen_stack = stack;
+      chosen_core = kOtaWorkerCore;
+      break;
+    }
+  }
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+  if (task_ok != pdPASS) {
+    for (size_t i = 0; i < (sizeof(kOtaStackCandidates) / sizeof(kOtaStackCandidates[0])); i++) {
+      const uint32_t stack = kOtaStackCandidates[i];
+      task_ok = xTaskCreatePinnedToCore(&StandaloneUi::otaWorkerTask,
+                                        "ota_worker",
+                                        stack,
+                                        this,
+                                        1,
+                                        nullptr,
+                                        tskNO_AFFINITY);
+      if (task_ok == pdPASS) {
+        chosen_stack = stack;
+        chosen_core = tskNO_AFFINITY;
+        break;
+      }
+    }
+  }
+#endif
+
+  const size_t free_heap_8bit = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const size_t largest_heap_8bit = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  const size_t free_heap_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t largest_heap_internal =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  Serial.printf("[OTADBG] ota worker create=%d stack=%u core=%d free8=%u largest8=%u freeInt=%u largestInt=%u\n",
+                task_ok == pdPASS ? 1 : 0,
+                static_cast<unsigned>(chosen_stack),
+                static_cast<int>(chosen_core),
+                static_cast<unsigned>(free_heap_8bit),
+                static_cast<unsigned>(largest_heap_8bit),
+                static_cast<unsigned>(free_heap_internal),
+                static_cast<unsigned>(largest_heap_internal));
+  if (task_ok != pdPASS) {
+    ota_worker_running_ = false;
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "OTA failed: low mem (%u/%u)",
+             static_cast<unsigned>(largest_heap_internal),
+             static_cast<unsigned>(largest_heap_8bit));
     cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
     strncpy(cfg_action_text_, "OTA failed", sizeof(cfg_action_text_) - 1);
     cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-    return;
+    if (ota_restore_web_after_worker_) {
+      plumeria::web::WebSettings web_settings{};
+      plumeria::web::loadSettings(&web_settings);
+      const bool web_restored = plumeria::web::begin(mesh_adapter_, web_settings);
+      Serial.printf("[OTADBG] web config restore after OTA start failure=%d\n", web_restored ? 1 : 0);
+      ota_restore_web_after_worker_ = false;
+    }
   }
-
-  if (!check.update_available) {
-    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Already up to date (%s)", APP_VERSION);
-    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-    strncpy(cfg_action_text_, "No update", sizeof(cfg_action_text_) - 1);
-    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-    return;
-  }
-
-  snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Installing %s...", check.latest_tag);
-  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-  strncpy(cfg_action_text_, "OTA install", sizeof(cfg_action_text_) - 1);
-  cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-  refreshCfgDialog();
-  lv_timer_handler();
-
-  err[0] = '\0';
-  if (!plumeria::ota::installLatestRelease(check.latest_tag[0] ? check.latest_tag : nullptr,
-                                           err,
-                                           sizeof(err))) {
-    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "OTA failed: %s",
-             err[0] ? err : "install failed");
-    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-    strncpy(cfg_action_text_, "OTA failed", sizeof(cfg_action_text_) - 1);
-    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-    return;
-  }
-
-  snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Installed %s. Rebooting...", check.latest_tag);
-  cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
-  strncpy(cfg_action_text_, "OTA installed", sizeof(cfg_action_text_) - 1);
-  cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
-  refreshCfgDialog();
-  lv_timer_handler();
-  delay(kOtaRebootDelayMs);
-  ESP.restart();
 #else
   strncpy(cfg_status_text_, "OTA disabled on this build", sizeof(cfg_status_text_) - 1);
   cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
   strncpy(cfg_action_text_, "Disabled", sizeof(cfg_action_text_) - 1);
   cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+#endif
+}
+
+void StandaloneUi::otaWorkerTask(void* user_data) {
+#if !PLUMERIA_OTA_ENABLED
+  (void)user_data;
+  vTaskDelete(nullptr);
+  return;
+#else
+  auto* self = static_cast<StandaloneUi*>(user_data);
+  if (!self) {
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  Serial.println("[OTADBG] otaWorkerTask started");
+
+  char err[160] = {};
+  char status[96] = {};
+  char action[48] = {};
+  bool reboot = false;
+
+  if (!ensureOtaWifiConnected(err, sizeof(err))) {
+    snprintf(status, sizeof(status), "OTA failed: %s", err[0] ? err : "WiFi unavailable");
+    strncpy(action, "OTA failed", sizeof(action) - 1);
+    action[sizeof(action) - 1] = '\0';
+  } else {
+    plumeria::ota::preferExternalHeap();
+
+    plumeria::ota::OtaCheckResult check{};
+    bool check_ok = plumeria::ota::checkLatestRelease(check) && check.ok;
+    if (!check_ok && isLikelyOtaTlsLowMemError(check.error)) {
+      Serial.println("[OTADBG] low-mem TLS during check; retrying after WiFi recycle");
+      if (recycleOtaWifiConnection(err, sizeof(err))) {
+        memset(&check, 0, sizeof(check));
+        check_ok = plumeria::ota::checkLatestRelease(check) && check.ok;
+      }
+    }
+
+    if (!check_ok) {
+      snprintf(status, sizeof(status), "OTA check failed: %s",
+               check.error[0] ? check.error : "unknown error");
+      strncpy(action, "OTA failed", sizeof(action) - 1);
+      action[sizeof(action) - 1] = '\0';
+    } else if (!check.update_available) {
+      snprintf(status, sizeof(status), "Already up to date (%s)", APP_VERSION);
+      strncpy(action, "No update", sizeof(action) - 1);
+      action[sizeof(action) - 1] = '\0';
+    } else {
+      err[0] = '\0';
+      bool install_ok = plumeria::ota::installLatestRelease(check.latest_tag[0] ? check.latest_tag : nullptr,
+                                                            err,
+                                                            sizeof(err));
+      if (!install_ok && isLikelyOtaTlsLowMemError(err)) {
+        Serial.println("[OTADBG] low-mem TLS during install; retrying after WiFi recycle");
+        if (recycleOtaWifiConnection(err, sizeof(err))) {
+          err[0] = '\0';
+          install_ok = plumeria::ota::installLatestRelease(check.latest_tag[0] ? check.latest_tag : nullptr,
+                                                           err,
+                                                           sizeof(err));
+        }
+      }
+
+      if (!install_ok) {
+        snprintf(status, sizeof(status), "OTA failed: %s", err[0] ? err : "install failed");
+        strncpy(action, "OTA failed", sizeof(action) - 1);
+        action[sizeof(action) - 1] = '\0';
+      } else {
+        snprintf(status, sizeof(status), "Installed %s. Rebooting...", check.latest_tag);
+        strncpy(action, "OTA installed", sizeof(action) - 1);
+        action[sizeof(action) - 1] = '\0';
+        reboot = true;
+      }
+    }
+  }
+
+  strncpy(self->ota_worker_status_, status, sizeof(self->ota_worker_status_) - 1);
+  self->ota_worker_status_[sizeof(self->ota_worker_status_) - 1] = '\0';
+  strncpy(self->ota_worker_action_, action, sizeof(self->ota_worker_action_) - 1);
+  self->ota_worker_action_[sizeof(self->ota_worker_action_) - 1] = '\0';
+  self->ota_worker_reboot_ = reboot;
+  self->ota_worker_result_ready_ = true;
+  self->ota_worker_running_ = false;
+
+  const UBaseType_t high_water_words = uxTaskGetStackHighWaterMark(nullptr);
+  Serial.printf("[OTADBG] otaWorkerTask done reboot=%d stackHW=%u\n", reboot ? 1 : 0,
+                static_cast<unsigned>(high_water_words));
+
+  vTaskDelete(nullptr);
+#endif
+}
+
+void StandaloneUi::applyOtaWorkerResult(uint32_t now_ms) {
+#if PLUMERIA_OTA_ENABLED
+  if (ota_reboot_at_ms_ != 0 && static_cast<int32_t>(now_ms - ota_reboot_at_ms_) >= 0) {
+    ESP.restart();
+    return;
+  }
+
+  if (!ota_worker_result_ready_) {
+    return;
+  }
+
+  ota_worker_result_ready_ = false;
+
+  if (ota_worker_status_[0] != '\0') {
+    strncpy(cfg_status_text_, ota_worker_status_, sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+  }
+  if (ota_worker_action_[0] != '\0') {
+    strncpy(cfg_action_text_, ota_worker_action_, sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+  }
+
+  if (ota_restore_web_after_worker_ && !ota_worker_reboot_) {
+    plumeria::web::WebSettings web_settings{};
+    plumeria::web::loadSettings(&web_settings);
+    const bool web_restored = plumeria::web::begin(mesh_adapter_, web_settings);
+    Serial.printf("[OTADBG] web config restore after OTA result=%d\n", web_restored ? 1 : 0);
+    ota_restore_web_after_worker_ = false;
+  }
+
+  if (cfg_open_) {
+    refreshCfgDialog();
+  }
+
+  if (ota_worker_reboot_) {
+    ota_worker_reboot_ = false;
+    ota_reboot_at_ms_ = now_ms + kOtaRebootDelayMs;
+  }
+#else
+  (void)now_ms;
 #endif
 }
 
@@ -7929,6 +8186,7 @@ bool StandaloneUi::cfgActionNeedsConfirm(uint8_t row) const {
   }
   if (row == kCfgRowOtaUpdate) {
 #if PLUMERIA_OTA_ENABLED
+    // OTA is a destructive operation; keep explicit confirmation.
     return true;
 #else
     return false;
@@ -8013,12 +8271,25 @@ void StandaloneUi::openCfgConfirmDialog(uint8_t row) {
   char body[64];
   snprintf(body, sizeof(body), "Action: %s", cfgConfirmActionText(row));
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-  const uint32_t guard = 1200;
+  uint32_t guard = 1200;
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-  const uint32_t guard = 550;
+  uint32_t guard = 550;
 #else
-  const uint32_t guard = 250;
+  uint32_t guard = 250;
 #endif
+  if (row == kCfgRowOtaUpdate) {
+    // Keep a short guard window so the same key/tap that opened the dialog
+    // cannot auto-trigger an immediate No/Yes decision.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    guard = 350;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    guard = 300;
+#else
+    guard = 250;
+#endif
+  }
+  Serial.printf("[OTADBG] openCfgConfirm row=%u guard=%lu\n", static_cast<unsigned>(row),
+                static_cast<unsigned long>(guard));
   openConfirmDialog(ConfirmKind::CfgRow, "Confirm?", body, guard);
 }
 
@@ -8041,6 +8312,7 @@ void StandaloneUi::closeConfirmDialog() {
 }
 
 void StandaloneUi::performCfgConfirmedAction(uint8_t row) {
+  Serial.printf("[OTADBG] performCfgConfirmedAction row=%u\n", static_cast<unsigned>(row));
   if (row == kCfgRowRepeater) {
     char err[96] = {};
     if (plumeria::web::setRepeaterMode(true, err, sizeof(err))) {
@@ -8058,6 +8330,7 @@ void StandaloneUi::performCfgConfirmedAction(uint8_t row) {
   }
 
   if (row == kCfgRowOtaUpdate) {
+    Serial.println("[OTADBG] dispatch performOtaUpdate");
     performOtaUpdate();
     return;
   }
@@ -8112,6 +8385,8 @@ void StandaloneUi::acceptConfirmDialog() {
   }
   const ConfirmKind kind = confirm_kind_;
   const uint8_t row = confirm_pending_row_;
+  Serial.printf("[OTADBG] acceptConfirm kind=%u row=%u\n", static_cast<unsigned>(kind),
+                static_cast<unsigned>(row));
   closeConfirmDialog();
   switch (kind) {
     case ConfirmKind::CfgRow:
@@ -10625,8 +10900,11 @@ void StandaloneUi::handleKey(uint32_t key) {
       // Cardputer action key can auto-repeat; require explicit Y/N.
       return;
 #else
-      // Enter follows focus: default is No, so accidental Enter declines.
-      if (focused == confirm_yes_btn_) {
+      // For OTA on keypad-driven devices, Enter should confirm without
+      // requiring an extra focus move to the Yes button.
+      if (confirm_kind_ == ConfirmKind::CfgRow && confirm_pending_row_ == kCfgRowOtaUpdate) {
+        acceptConfirmDialog();
+      } else if (focused == confirm_yes_btn_) {
         acceptConfirmDialog();
       } else {
         declineConfirm();
@@ -11449,15 +11727,29 @@ void StandaloneUi::handleClick(lv_obj_t* target) {
     if (static_cast<int32_t>(millis() - confirm_guard_until_ms_) < 0) {
       return;
     }
+    const bool clicked_yes =
+        (target == confirm_yes_btn_) || (target == confirm_yes_label_) || hasAncestor(target, confirm_yes_btn_);
+    const bool clicked_no = (target == confirm_no_btn_) || (target == confirm_no_label_) ||
+                            hasAncestor(target, confirm_no_btn_) || target == confirm_backdrop_;
+
     if (confirm_swallow_first_click_) {
       confirm_swallow_first_click_ = false;
-      return;
+      lv_indev_t* indev = lv_indev_get_act();
+      const bool pointer_click = indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER;
+      if (!pointer_click) {
+        // Keyboard/encoder/button can dispatch a synthetic click from the
+        // same key press that opened the modal; always swallow that once.
+        return;
+      }
+      // If the first post-guard tap is an explicit Yes/No tap, honor it.
+      if (!clicked_yes && !clicked_no) {
+        return;
+      }
     }
-    if ((target == confirm_yes_btn_) || (target == confirm_yes_label_) ||
-        hasAncestor(target, confirm_yes_btn_)) {
+
+    if (clicked_yes) {
       acceptConfirmDialog();
-    } else if ((target == confirm_no_btn_) || (target == confirm_no_label_) ||
-               hasAncestor(target, confirm_no_btn_) || target == confirm_backdrop_) {
+    } else if (clicked_no) {
       declineConfirm();
     } else if (confirm_dialog_ && hasAncestor(target, confirm_dialog_)) {
       // Clicks inside confirm dialog body should not leak to underlying handlers.
@@ -12130,6 +12422,8 @@ void StandaloneUi::loop() {
   }
 
   const uint32_t now = millis();
+  applyOtaWorkerResult(now);
+
   if (pending_contacts_open_ && kUseOnscreenKeyboard) {
     CTS_TRACE("openContactsDialog loop_open");
     onOpenContactsDialogAsync(this);

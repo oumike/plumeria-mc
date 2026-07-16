@@ -248,7 +248,15 @@ constexpr uint32_t kWheelDirectionHoldMs = 0;
 constexpr uint32_t kWheelReleaseGuardMs = 0;
 constexpr bool kWheelInvertDirection = false;
 #endif
+#if defined(DEVICE_TLORA_PAGER_TFT)
+// Keep extra contiguous internal heap available for OTA TLS handshake.
+constexpr uint16_t kLvglBufferLines = 6;
+#elif defined(DEVICE_TDECK)
+// T-Deck OTA also benefits from a smaller draw buffer to preserve internal RAM.
+constexpr uint16_t kLvglBufferLines = 6;
+#else
 constexpr uint16_t kLvglBufferLines = 20;
+#endif
 constexpr uint16_t kDefaultScreenTimeoutSeconds = 30;
 constexpr uint16_t kMaxScreenTimeoutSeconds = 600;
 constexpr uint32_t kManualInputLockMs = 1000;
@@ -1560,11 +1568,129 @@ void read_touch(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 }
 
 bool g_started = false;
+bool g_boot_display_ready = false;
 
 }  // namespace
 
 namespace plumeria {
 namespace hal {
+
+bool DeviceLvgl::beginBootDisplay() {
+  if (g_started || g_boot_display_ready) {
+    return true;
+  }
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+  M5Cardputer.begin(true);
+#else
+  g_lcd.init();
+#endif
+
+  activeDisplay().setRotation(kDisplayRotation);
+  activeDisplay().setBrightness(kDisplayBrightness);
+  setPagerBacklightState(true);
+  g_screen_on = true;
+  g_last_user_activity_ms = millis();
+  g_screen_timeout_seconds = normalizeScreenTimeoutSeconds(kDefaultScreenTimeoutSeconds);
+  activeDisplay().fillScreen(TFT_BLACK);
+
+  g_boot_display_ready = true;
+  return true;
+}
+
+void DeviceLvgl::drawBootStatus(const char* line1, const char* line2) {
+  if (!g_started && !g_boot_display_ready) {
+    return;
+  }
+
+  activeDisplay().fillScreen(TFT_BLACK);
+  activeDisplay().setTextColor(TFT_WHITE, TFT_BLACK);
+  activeDisplay().setTextSize(1);
+
+  int y = 20;
+  if (line1 && line1[0]) {
+    activeDisplay().drawString(line1, 8, y);
+    y += 20;
+  }
+  if (line2 && line2[0]) {
+    activeDisplay().drawString(line2, 8, y);
+  }
+}
+
+void DeviceLvgl::drawBootProgress(const char* title,
+                                  const char* detail,
+                                  size_t written_bytes,
+                                  size_t total_bytes,
+                                  bool stalled) {
+  if (!g_started && !g_boot_display_ready) {
+    return;
+  }
+
+  activeDisplay().fillScreen(TFT_BLACK);
+  activeDisplay().setTextSize(1);
+  activeDisplay().setTextColor(TFT_WHITE, TFT_BLACK);
+
+  if (title && title[0]) {
+    activeDisplay().drawString(title, 8, 14);
+  }
+
+  const int bar_x = 8;
+  const int bar_y = 52;
+  int bar_w = static_cast<int>(activeDisplay().width()) - 16;
+  if (bar_w < 120) {
+    bar_w = 120;
+  }
+  const int bar_h = 18;
+  activeDisplay().drawRect(bar_x, bar_y, bar_w, bar_h, TFT_WHITE);
+
+  int fill_w = 0;
+  int pct = 0;
+  if (total_bytes > 0) {
+    pct = static_cast<int>((written_bytes * 100U) / total_bytes);
+    if (pct < 0) {
+      pct = 0;
+    }
+    if (pct > 100) {
+      pct = 100;
+    }
+    fill_w = ((bar_w - 2) * pct) / 100;
+  }
+
+  if (fill_w > 0) {
+    activeDisplay().fillRect(bar_x + 1, bar_y + 1, fill_w, bar_h - 2,
+                             stalled ? TFT_ORANGE : TFT_GREEN);
+  }
+
+  char pct_buf[24] = {};
+  if (total_bytes > 0) {
+    snprintf(pct_buf, sizeof(pct_buf), "%d%%", pct);
+  } else {
+    snprintf(pct_buf, sizeof(pct_buf), "working...");
+  }
+  activeDisplay().setTextColor(stalled ? TFT_ORANGE : TFT_CYAN, TFT_BLACK);
+  activeDisplay().drawString(pct_buf, 8, 78);
+
+  char bytes_buf[64] = {};
+  if (total_bytes > 0) {
+    snprintf(bytes_buf,
+             sizeof(bytes_buf),
+             "%u / %u KB",
+             static_cast<unsigned>(written_bytes / 1024U),
+             static_cast<unsigned>(total_bytes / 1024U));
+  } else {
+    snprintf(bytes_buf,
+             sizeof(bytes_buf),
+             "%u KB downloaded",
+             static_cast<unsigned>(written_bytes / 1024U));
+  }
+  activeDisplay().setTextColor(TFT_WHITE, TFT_BLACK);
+  activeDisplay().drawString(bytes_buf, 8, 102);
+
+  if (detail && detail[0]) {
+    activeDisplay().setTextColor(stalled ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
+    activeDisplay().drawString(detail, 8, 126);
+  }
+}
 
 bool DeviceLvgl::begin() {
   if (g_started) {
@@ -1592,11 +1718,13 @@ bool DeviceLvgl::begin() {
   Serial.printf("[HAL] display pins sck=%d miso=%d mosi=%d cs=%d dc=%d rst=%d bl=%d\n",
                 kTftSck, kTftMiso, kTftMosi, kTftCs, kTftDc, kTftRst, kTftBacklight);
 
+  if (!g_boot_display_ready) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-  M5Cardputer.begin(true);
+    M5Cardputer.begin(true);
 #else
-  g_lcd.init();
+    g_lcd.init();
 #endif
+  }
   Serial.println("[HAL] display init done");
 
   activeDisplay().setRotation(kDisplayRotation);
@@ -1663,6 +1791,7 @@ bool DeviceLvgl::begin() {
 #endif
 
   g_started = true;
+  g_boot_display_ready = true;
   Serial.printf("[HAL] display begin: ready (%ldx%ld)\n", static_cast<long>(panel_w),
                 static_cast<long>(panel_h));
   return true;

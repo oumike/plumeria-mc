@@ -66,6 +66,8 @@ class MeshAdapter {
  public:
   bool begin(const hal::RadioConfig& radio_config);
   void loop();
+  bool isReady() const;
+  void resetRuntime();
 
   bool sendDirectMessage(const char* destination, const char* text);
   bool sendChannelMessage(const char* channel_name, const char* text);

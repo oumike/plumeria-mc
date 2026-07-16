@@ -1,17 +1,6 @@
 name: Build
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-      - dev
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
-      - dev
   release:
     types: [published]
 
@@ -51,8 +40,6 @@ jobs:
             tdeck
             cardputer-cap
             tlora-pager-tft
-            heltec-v4-expansion
-            heltec-v4-expansion-vertical
           )
           BUILT=()
 
@@ -97,14 +84,6 @@ jobs:
                 ;;
               tlora-pager-tft)
                 suffix=tlora-pager-tft
-                flash_size=16MB
-                ;;
-              heltec-v4-expansion)
-                suffix=heltec
-                flash_size=16MB
-                ;;
-              heltec-v4-expansion-vertical)
-                suffix=heltec-vertical
                 flash_size=16MB
                 ;;
               *)

@@ -54,9 +54,9 @@ class StandaloneUi {
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-  static constexpr size_t kMaxStoredChatRows = 108;
+  static constexpr size_t kMaxStoredChatRows = 88;
 #elif defined(DEVICE_TDECK)
-  static constexpr size_t kMaxStoredChatRows = 116;
+  static constexpr size_t kMaxStoredChatRows = 64;
 #else
   static constexpr size_t kMaxStoredChatRows = 120;
 #endif
@@ -167,6 +167,7 @@ class StandaloneUi {
   void closeAdvertPopup();
   bool setGpsEnabled(bool enabled);
   void performOtaUpdate();
+  void applyOtaWorkerResult(uint32_t now_ms);
   bool exportConfigToSd();
   bool importConfigFromSd();
   bool deleteConfigFromSd();
@@ -213,6 +214,7 @@ class StandaloneUi {
   static void onContactsPostOpenAsync(void* user_data);
   static void onOpenComposeDialogAsync(void* user_data);
   static void onComposePostOpenAsync(void* user_data);
+  static void otaWorkerTask(void* user_data);
   static void onAdminPwEvent(lv_event_t* e);
   static void onAdminScreenEvent(lv_event_t* e);
   static void onAdminCmdEvent(lv_event_t* e);
@@ -530,6 +532,13 @@ class StandaloneUi {
   char cfg_action_text_[48]{};
   char cfg_status_text_[96]{};
   char contacts_status_text_[96]{};
+  bool ota_worker_running_ = false;
+  bool ota_worker_result_ready_ = false;
+  bool ota_worker_reboot_ = false;
+  bool ota_restore_web_after_worker_ = false;
+  uint32_t ota_reboot_at_ms_ = 0;
+  char ota_worker_action_[48]{};
+  char ota_worker_status_[96]{};
 
   FocusZone focus_zone_ = FocusZone::Selector;
   uint8_t selected_channel_ = 0;

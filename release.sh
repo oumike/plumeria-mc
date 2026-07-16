@@ -5,14 +5,10 @@ RELEASE_ENVS=(
     tdeck
     cardputer-cap
     tlora-pager-tft
-    heltec-v4-expansion
-    heltec-v4-expansion-vertical
 )
 
 env_out_name() {
     case "$1" in
-        heltec-v4-expansion)          echo "heltec" ;;
-        heltec-v4-expansion-vertical) echo "heltec-vertical" ;;
         *)                            echo "$1" ;;
     esac
 }

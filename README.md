@@ -4,22 +4,20 @@
 
 Empty multi-target ESP32 firmware scaffold based on the same release/build flow used in camillia-mt.
 
-Current default target: Cardputer + Cap (`cardputer-cap`), with multi-hardware support across listed environments.
+Current default target: Cardputer + Cap LoRa/GPS (`cardputer-cap`), with multi-hardware support across listed environments.
 
 This firmware is currently **standalone-only** (no companion transport mode).
 
 ## Targets
 
-- `cardputer-cap` (active/default)
+- `cardputer-cap`
 - `tlora-pager-tft`
 - `tdeck` (board + radio + display + basic trackball input wired)
-- `heltec-v4-expansion` (temporarily disabled)
-- `heltec-v4-expansion-vertical` (temporarily disabled)
 
 ## Quick Start
 
 1. Install PlatformIO CLI.
-2. Build default target:
+2. Build default target (Cardputer + Cap LoRa/GPS):
 
 ```bash
 pio run
@@ -62,7 +60,7 @@ Mesh adapter persistence:
 
 ## CI/CD
 
-GitHub Actions workflow at `.github/workflows/build.yml` runs on pushes/PRs to `main` and `dev`, supports manual runs (`workflow_dispatch`), and publishes release artifacts on `v*` tag pushes.
+GitHub Actions workflow at `.github/workflows/build.yml` runs only when a GitHub release is published.
 
 ## Use of AI
 

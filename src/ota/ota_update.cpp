@@ -20,9 +20,9 @@ namespace {
 
 constexpr uint32_t kReleaseCheckTimeoutMs = 12000;
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
-constexpr int kTlsRxBufBytes = 512;
-constexpr int kTlsTxBufBytes = 512;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+constexpr int kTlsRxBufBytes = 256;
+constexpr int kTlsTxBufBytes = 256;
 #else
 constexpr int kTlsRxBufBytes = 1024;
 constexpr int kTlsTxBufBytes = 512;
@@ -65,6 +65,25 @@ typename std::enable_if<!HasSetBufferSizes<T>::value, void>::type applyTlsBuffer
 void configureTlsClient(WiFiClientSecure& client) {
   client.setInsecure();
   applyTlsBufferTuning(client);
+}
+
+bool isLikelyTlsInitFailure(const String& err) {
+  // Arduino-ESP32 often reports TLS handshake allocation failures as
+  // "Network error (-1)" at HTTP layer.
+  return err.indexOf("(-1)") >= 0;
+}
+
+void buildTlsLowMemError(String& out) {
+  char msg[160] = {};
+  const uint32_t free_int = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  const uint32_t largest_int =
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  snprintf(msg,
+           sizeof(msg),
+           "TLS init failed (low memory): int_free=%lu largest=%lu",
+           static_cast<unsigned long>(free_int),
+           static_cast<unsigned long>(largest_int));
+  out = msg;
 }
 
 void clearCheckResult(OtaCheckResult& out) {
@@ -396,7 +415,22 @@ bool fetchLatestReleaseTag(String& tag_out, String& err_out) {
     return false;
   }
 
+#if defined(DEVICE_TDECK)
+  // T-Deck has tighter OTA TLS memory margins; keep check path minimal.
+  String version_err;
+  if (fetchLatestTagFromVersionFile(tag_out, version_err)) {
+    return true;
+  }
+  if (isLikelyTlsInitFailure(version_err)) {
+    buildTlsLowMemError(err_out);
+    return false;
+  }
+  err_out = version_err.length() ? version_err : String("VERSION check failed");
+  return false;
+#else
   String api_err;
+  String page_err;
+  String version_err;
   String api_body;
   if (httpGetString(kLatestReleaseApiUrl,
                     api_body,
@@ -409,16 +443,25 @@ bool fetchLatestReleaseTag(String& tag_out, String& err_out) {
       return true;
     }
     api_err = "Release API tag not found";
+  } else if (isLikelyTlsInitFailure(api_err)) {
+    buildTlsLowMemError(err_out);
+    return false;
   }
 
-  String page_err;
   if (fetchLatestTagFromReleasePage(tag_out, page_err)) {
     return true;
   }
+  if (isLikelyTlsInitFailure(page_err)) {
+    buildTlsLowMemError(err_out);
+    return false;
+  }
 
-  String version_err;
   if (fetchLatestTagFromVersionFile(tag_out, version_err)) {
     return true;
+  }
+  if (isLikelyTlsInitFailure(version_err)) {
+    buildTlsLowMemError(err_out);
+    return false;
   }
 
   if (api_err.length() && page_err.length() && version_err.length()) {
@@ -432,6 +475,7 @@ bool fetchLatestReleaseTag(String& tag_out, String& err_out) {
     err_out = version_err;
   }
   return false;
+#endif
 }
 
 void buildAssetUrl(const char* tag, char* out_url, size_t out_len) {
@@ -548,6 +592,12 @@ bool installLatestRelease(const char* tag,
 
   const int code = http.GET();
   if (code <= 0) {
+    if (code == -1) {
+      String tls_err;
+      buildTlsLowMemError(tls_err);
+      http.end();
+      return setErr(err_out, err_len, tls_err.c_str());
+    }
     http.end();
     return setErr(err_out, err_len, "OTA download network error");
   }
@@ -570,7 +620,7 @@ bool installLatestRelease(const char* tag,
 
   WiFiClient& stream = http.getStream();
 
-  constexpr size_t kChunkSize = 1024;
+  constexpr size_t kChunkSize = 512;
   constexpr uint32_t kDownloadStallTimeoutMs = 15000;
   uint8_t chunk[kChunkSize];
   size_t written = 0;

@@ -14,22 +14,16 @@ fi
 # 1) tdeck
 # 2) cardputer
 # 3) pager
-# 4) heltec
-# 5) heltec-vertical
 TARGET_LABELS=(
   "tdeck"
   "cardputer"
   "pager"
-  "heltec"
-  "heltec-vertical"
 )
 
 TARGET_ENVS=(
   "tdeck"
   "cardputer-cap"
   "tlora-pager-tft"
-  "heltec-v4-expansion"
-  "heltec-v4-expansion-vertical"
 )
 
 has_env() {

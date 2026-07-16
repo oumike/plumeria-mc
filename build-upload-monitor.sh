@@ -9,8 +9,6 @@ SELECTED_ENV_NAME="cardputer-cap"
 TDECK_ENV_NAME="tdeck"
 CARDPUTER_ENV_NAME="cardputer-cap"
 TLORA_PAGER_ENV_NAME="tlora-pager-tft"
-HELTEC_ENV_NAME="heltec-v4-expansion"
-HELTEC_VERTICAL_ENV_NAME="heltec-v4-expansion-vertical"
 ENV_SELECTED_EXPLICITLY=false
 SHOULD_ERASE_FIRST=false
 SHOULD_FULLCLEAN=false
@@ -54,14 +52,6 @@ prompt_for_device() {
 		options+=("$TLORA_PAGER_ENV_NAME")
 		labels+=("LilyGo T-Lora Pager TFT")
 	fi
-	if has_env "$HELTEC_ENV_NAME"; then
-		options+=("$HELTEC_ENV_NAME")
-		labels+=("Heltec V4 Expansion")
-	fi
-	if has_env "$HELTEC_VERTICAL_ENV_NAME"; then
-		options+=("$HELTEC_VERTICAL_ENV_NAME")
-		labels+=("Heltec V4 Expansion (Vertical UI)")
-	fi
 	if [ "${#options[@]}" -eq 0 ]; then
 		echo "No supported device environments found in platformio.ini"
 		exit 1
@@ -90,12 +80,10 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E] [--fullclean|-F]"
+	echo "Usage: $0 [--tdeck|-t] [--cardputer|-C] [--pager|-P] [--erase|-E] [--fullclean|-F]"
 	echo "  --tdeck, -t  Use T-Deck environment ($TDECK_ENV_NAME)"
 	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME)"
 	echo "  --pager, -P   Use T-Lora Pager TFT environment ($TLORA_PAGER_ENV_NAME)"
-	echo "  --heltec, -H  Use Heltec V4 expansion environment ($HELTEC_ENV_NAME)"
-	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec environment ($HELTEC_VERTICAL_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
 	echo "  --fullclean, -F  Run PlatformIO fullclean before upload"
@@ -142,12 +130,6 @@ for arg in "$@"; do
 			;;
 		--pager|-P)
 			select_env_or_exit "$TLORA_PAGER_ENV_NAME" "Environment '$TLORA_PAGER_ENV_NAME' not found in platformio.ini"
-			;;
-		--heltec|-H)
-			select_env_or_exit "$HELTEC_ENV_NAME" "Environment '$HELTEC_ENV_NAME' not found in platformio.ini"
-			;;
-		--heltec-vertical|--vertical|-V)
-			select_env_or_exit "$HELTEC_VERTICAL_ENV_NAME" "Environment '$HELTEC_VERTICAL_ENV_NAME' not found in platformio.ini"
 			;;
 		--help|-h)
 			show_usage
