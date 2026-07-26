@@ -12,10 +12,6 @@
 #include <freertos/task.h>
 #include <lvgl.h>
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-#include <chsc6x.h>
-#include <lgfx/v1/Touch.hpp>
-#endif
 
 namespace {
 
@@ -152,50 +148,6 @@ constexpr int kBacklightPwmFreq = 256;
 constexpr bool kUsePwmBacklight = true;
 constexpr uint32_t kTftWriteHz = 40000000;
 constexpr uint32_t kTftReadHz = 1000000;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
-// Heltec V4 TFT expansion wiring (camillia-mt known-good profile).
-constexpr int kTftSpiHost = SPI3_HOST;
-constexpr bool kTftSpi3Wire = true;
-constexpr int kTftSck = 17;
-constexpr int kTftMiso = -1;
-constexpr int kTftMosi = 33;
-constexpr int kTftCs = 15;
-constexpr int kTftDc = 16;
-constexpr int kTftRst = 18;
-constexpr int kTftBacklight = 21;
-constexpr bool kBacklightInvert = false;
-
-constexpr int kPanelWidth = 240;
-constexpr int kPanelHeight = 320;
-constexpr int kPanelOffsetX = 0;
-constexpr int kPanelOffsetY = 0;
-
-constexpr int kScrollWheelUpPin = -1;
-constexpr int kScrollWheelDownPin = -1;
-constexpr int kScrollWheelPressPin = -1;
-constexpr bool kHasPhysicalWheel = false;
-constexpr uint16_t kLvglMaxHorRes = 320;
-constexpr uint16_t kLvglFallbackHorRes = 320;
-constexpr uint16_t kLvglFallbackVerRes = 240;
-#if defined(DEVICE_UI_VERTICAL)
-constexpr int kDisplayRotation = 0;
-#else
-constexpr int kDisplayRotation = 3;
-#endif
-constexpr int kDisplayBrightness = 220;
-constexpr int kBacklightPwmChannel = 7;
-constexpr int kBacklightPwmFreq = 44100;
-constexpr bool kUsePwmBacklight = true;
-constexpr uint32_t kTftWriteHz = 40000000;
-constexpr uint32_t kTftReadHz = 4000000;
-
-constexpr int kTouchSda = 47;
-constexpr int kTouchScl = 48;
-constexpr int kTouchInt = -1;
-constexpr int kTouchRst = 44;
-constexpr int kTouchI2cPort = 1;
-constexpr int kTouchAddr = 0x2E;
-constexpr bool kEnableTouchInput = true;
 #else
 // Generic placeholder profile for non-target boards.
 constexpr int kTftSpiHost = SPI2_HOST;
@@ -264,83 +216,11 @@ constexpr uint32_t kManualInputLockMs = 1000;
 constexpr uint32_t kTdeckTrackballHoldOffMs = 2000;
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-class Panel_HeltecV4Tft : public lgfx::Panel_ST7789 {
- protected:
-  const uint8_t* getInitCommands(uint8_t listno) const override {
-    static uint8_t list[] = {0x26, 1, 0x01, 0xFF, 0xFF};
-    if (listno == 1) {
-      return list;
-    }
-    return lgfx::Panel_ST7789::getInitCommands(listno);
-  }
-};
-
-class Touch_Heltec_CHSC6X : public lgfx::ITouch {
- public:
-  Touch_Heltec_CHSC6X() {
-    _cfg.i2c_addr = kTouchAddr;
-    _cfg.x_min = 0;
-    _cfg.x_max = kPanelWidth - 1;
-    _cfg.y_min = 0;
-    _cfg.y_max = kPanelHeight - 1;
-  }
-
-  bool init(void) override {
-    if (touch_ == nullptr) {
-      if (kTouchI2cPort == 1) {
-        touch_ = new chsc6x(&Wire1, kTouchSda, kTouchScl, kTouchInt, kTouchRst);
-      } else {
-        touch_ = new chsc6x(&Wire, kTouchSda, kTouchScl, kTouchInt, kTouchRst);
-      }
-    }
-    touch_->chsc6x_init();
-    return true;
-  }
-
-  uint_fast8_t getTouchRaw(lgfx::touch_point_t* tp, uint_fast8_t /*count*/) override {
-    uint16_t raw_x = 0;
-    uint16_t raw_y = 0;
-    if (touch_ && touch_->chsc6x_read_touch_info(&raw_x, &raw_y) == 0) {
-      int16_t x = static_cast<int16_t>(raw_x);
-      int16_t y = static_cast<int16_t>(raw_y);
-
-      // Some CHSC6X firmware reports swapped axes; normalize to panel-native coords.
-      if (x >= kPanelWidth || y >= kPanelHeight) {
-        x = static_cast<int16_t>(raw_y);
-        y = static_cast<int16_t>(raw_x);
-      }
-
-      if (x < 0) x = 0;
-      if (y < 0) y = 0;
-      if (x >= kPanelWidth) x = kPanelWidth - 1;
-      if (y >= kPanelHeight) y = kPanelHeight - 1;
-
-      tp[0].x = x;
-      tp[0].y = y;
-      tp[0].size = 1;
-      tp[0].id = 1;
-      return 1;
-    }
-
-    tp[0].size = 0;
-    return 0;
-  }
-
-  void wakeup(void) override {}
-  void sleep(void) override {}
-
- private:
-  chsc6x* touch_ = nullptr;
-};
-#endif
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 // Cardputer uses M5Cardputer.Display directly; no local panel alias is needed here.
 #elif defined(DEVICE_TDECK)
 using DisplayPanel = lgfx::Panel_ST7789;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
-using DisplayPanel = Panel_HeltecV4Tft;
 #else
 using DisplayPanel = lgfx::Panel_ST7796;
 #endif
@@ -389,7 +269,7 @@ class LGFX_DeviceDisplay : public lgfx::LGFX_Device {
       panel_.setLight(&light_);
     }
 
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_TDECK)
     if (kEnableTouchInput) {
       auto cfg = touch_.config();
       cfg.x_min = 0;
@@ -419,8 +299,6 @@ class LGFX_DeviceDisplay : public lgfx::LGFX_Device {
   lgfx::Light_PWM light_;
 #if defined(DEVICE_TDECK)
   lgfx::Touch_GT911 touch_;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
-  Touch_Heltec_CHSC6X touch_;
 #endif
 };
 
@@ -1781,7 +1659,7 @@ bool DeviceLvgl::begin() {
   lv_indev_drv_register(&g_indev_drv);
   Serial.println("[HAL] LVGL input registered");
 
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_TDECK)
   if (kEnableTouchInput) {
     lv_indev_drv_init(&g_touch_indev_drv);
     g_touch_indev_drv.type = LV_INDEV_TYPE_POINTER;

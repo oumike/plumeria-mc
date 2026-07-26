@@ -47,9 +47,7 @@ constexpr bool kPagerBootDiag = false;
 
 constexpr bool kOtaBootEnableVisuals = true;
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-constexpr const char* kBuildTargetName = "heltec-v4-expansion";
-#elif defined(DEVICE_TDECK)
+#if   defined(DEVICE_TDECK)
 constexpr const char* kBuildTargetName = "tdeck";
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 constexpr const char* kBuildTargetName = "tlora-pager-tft";
@@ -86,163 +84,6 @@ void pagerDiagLog(const char* fmt, ...) {
   va_end(args);
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-struct MeshBeginTaskCtx {
-  plumeria::mesh::MeshAdapter* adapter;
-  plumeria::hal::RadioConfig radio_cfg;
-  volatile bool finished;
-  bool result;
-};
-
-struct MeshBeginRetryState {
-  MeshBeginTaskCtx ctx;
-  TaskHandle_t task_handle;
-  uint32_t started_ms;
-  bool active;
-};
-
-MeshBeginRetryState g_mesh_retry_state{};
-
-void meshBeginTask(void* arg) {
-  auto* ctx = static_cast<MeshBeginTaskCtx*>(arg);
-  if (!ctx || !ctx->adapter) {
-    vTaskDelete(nullptr);
-    return;
-  }
-
-  ctx->result = ctx->adapter->begin(ctx->radio_cfg);
-  ctx->finished = true;
-  vTaskDelete(nullptr);
-}
-
-bool startMeshBeginTask(MeshBeginRetryState* state,
-                       plumeria::mesh::MeshAdapter* adapter,
-                       const plumeria::hal::RadioConfig& radio_cfg) {
-  if (!state || !adapter || state->active) {
-    return false;
-  }
-
-  memset(state, 0, sizeof(*state));
-  state->ctx.adapter = adapter;
-  state->ctx.radio_cfg = radio_cfg;
-
-  const BaseType_t created = xTaskCreatePinnedToCore(meshBeginTask,
-                                                      "mesh_begin",
-                                                      12288,
-                                                      &state->ctx,
-                                                      1,
-                                                      &state->task_handle,
-                                                      tskNO_AFFINITY);
-  if (created != pdPASS) {
-    state->task_handle = nullptr;
-    return false;
-  }
-
-  state->started_ms = millis();
-  state->active = true;
-  return true;
-}
-
-bool beginMeshWithTimeout(plumeria::mesh::MeshAdapter* adapter,
-                          const plumeria::hal::RadioConfig& radio_cfg,
-                          uint32_t timeout_ms,
-                          bool* out_timed_out) {
-  if (!adapter) {
-    if (out_timed_out) {
-      *out_timed_out = false;
-    }
-    return false;
-  }
-
-  MeshBeginRetryState state{};
-  if (!startMeshBeginTask(&state, adapter, radio_cfg)) {
-    if (out_timed_out) {
-      *out_timed_out = false;
-    }
-    Serial.println("[BOOT] mesh task create failed");
-    adapter->resetRuntime();
-    return false;
-  }
-
-  const uint32_t start_ms = millis();
-  while (!state.ctx.finished && (millis() - start_ms) < timeout_ms) {
-    delay(10);
-  }
-
-  if (state.ctx.finished) {
-    if (out_timed_out) {
-      *out_timed_out = false;
-    }
-    state.active = false;
-    state.task_handle = nullptr;
-    return state.ctx.result;
-  }
-
-  if (out_timed_out) {
-    *out_timed_out = true;
-  }
-  Serial.printf("[BOOT] mesh begin timeout after %lu ms\n", static_cast<unsigned long>(timeout_ms));
-  if (state.task_handle) {
-    vTaskDelete(state.task_handle);
-    state.task_handle = nullptr;
-  }
-  state.active = false;
-  adapter->resetRuntime();
-  return false;
-}
-
-void serviceMeshRetry() {
-  if (g_mesh.isReady()) {
-    g_mesh_ready = true;
-    return;
-  }
-
-  const uint32_t now = millis();
-  if (g_mesh_retry_state.active) {
-    if (g_mesh_retry_state.ctx.finished) {
-      const bool retry_ok = g_mesh_retry_state.ctx.result;
-      g_mesh_retry_state.active = false;
-      g_mesh_retry_state.task_handle = nullptr;
-
-      Serial.printf("[BOOT] mesh retry done=%d timeout=0\n", retry_ok ? 1 : 0);
-      g_mesh_ready = retry_ok;
-      if (retry_ok) {
-        applyWebSettingsToMeshRuntime();
-        publishMeshChannelsToUi();
-        g_ui.setMeshReady(true);
-      }
-      g_next_mesh_retry_ms = now + kMeshRetryIntervalMs;
-      return;
-    }
-
-    if ((now - g_mesh_retry_state.started_ms) >= kMeshBeginTimeoutMs) {
-      Serial.printf("[BOOT] mesh begin timeout after %lu ms\n", static_cast<unsigned long>(kMeshBeginTimeoutMs));
-      if (g_mesh_retry_state.task_handle) {
-        vTaskDelete(g_mesh_retry_state.task_handle);
-        g_mesh_retry_state.task_handle = nullptr;
-      }
-      g_mesh_retry_state.active = false;
-      g_mesh.resetRuntime();
-      g_mesh_ready = false;
-      Serial.println("[BOOT] mesh retry done=0 timeout=1");
-      g_next_mesh_retry_ms = now + kMeshRetryIntervalMs;
-    }
-    return;
-  }
-
-  if (static_cast<int32_t>(now - g_next_mesh_retry_ms) < 0) {
-    return;
-  }
-
-  Serial.println("[BOOT] mesh retry start");
-  if (!startMeshBeginTask(&g_mesh_retry_state, &g_mesh, g_radio_cfg)) {
-    Serial.println("[BOOT] mesh task create failed; backing off");
-    g_mesh.resetRuntime();
-    g_mesh_ready = false;
-    g_next_mesh_retry_ms = now + kMeshRetryCreateFailBackoffMs;
-  }
-}
-#endif
 
 void applyWebSettingsToMeshRuntime() {
   if (!g_mesh.isReady()) {
@@ -473,10 +314,6 @@ bool pagerPrepareSdPower(int profile, char* out_err, size_t out_err_size) {
 #endif
 
 bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  setErrText(out_err, out_err_size, "SD unsupported on Heltec");
-  return false;
-#else
   int sd_cs = -1;
   int sd_sck = -1;
   int sd_miso = -1;
@@ -643,7 +480,6 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
 
   setErrText(out_err, out_err_size, "");
   return true;
-#endif
 }
 
 bool loadConfigTextFromSd(String* out_text) {
@@ -830,20 +666,6 @@ bool ensureOtaBootWifiConnected(const plumeria::web::WebSettings& web_settings,
   return true;
 }
 
-bool isOtaBootTlsLowMemError(const char* err) {
-  return err && strstr(err, "TLS init failed (low memory)") != nullptr;
-}
-
-bool recycleOtaBootWifi(const plumeria::web::WebSettings& web_settings,
-                        char* out_err,
-                        size_t out_err_size) {
-  setErrText(out_err, out_err_size, "");
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_MODE_NULL);
-  delay(160);
-  return ensureOtaBootWifiConnected(web_settings, out_err, out_err_size);
-}
-
 void runOtaBootModeIfRequested() {
   const bool requested = plumeria::ota::consumeBootModeRequest();
 #if defined(DEVICE_TDECK)
@@ -897,16 +719,7 @@ void runOtaBootModeIfRequested() {
   }
   Serial.println("[OTABOOT] checking latest release");
   plumeria::ota::OtaCheckResult check{};
-  bool check_ok = plumeria::ota::checkLatestRelease(check) && check.ok;
-  if (!check_ok && isOtaBootTlsLowMemError(check.error)) {
-    Serial.println("[OTABOOT] low-mem TLS during check; retrying after WiFi recycle");
-    if (recycleOtaBootWifi(web_settings, err, sizeof(err))) {
-      memset(&check, 0, sizeof(check));
-      check_ok = plumeria::ota::checkLatestRelease(check) && check.ok;
-    } else if (err[0]) {
-      Serial.printf("[OTABOOT] WiFi recycle failed: %s\n", err);
-    }
-  }
+  const bool check_ok = plumeria::ota::checkLatestRelease(check) && check.ok;
 
   if (!check_ok) {
     Serial.printf("[OTABOOT] check failed: %s\n", check.error[0] ? check.error : "unknown");
@@ -933,16 +746,8 @@ void runOtaBootModeIfRequested() {
     g_display.drawBootProgress("OTABOOT: Installing", check.latest_tag, 0, 0, false);
   }
   Serial.printf("[OTABOOT] installing %s\n", check.latest_tag);
-  bool install_ok = plumeria::ota::installLatestRelease(check.latest_tag, err, sizeof(err), otaBootProgress);
-  if (!install_ok && isOtaBootTlsLowMemError(err)) {
-    Serial.println("[OTABOOT] low-mem TLS during install; retrying after WiFi recycle");
-    if (recycleOtaBootWifi(web_settings, err, sizeof(err))) {
-      err[0] = '\0';
-      install_ok = plumeria::ota::installLatestRelease(check.latest_tag, err, sizeof(err), otaBootProgress);
-    } else if (err[0]) {
-      Serial.printf("[OTABOOT] WiFi recycle failed: %s\n", err);
-    }
-  }
+  const bool install_ok =
+      plumeria::ota::installLatestRelease(check.latest_tag, err, sizeof(err), otaBootProgress);
 
   if (!install_ok) {
     Serial.printf("[OTABOOT] install failed: %s\n", err[0] ? err : "unknown");
@@ -971,16 +776,6 @@ void setup() {
   Serial.begin(115200);
   Serial.printf("[BOOT] target=%s app=%s\n", kBuildTargetName, APP_VERSION);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  // Let USB CDC settle on S3 boards so early boot logs are visible during debug.
-  delay(250);
-  const uint32_t usb_wait_start = millis();
-  while (!Serial && (millis() - usb_wait_start) < 2500) {
-    delay(10);
-  }
-  Serial.printf("[BOOT] setup enter reset_reason=%d\n", static_cast<int>(esp_reset_reason()));
-  Serial.flush();
-#endif
 
   if (kPagerBootDiag) {
     const uint32_t start_wait = millis();
@@ -997,27 +792,11 @@ void setup() {
     if (false) Serial.println("[BOOT] Companion mode requested but disabled in this firmware.");
   }
 
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.println("[BOOT] lvgl init start");
-  #endif
   initialize_lvgl();
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.println("[BOOT] lvgl init done");
-  #endif
   pagerDiagLog("lvgl init done");
 
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.println("[BOOT] board begin start");
-  #endif
   bool board_ready = g_board.begin();
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.printf("[BOOT] board begin done=%d\n", board_ready ? 1 : 0);
-  Serial.println("[BOOT] display begin start");
-  #endif
   bool display_ready = g_display.begin();
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.printf("[BOOT] display begin done=%d\n", display_ready ? 1 : 0);
-  #endif
   pagerDiagLog("hal ready board=%d display=%d", board_ready ? 1 : 0, display_ready ? 1 : 0);
   if (false) Serial.printf("[BOOT] board_ready=%d display_ready=%d\n", board_ready ? 1 : 0, display_ready ? 1 : 0);
   bool mesh_ready = false;
@@ -1033,14 +812,7 @@ void setup() {
   plumeria::web::applyRadioProfile(&g_radio_cfg, g_web_settings);
 
   if (board_ready && display_ready) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    Serial.println("[BOOT] mesh begin start");
-    bool mesh_timed_out = false;
-    mesh_ready = beginMeshWithTimeout(&g_mesh, g_radio_cfg, kMeshBeginTimeoutMs, &mesh_timed_out);
-    Serial.printf("[BOOT] mesh begin done=%d timeout=%d\n", mesh_ready ? 1 : 0, mesh_timed_out ? 1 : 0);
-#else
     mesh_ready = g_mesh.begin(g_radio_cfg);
-#endif
   }
   pagerDiagLog("mesh ready=%d", mesh_ready ? 1 : 0);
   g_mesh_ready = mesh_ready;
@@ -1063,13 +835,7 @@ void setup() {
     g_ui.setChannels(g_channel_names_buf, 1);
   }
 
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.println("[BOOT] web begin start");
-  #endif
   const bool web_ready = plumeria::web::begin(&g_mesh, g_web_settings);
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.printf("[BOOT] web begin done=%d\n", web_ready ? 1 : 0);
-  #endif
   pagerDiagLog("web begin=%d mode=%s ip=%s", web_ready ? 1 : 0,
                plumeria::web::mode(), plumeria::web::ip());
 
@@ -1090,13 +856,7 @@ void setup() {
   g_ui.attachMeshAdapter(&g_mesh);
   g_ui.setFirstInstallImportAvailable(first_install_import_available);
   g_ui.setFirstInstallIdentityPrompt(first_install_identity_prompt);
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.println("[BOOT] ui begin start");
-  #endif
   const bool ui_ready = g_ui.begin();
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-  Serial.printf("[BOOT] ui begin done=%d\n", ui_ready ? 1 : 0);
-  #endif
   pagerDiagLog("ui begin=%d", ui_ready ? 1 : 0);
   if (false) Serial.printf("[BOOT] ui_ready=%d\n", ui_ready ? 1 : 0);
   g_ui.setMeshReady(g_mesh_ready);
@@ -1108,18 +868,12 @@ void loop() {
   static bool boot_reason_reported_late = false;
   if (!boot_reason_reported_late && millis() > 5000) {
     boot_reason_reported_late = true;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    Serial.printf("[BOOT] late reset_reason=%d\n", static_cast<int>(esp_reset_reason()));
-#endif
   }
 
   g_board.loop();
   g_display.setScreenTimeoutSeconds(plumeria::web::screenTimeoutSeconds());
   g_display.loop();
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  serviceMeshRetry();
-#endif
 
   g_mesh.loop();
   sync_ui_channels_from_mesh();

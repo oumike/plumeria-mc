@@ -1,14 +1,17 @@
 #include "ota/ota_update.h"
+#include "ota/ota_signing_pubkey.h"
 
 #include <HTTPClient.h>
 #include <Update.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <ctype.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/error.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/sha256.h>
 #include <string.h>
-#include <type_traits>
 
 #ifndef APP_VERSION
 #define APP_VERSION "unknown"
@@ -19,72 +22,15 @@ namespace ota {
 namespace {
 
 constexpr uint32_t kReleaseCheckTimeoutMs = 12000;
-
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-constexpr int kTlsRxBufBytes = 256;
-constexpr int kTlsTxBufBytes = 256;
-#else
-constexpr int kTlsRxBufBytes = 1024;
-constexpr int kTlsTxBufBytes = 512;
-#endif
+constexpr uint32_t kReleaseDownloadTimeoutMs = 30000;
+constexpr uint32_t kDownloadStallTimeoutMs = 15000;
+constexpr size_t kOtaSigMaxBytes = 160;
+constexpr size_t kOtaDigestBytes = 32;
 
 constexpr const char* kLatestReleaseApiUrl =
-    "https://api.github.com/repos/oumike/plumeria-mc/releases/latest";
-constexpr const char* kLatestVersionRawUrl =
-    "https://raw.githubusercontent.com/oumike/plumeria-mc/main/VERSION";
-constexpr const char* kLatestVersionGithubUrl =
-    "https://github.com/oumike/plumeria-mc/raw/main/VERSION";
-constexpr const char* kLatestReleasePageUrl =
-    "https://github.com/oumike/plumeria-mc/releases/latest";
+  "http://ota.plumeria.sumat.org/firmware/latest";
 constexpr const char* kReleaseDownloadBaseUrl =
-    "https://github.com/oumike/plumeria-mc/releases/download/";
-
-template <typename T>
-class HasSetBufferSizes {
-  template <typename U, void (U::*)(int, int)>
-  struct SFINAE;
-  template <typename U>
-  static char test(SFINAE<U, &U::setBufferSizes>*);
-  template <typename U>
-  static int test(...);
-
- public:
-  static const bool value = (sizeof(test<T>(nullptr)) == sizeof(char));
-};
-
-template <typename T>
-typename std::enable_if<HasSetBufferSizes<T>::value, void>::type applyTlsBufferTuning(T& client) {
-  client.setBufferSizes(kTlsRxBufBytes, kTlsTxBufBytes);
-}
-
-template <typename T>
-typename std::enable_if<!HasSetBufferSizes<T>::value, void>::type applyTlsBufferTuning(T& client) {
-  (void)client;
-}
-
-void configureTlsClient(WiFiClientSecure& client) {
-  client.setInsecure();
-  applyTlsBufferTuning(client);
-}
-
-bool isLikelyTlsInitFailure(const String& err) {
-  // Arduino-ESP32 often reports TLS handshake allocation failures as
-  // "Network error (-1)" at HTTP layer.
-  return err.indexOf("(-1)") >= 0;
-}
-
-void buildTlsLowMemError(String& out) {
-  char msg[160] = {};
-  const uint32_t free_int = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  const uint32_t largest_int =
-      static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  snprintf(msg,
-           sizeof(msg),
-           "TLS init failed (low memory): int_free=%lu largest=%lu",
-           static_cast<unsigned long>(free_int),
-           static_cast<unsigned long>(largest_int));
-  out = msg;
-}
+    "http://ota.plumeria.sumat.org/firmware/";
 
 void clearCheckResult(OtaCheckResult& out) {
   memset(&out, 0, sizeof(out));
@@ -99,25 +45,6 @@ void copyStringToBuf(char* dst, size_t dst_len, const char* src) {
   }
   strncpy(dst, src, dst_len - 1);
   dst[dst_len - 1] = '\0';
-}
-
-void trimAsciiWhitespace(String& s) {
-  int start = 0;
-  int end = static_cast<int>(s.length()) - 1;
-  while (start <= end && isspace(static_cast<unsigned char>(s[start]))) {
-    start++;
-  }
-  while (end >= start && isspace(static_cast<unsigned char>(s[end]))) {
-    end--;
-  }
-  if (start == 0 && end == static_cast<int>(s.length()) - 1) {
-    return;
-  }
-  if (end < start) {
-    s = "";
-    return;
-  }
-  s = s.substring(start, end + 1);
 }
 
 bool extractJsonStringField(const String& json, const char* field, String& value_out) {
@@ -211,12 +138,11 @@ bool httpGetString(const char* url,
     *location_out = "";
   }
 
-  WiFiClientSecure client;
-  configureTlsClient(client);
+  WiFiClient client;
 
   HTTPClient http;
   if (!http.begin(client, url)) {
-    err_out = "Failed to start HTTPS request";
+    err_out = "Failed to start HTTP request";
     return false;
   }
 
@@ -253,106 +179,177 @@ bool httpGetString(const char* url,
   return true;
 }
 
-bool extractTagFromReleasePath(const String& text, String& tag_out) {
-  tag_out = "";
-  const int p = text.indexOf("/tag/");
-  if (p < 0) {
-    return false;
+void formatMbedTlsError(int code, char* out, size_t out_len) {
+  if (!out || out_len == 0) {
+    return;
   }
-
-  const int start = p + 5;
-  int end = start;
-  while (end < static_cast<int>(text.length())) {
-    const char c = text[end];
-    if (c == '"' || c == '\'' || c == '?' || c == '&' || c == '#' ||
-        isspace(static_cast<unsigned char>(c))) {
-      break;
-    }
-    end++;
+  out[0] = '\0';
+  if (code == 0) {
+    strncpy(out, "ok", out_len - 1);
+    out[out_len - 1] = '\0';
+    return;
   }
-
-  if (end <= start) {
-    return false;
-  }
-  tag_out = text.substring(start, end);
-  trimAsciiWhitespace(tag_out);
-  return tag_out.length() > 0;
+  mbedtls_strerror(code, out, out_len);
 }
 
-bool fetchLatestTagFromReleasePage(String& tag_out, String& err_out) {
-  tag_out = "";
+bool httpGetBytes(const char* url,
+                  uint8_t* out_buf,
+                  size_t out_cap,
+                  size_t* out_len,
+                  String& err_out,
+                  const char* accept_header = nullptr) {
+  if (out_len) {
+    *out_len = 0;
+  }
   err_out = "";
-
-  String body;
-  String err;
-  String location;
-  int status = 0;
-  const bool ok = httpGetString(kLatestReleasePageUrl,
-                                body,
-                                err,
-                                false,
-                                &status,
-                                &location,
-                                "text/html");
-
-  // github.com/releases/latest usually redirects to /releases/tag/<tag>.
-  if (!ok) {
-    if ((status == HTTP_CODE_MOVED_PERMANENTLY || status == HTTP_CODE_FOUND ||
-         status == HTTP_CODE_SEE_OTHER || status == HTTP_CODE_TEMPORARY_REDIRECT ||
-         status == HTTP_CODE_PERMANENT_REDIRECT) &&
-        location.length() > 0 && extractTagFromReleasePath(location, tag_out)) {
-      return true;
-    }
-    err_out = String("Release page ") + (err.length() ? err : String("failed"));
+  if (!url || !out_buf || out_cap == 0) {
+    err_out = "Invalid arguments";
     return false;
   }
 
-  if (extractTagFromReleasePath(body, tag_out)) {
-    return true;
+  preferExternalHeap();
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, url)) {
+    err_out = "Failed to start HTTP request";
+    return false;
   }
 
-  err_out = "Release page tag not found";
-  return false;
-}
+  http.setTimeout(static_cast<uint16_t>(kReleaseDownloadTimeoutMs));
+  http.addHeader("User-Agent", "plumeria-mc-ota");
+  if (accept_header && accept_header[0]) {
+    http.addHeader("Accept", accept_header);
+  }
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-bool fetchLatestTagFromVersionFile(String& tag_out, String& err_out) {
-  tag_out = "";
-  err_out = "";
+  const int code = http.GET();
+  if (code <= 0) {
+    err_out = String("Network error (") + String(code) + ")";
+    http.end();
+    return false;
+  }
+  if (code != HTTP_CODE_OK) {
+    err_out = String("HTTP ") + String(code);
+    http.end();
+    return false;
+  }
 
-  const char* urls[] = {
-      kLatestVersionRawUrl,
-      kLatestVersionGithubUrl,
-  };
+  const int content_len = http.getSize();
+  if (content_len <= 0) {
+    err_out = "Signature download empty";
+    http.end();
+    return false;
+  }
+  if (static_cast<size_t>(content_len) > out_cap) {
+    err_out = "Signature too large";
+    http.end();
+    return false;
+  }
 
-  String first_err;
-  String second_err;
-
-  for (int i = 0; i < 2; i++) {
-    String body;
-    String err;
-    if (!httpGetString(urls[i], body, err, true, nullptr, nullptr, "text/plain")) {
-      if (i == 0) {
-        first_err = err;
-      } else {
-        second_err = err;
+  WiFiClient& stream = http.getStream();
+  size_t used = 0;
+  uint32_t last_progress_ms = millis();
+  while (http.connected() && used < static_cast<size_t>(content_len)) {
+    size_t avail = static_cast<size_t>(stream.available());
+    if (avail == 0) {
+      if ((millis() - last_progress_ms) > kDownloadStallTimeoutMs) {
+        err_out = "Signature download stalled";
+        http.end();
+        return false;
       }
+      delay(10);
       continue;
     }
 
-    tag_out = body;
-    trimAsciiWhitespace(tag_out);
-    if (tag_out.length() > 0) {
-      return true;
+    if (avail > static_cast<size_t>(content_len) - used) {
+      avail = static_cast<size_t>(content_len) - used;
     }
-    if (i == 0) {
-      first_err = "VERSION file empty";
-    } else {
-      second_err = "VERSION file empty";
+
+    const int n = stream.readBytes(reinterpret_cast<char*>(out_buf + used), avail);
+    if (n <= 0) {
+      if ((millis() - last_progress_ms) > kDownloadStallTimeoutMs) {
+        err_out = "Signature read timeout";
+        http.end();
+        return false;
+      }
+      delay(10);
+      continue;
     }
+
+    used += static_cast<size_t>(n);
+    last_progress_ms = millis();
   }
 
-  err_out = String("VERSION failed (") + first_err + "; " + second_err + ")";
-  return false;
+  http.end();
+  if (used != static_cast<size_t>(content_len)) {
+    err_out = "Signature incomplete";
+    return false;
+  }
+
+  if (out_len) {
+    *out_len = used;
+  }
+  return true;
+}
+
+bool verifyDetachedSignatureP256Sha256(const uint8_t* digest,
+                                       size_t digest_len,
+                                       const uint8_t* signature,
+                                       size_t signature_len,
+                                       String& err_out) {
+  err_out = "";
+  if (!digest || digest_len != kOtaDigestBytes || !signature || signature_len == 0) {
+    err_out = "Signature verify input invalid";
+    return false;
+  }
+  if (kOtaSigningPublicKeyPem[0] == '\0') {
+    err_out = "OTA signing public key missing";
+    return false;
+  }
+
+  mbedtls_pk_context pk;
+  mbedtls_pk_init(&pk);
+
+  const int parse_rc = mbedtls_pk_parse_public_key(
+      &pk,
+      reinterpret_cast<const unsigned char*>(kOtaSigningPublicKeyPem),
+      strlen(kOtaSigningPublicKeyPem) + 1);
+  if (parse_rc != 0) {
+    char msg[96] = {};
+    formatMbedTlsError(parse_rc, msg, sizeof(msg));
+    err_out = String("Public key parse failed: ") + msg;
+    mbedtls_pk_free(&pk);
+    return false;
+  }
+
+  if (!mbedtls_pk_can_do(&pk, MBEDTLS_PK_ECKEY)) {
+    err_out = "Public key is not EC";
+    mbedtls_pk_free(&pk);
+    return false;
+  }
+
+  const mbedtls_ecp_keypair* ec_key = mbedtls_pk_ec(pk);
+  if (!ec_key || ec_key->grp.id != MBEDTLS_ECP_DP_SECP256R1) {
+    err_out = "Public key is not P-256";
+    mbedtls_pk_free(&pk);
+    return false;
+  }
+
+  const int verify_rc = mbedtls_pk_verify(&pk,
+                                          MBEDTLS_MD_SHA256,
+                                          digest,
+                                          digest_len,
+                                          signature,
+                                          signature_len);
+  mbedtls_pk_free(&pk);
+  if (verify_rc != 0) {
+    char msg[96] = {};
+    formatMbedTlsError(verify_rc, msg, sizeof(msg));
+    err_out = String("Signature verify failed: ") + msg;
+    return false;
+  }
+
+  return true;
 }
 
 int parseNextVersionNumber(const char* s, int& idx) {
@@ -415,22 +412,7 @@ bool fetchLatestReleaseTag(String& tag_out, String& err_out) {
     return false;
   }
 
-#if defined(DEVICE_TDECK)
-  // T-Deck has tighter OTA TLS memory margins; keep check path minimal.
-  String version_err;
-  if (fetchLatestTagFromVersionFile(tag_out, version_err)) {
-    return true;
-  }
-  if (isLikelyTlsInitFailure(version_err)) {
-    buildTlsLowMemError(err_out);
-    return false;
-  }
-  err_out = version_err.length() ? version_err : String("VERSION check failed");
-  return false;
-#else
   String api_err;
-  String page_err;
-  String version_err;
   String api_body;
   if (httpGetString(kLatestReleaseApiUrl,
                     api_body,
@@ -438,44 +420,13 @@ bool fetchLatestReleaseTag(String& tag_out, String& err_out) {
                     true,
                     nullptr,
                     nullptr,
-                    "application/vnd.github+json")) {
-    if (extractJsonStringField(api_body, "tag_name", tag_out) && tag_out.length() > 0) {
-      return true;
-    }
-    api_err = "Release API tag not found";
-  } else if (isLikelyTlsInitFailure(api_err)) {
-    buildTlsLowMemError(err_out);
-    return false;
-  }
-
-  if (fetchLatestTagFromReleasePage(tag_out, page_err)) {
+                    "application/vnd.github+json") &&
+      extractJsonStringField(api_body, "tag_name", tag_out) && tag_out.length() > 0) {
     return true;
   }
-  if (isLikelyTlsInitFailure(page_err)) {
-    buildTlsLowMemError(err_out);
-    return false;
-  }
 
-  if (fetchLatestTagFromVersionFile(tag_out, version_err)) {
-    return true;
-  }
-  if (isLikelyTlsInitFailure(version_err)) {
-    buildTlsLowMemError(err_out);
-    return false;
-  }
-
-  if (api_err.length() && page_err.length() && version_err.length()) {
-    err_out = api_err + "; page fallback failed (" + page_err +
-              "); version fallback failed (" + version_err + ")";
-  } else if (api_err.length()) {
-    err_out = api_err;
-  } else if (page_err.length()) {
-    err_out = page_err;
-  } else {
-    err_out = version_err;
-  }
+  err_out = api_err.length() ? api_err : String("Release tag not found (proxy)");
   return false;
-#endif
 }
 
 void buildAssetUrl(const char* tag, char* out_url, size_t out_len) {
@@ -492,6 +443,15 @@ void buildAssetUrl(const char* tag, char* out_url, size_t out_len) {
            use_tag);
 }
 
+void buildAssetSignatureUrl(const char* tag, char* out_url, size_t out_len) {
+  if (!out_url || out_len == 0) {
+    return;
+  }
+  char asset_url[256] = {};
+  buildAssetUrl(tag, asset_url, sizeof(asset_url));
+  snprintf(out_url, out_len, "%s.sig", asset_url);
+}
+
 bool setErr(char* err_out, size_t err_len, const char* msg) {
   copyStringToBuf(err_out, err_len, msg);
   return false;
@@ -503,7 +463,7 @@ void preferExternalHeap() {
 #if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
   static bool enabled = false;
   if (!enabled) {
-    // Keep more contiguous internal heap available for TLS setup buffers.
+    // Keep contiguous internal heap available for OTA staging and hashing.
     heap_caps_malloc_extmem_enable(0);
     enabled = true;
   }
@@ -519,12 +479,6 @@ const char* currentDeviceAssetSlug() {
   return "tlora-pager-tft";
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
   return "cardputer-cap";
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
-  #if defined(DEVICE_UI_VERTICAL) && (DEVICE_UI_VERTICAL)
-    return "heltec-vertical";
-  #else
-    return "heltec";
-  #endif
 #else
   return "tdeck";
 #endif
@@ -577,29 +531,41 @@ bool installLatestRelease(const char* tag,
 
   char url[256] = {};
   buildAssetUrl(tag_buf, url, sizeof(url));
+  char sig_url[272] = {};
+  buildAssetSignatureUrl(tag_buf, sig_url, sizeof(sig_url));
 
-  WiFiClientSecure client;
-  configureTlsClient(client);
+  uint8_t signature[kOtaSigMaxBytes] = {};
+  size_t signature_len = 0;
+  String sig_err;
+  if (!httpGetBytes(sig_url,
+                    signature,
+                    sizeof(signature),
+                    &signature_len,
+                    sig_err,
+                    "application/octet-stream")) {
+    String msg = String("Signature fetch failed: ") +
+                 (sig_err.length() ? sig_err : String("unknown"));
+    return setErr(err_out, err_len, msg.c_str());
+  }
+  if (signature_len < 8) {
+    return setErr(err_out, err_len, "Signature invalid (too short)");
+  }
 
+  WiFiClient client;
   HTTPClient http;
   if (!http.begin(client, url)) {
     return setErr(err_out, err_len, "Failed to start OTA download");
   }
 
-  http.setTimeout(30000);
+  http.setTimeout(static_cast<uint16_t>(kReleaseDownloadTimeoutMs));
   http.addHeader("User-Agent", "plumeria-mc-ota");
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
   const int code = http.GET();
   if (code <= 0) {
-    if (code == -1) {
-      String tls_err;
-      buildTlsLowMemError(tls_err);
-      http.end();
-      return setErr(err_out, err_len, tls_err.c_str());
-    }
+    String msg = String("OTA download network error (") + String(code) + ")";
     http.end();
-    return setErr(err_out, err_len, "OTA download network error");
+    return setErr(err_out, err_len, msg.c_str());
   }
   if (code != HTTP_CODE_OK) {
     char msg[96] = {};
@@ -618,13 +584,27 @@ bool installLatestRelease(const char* tag,
     return setErr(err_out, err_len, msg);
   }
 
+  mbedtls_sha256_context sha_ctx;
+  mbedtls_sha256_init(&sha_ctx);
+  const int sha_start_rc = mbedtls_sha256_starts_ret(&sha_ctx, 0);
+  if (sha_start_rc != 0) {
+    char msg[112] = {};
+    char detail[80] = {};
+    formatMbedTlsError(sha_start_rc, detail, sizeof(detail));
+    snprintf(msg, sizeof(msg), "SHA256 init failed: %s", detail);
+    mbedtls_sha256_free(&sha_ctx);
+    Update.abort();
+    http.end();
+    return setErr(err_out, err_len, msg);
+  }
+
   WiFiClient& stream = http.getStream();
 
   constexpr size_t kChunkSize = 512;
-  constexpr uint32_t kDownloadStallTimeoutMs = 15000;
   uint8_t chunk[kChunkSize];
   size_t written = 0;
   uint32_t last_progress_ms = millis();
+  bool stream_ok = true;
 
   while (http.connected() && (content_len <= 0 || written < static_cast<size_t>(content_len))) {
     size_t avail = static_cast<size_t>(stream.available());
@@ -633,9 +613,9 @@ bool installLatestRelease(const char* tag,
         progress_cb(written, (content_len > 0) ? static_cast<size_t>(content_len) : 0);
       }
       if ((millis() - last_progress_ms) > kDownloadStallTimeoutMs) {
-        Update.abort();
-        http.end();
-        return setErr(err_out, err_len, "OTA stalled (no data)");
+        stream_ok = false;
+        setErr(err_out, err_len, "OTA stalled (no data)");
+        break;
       }
       delay(10);
       continue;
@@ -651,19 +631,30 @@ bool installLatestRelease(const char* tag,
         progress_cb(written, (content_len > 0) ? static_cast<size_t>(content_len) : 0);
       }
       if ((millis() - last_progress_ms) > kDownloadStallTimeoutMs) {
-        Update.abort();
-        http.end();
-        return setErr(err_out, err_len, "OTA stalled (read timeout)");
+        stream_ok = false;
+        setErr(err_out, err_len, "OTA stalled (read timeout)");
+        break;
       }
       delay(10);
       continue;
     }
 
+    const int sha_update_rc = mbedtls_sha256_update_ret(&sha_ctx, chunk, static_cast<size_t>(n));
+    if (sha_update_rc != 0) {
+      char msg[112] = {};
+      char detail[80] = {};
+      formatMbedTlsError(sha_update_rc, detail, sizeof(detail));
+      snprintf(msg, sizeof(msg), "SHA256 update failed: %s", detail);
+      setErr(err_out, err_len, msg);
+      stream_ok = false;
+      break;
+    }
+
     const size_t wr = Update.write(chunk, static_cast<size_t>(n));
     if (wr != static_cast<size_t>(n)) {
-      Update.abort();
-      http.end();
-      return setErr(err_out, err_len, "OTA write failed");
+      setErr(err_out, err_len, "OTA write failed");
+      stream_ok = false;
+      break;
     }
 
     written += wr;
@@ -673,10 +664,37 @@ bool installLatestRelease(const char* tag,
     }
   }
 
-  if (content_len > 0 && written != static_cast<size_t>(content_len)) {
+  uint8_t digest[kOtaDigestBytes] = {};
+  bool digest_ok = false;
+  if (stream_ok && (content_len <= 0 || written == static_cast<size_t>(content_len))) {
+    const int sha_finish_rc = mbedtls_sha256_finish_ret(&sha_ctx, digest);
+    if (sha_finish_rc != 0) {
+      char msg[112] = {};
+      char detail[80] = {};
+      formatMbedTlsError(sha_finish_rc, detail, sizeof(detail));
+      snprintf(msg, sizeof(msg), "SHA256 finish failed: %s", detail);
+      setErr(err_out, err_len, msg);
+    } else {
+      digest_ok = true;
+    }
+  } else if (stream_ok && content_len > 0 && written != static_cast<size_t>(content_len)) {
+    setErr(err_out, err_len, "OTA write incomplete");
+  }
+  mbedtls_sha256_free(&sha_ctx);
+
+  if (!stream_ok || !digest_ok) {
     Update.abort();
     http.end();
-    return setErr(err_out, err_len, "OTA write incomplete");
+    return false;
+  }
+
+  String verify_err;
+  if (!verifyDetachedSignatureP256Sha256(digest, sizeof(digest), signature, signature_len, verify_err)) {
+    Update.abort();
+    http.end();
+    String msg = String("OTA signature invalid: ") +
+                 (verify_err.length() ? verify_err : String("unknown"));
+    return setErr(err_out, err_len, msg.c_str());
   }
 
   if (!Update.end()) {

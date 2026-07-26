@@ -21,6 +21,7 @@
 #define PLUMERIA_OTA_ENABLED 1
 #endif
 
+#include "ui/ui_theme.h"
 #include "web/web_config.h"
 #if PLUMERIA_OTA_ENABLED
 #include "ota/ota_update.h"
@@ -74,27 +75,37 @@
 namespace plumeria {
 namespace ui {
 
+// Route every color literal in this file through the active theme palette.
+// The UI keeps writing the same hex values it always did; themedColorHex()
+// swaps in the themed equivalent at draw time, so switching themes needs no
+// call-site changes. Unmapped values (splash artwork, the black modal scrim)
+// pass straight through. Must stay below every #include -- it deliberately
+// shadows LVGL's own lv_color_hex() for this translation unit only.
+#define lv_color_hex(rgb) ::plumeria::ui::themedColorHex(static_cast<uint32_t>(rgb))
+
 namespace {
 
-const lv_color_t kColorBgRoot = lv_color_hex(0x08121B);
-const lv_color_t kColorPanel = lv_color_hex(0x0C1A27);
-const lv_color_t kColorPanelAlt = lv_color_hex(0x102335);
-const lv_color_t kColorBorder = lv_color_hex(0x1D3C55);
-const lv_color_t kColorFocus = lv_color_hex(0x33D1FF);
-const lv_color_t kColorActive = lv_color_hex(0x1E9ED1);
-const lv_color_t kColorUnread = lv_color_hex(0x6EF0FF);
-const lv_color_t kColorTextMain = lv_color_hex(0xD8E7F2);
-const lv_color_t kColorTextDim = lv_color_hex(0x8FA8BA);
-const lv_color_t kColorRx = lv_color_hex(0x89E3FF);
-const lv_color_t kColorTx = lv_color_hex(0xA8FFB5);
-const lv_color_t kColorAck = lv_color_hex(0x7ED6A7);
-const lv_color_t kColorErr = lv_color_hex(0xFF7D7D);
-const lv_color_t kColorLiveInfo = lv_color_hex(0x7ED6A7);
-const lv_color_t kColorLiveDirect = lv_color_hex(0xFFD27A);
-const lv_color_t kColorLiveChannel = lv_color_hex(0x89E3FF);
-const lv_color_t kColorWifiOn = lv_color_hex(0x59D88E);
-const lv_color_t kColorWifiOff = lv_color_hex(0xF56767);
-const lv_color_t kColorWifiApBadge = lv_color_hex(0xD8E7F2);
+// Defined as macros rather than constants so each use re-reads the palette;
+// the literals double as the palette lookup keys in themedColorHex().
+#define kColorBgRoot lv_color_hex(0x08121B)
+#define kColorPanel lv_color_hex(0x0C1A27)
+#define kColorPanelAlt lv_color_hex(0x102335)
+#define kColorBorder lv_color_hex(0x1D3C55)
+#define kColorFocus lv_color_hex(0x33D1FF)
+#define kColorActive lv_color_hex(0x1E9ED1)
+#define kColorUnread lv_color_hex(0x6EF0FF)
+#define kColorTextMain lv_color_hex(0xD8E7F2)
+#define kColorTextDim lv_color_hex(0x8FA8BA)
+#define kColorRx lv_color_hex(0x89E3FF)
+#define kColorTx lv_color_hex(0xA8FFB5)
+#define kColorAck lv_color_hex(0x7ED6A7)
+#define kColorErr lv_color_hex(0xFF7D7D)
+#define kColorLiveInfo lv_color_hex(0x7ED6A7)
+#define kColorLiveDirect lv_color_hex(0xFFD27A)
+#define kColorLiveChannel lv_color_hex(0x89E3FF)
+#define kColorWifiOn lv_color_hex(0x59D88E)
+#define kColorWifiOff lv_color_hex(0xF56767)
+#define kColorWifiApBadge lv_color_hex(0xD8E7F2)
 
 constexpr lv_coord_t kOuterPad = 0;
 constexpr lv_coord_t kGap = 2;
@@ -104,13 +115,7 @@ constexpr lv_coord_t kMainBottomInset = 0;
 constexpr lv_coord_t kMainBottomInset = 4;
 #endif
 constexpr lv_coord_t kHeaderH = 30;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-constexpr lv_coord_t kShortcutH = 22;
-constexpr lv_coord_t kShortcutMinH = 20;
-constexpr lv_coord_t kShortcutMaxH = 26;
-constexpr bool kTouchDirectActivate = true;
-constexpr lv_coord_t kHeltecMainButtonBottomInset = 6;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#if   defined(DEVICE_CARDPUTER_LORA_HAT)
 constexpr lv_coord_t kShortcutH = 14;
 constexpr lv_coord_t kShortcutMinH = 12;
 constexpr lv_coord_t kShortcutMaxH = 16;
@@ -153,6 +158,12 @@ constexpr lv_coord_t kComposeDialogSingleLineH = 96;
 constexpr lv_coord_t kComposeInputH = 54;
 constexpr lv_coord_t kComposeInputSingleLineH = 24;
 constexpr size_t kComposeMessageMaxChars = 90;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+constexpr lv_coord_t kThemeRowHeight = 18;
+#else
+constexpr lv_coord_t kThemeRowHeight = 24;
+#endif
+constexpr uint8_t kThemePickerVisibleRows = 6;
 constexpr lv_coord_t kContactsDialogMinW = 220;
 constexpr lv_coord_t kContactsDialogMinH = 170;
 constexpr lv_coord_t kContactsDialogMaxH = 230;
@@ -169,6 +180,7 @@ constexpr uint32_t kContactsDropdownEnterGuardMs = 800;
 constexpr uint32_t kContactsDropdownEnterGuardMs = 260;
 #endif
 constexpr uint32_t kComposeOpenTapIgnoreMs = 180;
+constexpr uint32_t kThemeOpenInputIgnoreMs = 180;
 constexpr uint32_t kLocalEchoSuppressMs = 3000;
 constexpr uint32_t kChatPersistFlushMs = 2000;
 constexpr uint32_t kDmPersistFlushMs = 1000;
@@ -187,6 +199,8 @@ constexpr time_t kTimeValidEpoch = 1700000000;
 constexpr char kUiPrefsNs[] = "ui_state";
 constexpr char kChatHistoryBlobKey[] = "chat_blob";
 constexpr char kChatHistoryCountKey[] = "chat_count";
+constexpr char kChatColorBlobKey[] = "chatclr_blob";
+constexpr char kChatColorCountKey[] = "chatclr_cnt";
 constexpr char kDmHistoryBlobKey[] = "dm_blob";
 constexpr char kDmHistoryCountKey[] = "dm_count";
 constexpr char kCfgSdDir[] = "/plumeria";
@@ -199,19 +213,23 @@ constexpr bool kPagerWideDialogLayout = true;
 constexpr bool kPagerWideDialogLayout = false;
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-constexpr bool kUseOnscreenKeyboard = true;
-#else
 constexpr bool kUseOnscreenKeyboard = false;
-#endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || (defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL))
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
 constexpr bool kCompactFavoriteActionLabels = true;
 #else
 constexpr bool kCompactFavoriteActionLabels = false;
 #endif
 
 constexpr bool kEnableContactsDialog = true;
+
+constexpr uint32_t kContactColorPalette[] = {
+  0x3EA8FF, 0xFF8A5B, 0x6CCB5F, 0xC58BFF,
+  0xF2B134, 0x46D1C1, 0xFF6FAE, 0x8DA2FF,
+  0x7CC36B, 0xFFAA66, 0x4FB5B8, 0xD08C3F,
+};
+constexpr size_t kContactColorPaletteCount =
+  sizeof(kContactColorPalette) / sizeof(kContactColorPalette[0]);
 
 lv_coord_t dialogMaxW(lv_coord_t regular_max, lv_coord_t pager_max) {
   return kPagerWideDialogLayout ? pager_max : regular_max;
@@ -238,22 +256,13 @@ lv_coord_t contactsLeftPanePercent() {
 }
 
 const char* addFavoriteActionLabel(bool truncated = false) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  (void)truncated;
-  return "Add Fav";
-#else
   if (kCompactFavoriteActionLabels) {
     return "Add Fav";
   }
   return truncated ? "Add (F)av." : "Add (F)avorite";
-#endif
 }
 
 const char* favoriteActionLabel(bool currently_favorite, bool truncated = false) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  (void)truncated;
-  return currently_favorite ? "Rem Fav" : "Add Fav";
-#else
   if (kCompactFavoriteActionLabels) {
     return currently_favorite ? "Rem Fav" : "Add Fav";
   }
@@ -261,18 +270,13 @@ const char* favoriteActionLabel(bool currently_favorite, bool truncated = false)
     return currently_favorite ? "Rem (F)av." : "Add (F)av.";
   }
   return currently_favorite ? "Remove (F)avorite" : "Add (F)avorite";
-#endif
 }
 
 uint8_t clampOptionCount(uint8_t count, uint8_t limit) {
   return count > limit ? limit : count;
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-constexpr bool kKeyboardNavEnabled = false;
-#else
 constexpr bool kKeyboardNavEnabled = true;
-#endif
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 uint32_t remapCardputerNavKey(uint32_t key, bool allow_nav_remap) {
@@ -298,21 +302,7 @@ uint32_t remapCardputerNavKey(uint32_t key, bool allow_nav_remap) {
 }
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(HELTEC_COMPACT_SELECTOR)
-const char* kShortcutNames[] = {
-  "CFG",
-  "CONT",
-  "LIVE",
-  "HELP",
-};
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
-const char* kShortcutNames[] = {
-  "CFG",
-  "CONT",
-  "LIVE",
-  "HELP",
-};
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#if   defined(DEVICE_CARDPUTER_LORA_HAT)
 const char* kShortcutNames[] = {
   "(C)FG",
   "C(O)NT",
@@ -333,18 +323,6 @@ constexpr uint8_t kShortcutContacts = 1;
 constexpr uint8_t kShortcutLive = 2;
 constexpr uint8_t kShortcutHelp = 3;
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-const char* kHelpBodyText =
-  "Touch guide:\n"
-  "CFG: Device settings and web config\n"
-  "CONTACTS: Favorites and direct messages\n"
-  "LIVE: Mesh traffic feed\n"
-  "HELP: Open this screen\n"
-  "ADVZ: Send one-hop presence advert\n"
-  "ADVF: Send flood advert across mesh\n"
-  "NEW: Start a room message or DM\n"
-  "CLOSE: Return to chat";
-#else
 const char* kHelpBodyText =
   "Keyboard shortcuts:\n"
   "h = Open channel list (main screen)\n"
@@ -361,7 +339,6 @@ const char* kHelpBodyText =
   "d = Delete contact (from Contacts)\n"
   "j/k = up/down (arrows also work)\n"
   "Backspace = close current dialog";
-#endif
 
 const char* kCfgRowLabels[] = {
   "Node Name",
@@ -374,11 +351,13 @@ const char* kCfgRowLabels[] = {
   "Mesh Region",
   "Repeater",
   "Notifications",
-#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+  "Theme",
+  "Chat Style",
+  "Chat Font",
+  "Chat Colors",
   "Export Config",
   "Import Config",
   "Delete Config",
-#endif
 };
 
 constexpr uint8_t kCfgRowNodeName = 0;
@@ -391,11 +370,13 @@ constexpr uint8_t kCfgRowMultiAck = 6;
 constexpr uint8_t kCfgRowMeshRegion = 7;
 constexpr uint8_t kCfgRowRepeater = 8;
 constexpr uint8_t kCfgRowNotifications = 9;
-#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
-constexpr uint8_t kCfgRowExportConfig = 10;
-constexpr uint8_t kCfgRowImportConfig = 11;
-constexpr uint8_t kCfgRowDeleteConfig = 12;
-#endif
+constexpr uint8_t kCfgRowTheme = 10;
+constexpr uint8_t kCfgRowChatStyle = 11;
+constexpr uint8_t kCfgRowChatFont = 12;
+constexpr uint8_t kCfgRowChatColors = 13;
+constexpr uint8_t kCfgRowExportConfig = 14;
+constexpr uint8_t kCfgRowImportConfig = 15;
+constexpr uint8_t kCfgRowDeleteConfig = 16;
 
 constexpr uint8_t kMessageChimeNoteCount = 3;
 // Requested pattern is E->B->E at octave 0. On tiny speakers, 20-31 Hz is
@@ -793,30 +774,6 @@ void playPagerTone(float frequency_hz, uint32_t duration_ms) {
 }
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-#if defined(PLUMERIA_NOTIFICATION_PIN)
-#define PLUMERIA_HAS_HELTEC_BUZZER_BACKEND 1
-constexpr int kHeltecBuzzerPin = PLUMERIA_NOTIFICATION_PIN;
-#elif defined(PIN_BUZZER)
-#define PLUMERIA_HAS_HELTEC_BUZZER_BACKEND 1
-constexpr int kHeltecBuzzerPin = PIN_BUZZER;
-#endif
-#ifdef PLUMERIA_HAS_HELTEC_BUZZER_BACKEND
-bool g_heltec_buzzer_ready = false;
-
-void playHeltecTone(float frequency_hz, uint32_t duration_ms) {
-  if (frequency_hz <= 0.0f || duration_ms == 0) {
-    return;
-  }
-  if (!g_heltec_buzzer_ready) {
-    pinMode(kHeltecBuzzerPin, OUTPUT);
-    g_heltec_buzzer_ready = true;
-  }
-  tone(static_cast<uint8_t>(kHeltecBuzzerPin), static_cast<unsigned int>(frequency_hz),
-       static_cast<unsigned long>(duration_ms));
-}
-#endif
-#endif
 
 const char* radioPresetDisplayName(const char* region) {
   if (!region || region[0] == '\0') {
@@ -918,6 +875,38 @@ char asciiLower(char c) {
     return static_cast<char>(c - 'A' + 'a');
   }
   return c;
+}
+
+void normalizeContactColorIdentity(const char* identity, char* out, size_t out_size) {
+  if (!out || out_size == 0) {
+    return;
+  }
+  out[0] = '\0';
+  if (!identity || identity[0] == '\0') {
+    return;
+  }
+
+  while (*identity == ' ') {
+    identity++;
+  }
+
+  size_t len = strlen(identity);
+  while (len > 0 && identity[len - 1] == ' ') {
+    len--;
+  }
+
+  if (len == 0) {
+    return;
+  }
+
+  if (len >= out_size) {
+    len = out_size - 1;
+  }
+
+  for (size_t i = 0; i < len; i++) {
+    out[i] = asciiLower(identity[i]);
+  }
+  out[len] = '\0';
 }
 
 char asciiUpper(char c) {
@@ -1479,6 +1468,11 @@ struct PersistedDmLine {
   uint32_t timestamp_epoch;
 };
 
+struct PersistedContactColor {
+  char identity[65];
+  uint8_t slot;
+};
+
 void setErrText(char* out_err, size_t out_err_size, const char* text) {
   if (!out_err || out_err_size == 0) {
     return;
@@ -1523,43 +1517,6 @@ bool ensureOtaWifiConnected(char* out_err, size_t out_err_size) {
   while (WiFi.status() != WL_CONNECTED) {
     if ((millis() - start) >= kOtaWifiConnectTimeoutMs) {
       setErrText(out_err, out_err_size, "WiFi connect timeout");
-      return false;
-    }
-    delay(100);
-  }
-
-  return true;
-}
-
-bool isLikelyOtaTlsLowMemError(const char* err) {
-  return err && strstr(err, "TLS init failed (low memory)") != nullptr;
-}
-
-bool recycleOtaWifiConnection(char* out_err, size_t out_err_size) {
-  setErrText(out_err, out_err_size, "");
-
-  plumeria::web::WebSettings web_settings{};
-  plumeria::web::loadSettings(&web_settings);
-  if (web_settings.wifi_ssid[0] == '\0') {
-    setErrText(out_err, out_err_size, "WiFi SSID not configured");
-    return false;
-  }
-
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-  WiFi.useStaticBuffers(false);
-#endif
-
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  delay(160);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(web_settings.wifi_ssid, web_settings.wifi_pass);
-
-  const uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    if ((millis() - start) >= kOtaWifiConnectTimeoutMs) {
-      setErrText(out_err, out_err_size, "WiFi reconnect timeout");
       return false;
     }
     delay(100);
@@ -1753,10 +1710,6 @@ bool pagerPrepareSdPower(int profile, char* out_err, size_t out_err_size) {
 #endif
 
 bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  setErrText(out_err, out_err_size, "SD unsupported on Heltec");
-  return false;
-#else
   int sd_cs = -1;
   int sd_sck = -1;
   int sd_miso = -1;
@@ -1914,7 +1867,6 @@ bool sdBeginForCurrentBoard(char* out_err, size_t out_err_size) {
 
   setErrText(out_err, out_err_size, "");
   return true;
-#endif
 }
 
 lv_coord_t clampCoord(lv_coord_t value, lv_coord_t low, lv_coord_t high) {
@@ -2020,7 +1972,508 @@ const lv_font_t* compactUiFont() {
 #endif
 }
 
+const char* chatRenderStyleNameFromValue(uint8_t style) {
+  switch (style) {
+    case 1:
+      return "Bubble";
+    case 2:
+      return "Outline";
+    case 0:
+    default:
+      return "Classic";
+  }
+}
+
+const char* chatFontSizeNameFromValue(uint8_t size) {
+  switch (size) {
+    case 1:
+      return "Medium";
+    case 2:
+      return "Large";
+    case 3:
+      return "X-Large";
+    case 0:
+    default:
+      return "Small";
+  }
+}
+
 }  // namespace
+
+void StandaloneUi::loadUiThemeFromSettings() {
+  plumeria::web::WebSettings settings{};
+  plumeria::web::loadSettings(&settings);
+  applyUiThemePalette(settings.ui_theme, settings.ui_mode);
+}
+
+void StandaloneUi::loadChatRenderSettings() {
+  plumeria::web::WebSettings settings{};
+  plumeria::web::loadSettings(&settings);
+  uint8_t style = settings.chat_style;
+  uint8_t font_size = settings.chat_font_size;
+  if (style > static_cast<uint8_t>(ChatRenderStyle::Outline)) {
+    style = static_cast<uint8_t>(ChatRenderStyle::Classic);
+  }
+  if (font_size > static_cast<uint8_t>(ChatFontSize::XLarge)) {
+    font_size = static_cast<uint8_t>(ChatFontSize::Small);
+  }
+  chat_render_style_ = static_cast<ChatRenderStyle>(style);
+  chat_font_size_ = static_cast<ChatFontSize>(font_size);
+  chat_render_colors_ = settings.chat_style_colors;
+}
+
+const lv_font_t* StandaloneUi::chatConversationFont() const {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+  // Pager chat/DM text needs a larger baseline. Keep each step distinct.
+  switch (chat_font_size_) {
+    case ChatFontSize::Small:
+#if defined(LV_FONT_MONTSERRAT_14) && LV_FONT_MONTSERRAT_14
+  return &lv_font_montserrat_14;
+#elif defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  return &lv_font_montserrat_12;
+#else
+  return LV_FONT_DEFAULT;
+#endif
+
+    case ChatFontSize::Medium:
+#if defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
+  return &lv_font_montserrat_16;
+#elif defined(LV_FONT_MONTSERRAT_14) && LV_FONT_MONTSERRAT_14
+  return &lv_font_montserrat_14;
+#elif defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  return &lv_font_montserrat_12;
+#else
+  return LV_FONT_DEFAULT;
+#endif
+
+    case ChatFontSize::Large:
+#if defined(LV_FONT_MONTSERRAT_18) && LV_FONT_MONTSERRAT_18
+  return &lv_font_montserrat_18;
+#elif defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
+  return &lv_font_montserrat_16;
+#elif defined(LV_FONT_MONTSERRAT_14) && LV_FONT_MONTSERRAT_14
+  return &lv_font_montserrat_14;
+#else
+  return LV_FONT_DEFAULT;
+#endif
+
+    case ChatFontSize::XLarge:
+    default:
+#if defined(LV_FONT_MONTSERRAT_20) && LV_FONT_MONTSERRAT_20
+  return &lv_font_montserrat_20;
+#elif defined(LV_FONT_MONTSERRAT_18) && LV_FONT_MONTSERRAT_18
+  return &lv_font_montserrat_18;
+#elif defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
+  return &lv_font_montserrat_16;
+#else
+  return LV_FONT_DEFAULT;
+#endif
+  }
+#endif
+
+  ChatFontSize render_size = chat_font_size_;
+
+  switch (render_size) {
+    case ChatFontSize::Medium:
+#if defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  return &lv_font_montserrat_12;
+#elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  return &lv_font_montserrat_10;
+#else
+  return LV_FONT_DEFAULT;
+#endif
+
+    case ChatFontSize::Large:
+#if defined(LV_FONT_MONTSERRAT_14) && LV_FONT_MONTSERRAT_14
+  return &lv_font_montserrat_14;
+#elif defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  return &lv_font_montserrat_12;
+#elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  return &lv_font_montserrat_10;
+#else
+  return LV_FONT_DEFAULT;
+#endif
+
+    case ChatFontSize::XLarge:
+#if defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
+  return &lv_font_montserrat_16;
+#elif defined(LV_FONT_MONTSERRAT_14) && LV_FONT_MONTSERRAT_14
+  return &lv_font_montserrat_14;
+#elif defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  return &lv_font_montserrat_12;
+#elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  return &lv_font_montserrat_10;
+#else
+  return LV_FONT_DEFAULT;
+#endif
+
+    case ChatFontSize::Small:
+    default:
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  return &lv_font_montserrat_10;
+#elif defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  return &lv_font_montserrat_12;
+#else
+  return LV_FONT_DEFAULT;
+#endif
+  }
+}
+
+lv_color_t StandaloneUi::contactChatColorForIdentity(const char* identity) {
+  const uint8_t slot = getOrCreateContactColorSlot(identity);
+  return lv_color_hex(kContactColorPalette[slot % kContactColorPaletteCount]);
+}
+
+uint8_t StandaloneUi::getOrCreateContactColorSlot(const char* identity) {
+  if (kContactColorPaletteCount == 0) {
+    return 0;
+  }
+
+  char normalized[65] = {};
+  normalizeContactColorIdentity(identity, normalized, sizeof(normalized));
+  if (normalized[0] == '\0') {
+    return 0;
+  }
+
+  for (size_t i = 0; i < contact_color_count_; i++) {
+    if (strcmp(contact_color_entries_[i].identity, normalized) == 0) {
+      return static_cast<uint8_t>(contact_color_entries_[i].slot % kContactColorPaletteCount);
+    }
+  }
+
+  const uint32_t mix =
+      stableTextHash(normalized) ^ static_cast<uint32_t>(millis()) ^ nowEpochSecondsOrZero();
+  uint8_t slot = static_cast<uint8_t>(mix % kContactColorPaletteCount);
+
+  if (contact_color_count_ < kContactColorPaletteCount) {
+    bool used[kContactColorPaletteCount] = {false};
+    for (size_t i = 0; i < contact_color_count_; i++) {
+      used[contact_color_entries_[i].slot % kContactColorPaletteCount] = true;
+    }
+    if (used[slot]) {
+      for (size_t i = 0; i < kContactColorPaletteCount; i++) {
+        const uint8_t candidate = static_cast<uint8_t>((slot + i) % kContactColorPaletteCount);
+        if (!used[candidate]) {
+          slot = candidate;
+          break;
+        }
+      }
+    }
+  }
+
+  if (contact_color_count_ < kMaxContactColorEntries) {
+    ContactColorEntry& entry = contact_color_entries_[contact_color_count_++];
+    strncpy(entry.identity, normalized, sizeof(entry.identity) - 1);
+    entry.identity[sizeof(entry.identity) - 1] = '\0';
+    entry.slot = slot;
+    contact_colors_dirty_ = true;
+    return slot;
+  }
+
+  // Fallback when the contact-color table is full.
+  return static_cast<uint8_t>(stableTextHash(normalized) % kContactColorPaletteCount);
+}
+
+void StandaloneUi::rebuildChatViewsForRenderSettingChange() {
+  rebuildChatForActiveChannel();
+  if (dm_open_) {
+    rebuildDmDialog();
+  }
+  if (contacts_open_ && contacts_dm_open_) {
+    rebuildContactsDmPanel();
+  }
+}
+
+lv_obj_t* StandaloneUi::createChatRenderableRow(lv_obj_t* panel, lv_coord_t row_w, const char* text,
+                                                ChatLineKind kind, bool include_rx_sender,
+                                                const char* contact_identity) {
+  if (!panel || !text || text[0] == '\0') {
+    return nullptr;
+  }
+
+  if (chat_render_style_ == ChatRenderStyle::Classic) {
+    lv_obj_t* row = lv_label_create(panel);
+    lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
+    lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(row, &style_text_main_, 0);
+    lv_obj_set_style_text_font(row, chatConversationFont(), 0);
+
+    if (!chat_render_colors_) {
+      // Explicit uniform fallback when chat colors are disabled.
+      lv_obj_set_style_text_color(row, kColorTextMain, 0);
+    } else {
+      lv_color_t kind_color = kColorTextMain;
+      switch (kind) {
+        case ChatLineKind::Rx:
+          kind_color = kColorRx;
+          break;
+        case ChatLineKind::Tx:
+          kind_color = kColorTx;
+          break;
+        case ChatLineKind::Ack:
+          kind_color = kColorAck;
+          break;
+        case ChatLineKind::Error:
+          kind_color = kColorErr;
+          break;
+        case ChatLineKind::Normal:
+        default:
+          kind_color = kColorTextMain;
+          break;
+      }
+
+      char effective_identity[65] = {};
+      if (contact_identity && contact_identity[0] != '\0') {
+        normalizeContactColorIdentity(contact_identity, effective_identity, sizeof(effective_identity));
+      }
+
+      if (effective_identity[0] == '\0' && include_rx_sender) {
+        const char* sender_start = text;
+        const char* after_time = strstr(text, "] ");
+        if (after_time && after_time[2] != '\0') {
+          sender_start = after_time + 2;
+        }
+        const char* sender_end = strstr(sender_start, ": ");
+        if (sender_end && sender_end > sender_start) {
+          char sender[24] = {};
+          size_t sender_len = static_cast<size_t>(sender_end - sender_start);
+          if (sender_len >= sizeof(sender)) {
+            sender_len = sizeof(sender) - 1;
+          }
+          memcpy(sender, sender_start, sender_len);
+          sender[sender_len] = '\0';
+          if (sender[0] != '\0' && strcasecmp(sender, "Me") != 0) {
+            normalizeContactColorIdentity(sender, effective_identity, sizeof(effective_identity));
+          }
+        }
+      }
+
+      if (effective_identity[0] != '\0') {
+        lv_obj_set_style_text_color(row, contactChatColorForIdentity(effective_identity), 0);
+      } else {
+        lv_obj_set_style_text_color(row, kind_color, 0);
+      }
+    }
+
+    lv_label_set_text(row, text);
+    return row;
+  }
+
+  const lv_font_t* font = chatConversationFont();
+  const lv_coord_t font_h = font ? font->line_height : 12;
+  const lv_coord_t bubble_pad_v = font_h >= 12 ? 3 : 2;
+  const lv_coord_t bubble_pad_h = font_h >= 12 ? 5 : 4;
+  lv_coord_t bubble_radius = static_cast<lv_coord_t>(font_h / 2 + 2);
+  if (bubble_radius < 5) {
+    bubble_radius = 5;
+  }
+  if (bubble_radius > 10) {
+    bubble_radius = 10;
+  }
+
+  lv_coord_t content_w = row_w > 0 ? row_w : lv_obj_get_content_width(panel);
+  if (content_w <= 0) {
+    content_w = lv_obj_get_width(panel);
+  }
+  if (content_w <= 0) {
+    content_w = 180;
+  }
+  lv_coord_t bubble_w = static_cast<lv_coord_t>((content_w * 86) / 100);
+  if (bubble_w > content_w) {
+    bubble_w = content_w;
+  }
+  if (bubble_w < 72) {
+    bubble_w = content_w;
+  }
+
+  const bool align_right = (kind == ChatLineKind::Tx || kind == ChatLineKind::Ack);
+  lv_obj_t* row_wrap = lv_obj_create(panel);
+  lv_obj_set_width(row_wrap, content_w);
+  lv_obj_set_height(row_wrap, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(row_wrap, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(row_wrap, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(row_wrap, 1, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(row_wrap, 1, LV_PART_MAIN);
+  lv_obj_set_style_pad_left(row_wrap, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(row_wrap, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(row_wrap, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(row_wrap, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(row_wrap, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_layout(row_wrap, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(row_wrap, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row_wrap, align_right ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+  lv_obj_t* stack = lv_obj_create(row_wrap);
+  lv_obj_set_width(stack, LV_SIZE_CONTENT);
+  lv_obj_set_height(stack, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(stack, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(stack, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(stack, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(stack, 1, LV_PART_MAIN);
+  lv_obj_set_style_radius(stack, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(stack, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(stack, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_layout(stack, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(stack, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(stack, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+  const char* bubble_text = text;
+  char bubble_text_buf[128] = {};
+  char effective_identity[65] = {};
+  if (contact_identity && contact_identity[0] != '\0') {
+    normalizeContactColorIdentity(contact_identity, effective_identity, sizeof(effective_identity));
+  }
+
+  if (include_rx_sender) {
+    const char* sender_start = text;
+    const char* after_time = strstr(text, "] ");
+    if (after_time && after_time[2] != '\0') {
+      sender_start = after_time + 2;
+    }
+
+    const char* sender_end = strstr(sender_start, ": ");
+    if (sender_end && sender_end > sender_start) {
+      char sender[24] = {};
+      size_t sender_len = static_cast<size_t>(sender_end - sender_start);
+      if (sender_len >= sizeof(sender)) {
+        sender_len = sizeof(sender) - 1;
+      }
+      memcpy(sender, sender_start, sender_len);
+      sender[sender_len] = '\0';
+
+      const bool sender_is_me = (strcasecmp(sender, "Me") == 0);
+      const bool show_sender_header =
+          (kind == ChatLineKind::Rx && !sender_is_me) ||
+          ((kind == ChatLineKind::Tx || kind == ChatLineKind::Ack) && sender_is_me);
+
+      if (sender[0] != '\0' && show_sender_header) {
+        if (effective_identity[0] == '\0') {
+          if (!sender_is_me) {
+            normalizeContactColorIdentity(sender, effective_identity, sizeof(effective_identity));
+          }
+        }
+        lv_obj_t* sender_label = lv_label_create(stack);
+        lv_obj_add_style(sender_label, &style_text_dim_, 0);
+        lv_obj_set_style_text_font(sender_label, compactUiFont(), 0);
+        lv_obj_set_style_text_opa(sender_label, LV_OPA_80, 0);
+        lv_label_set_text(sender_label, sender);
+
+        // Avoid showing the sender twice: once in the header label and again in bubble body.
+        const char* message_start = sender_end + 2;
+        if (message_start[0] != '\0') {
+          if (after_time && after_time >= text) {
+            const size_t prefix_len = static_cast<size_t>((after_time + 2) - text);
+            snprintf(bubble_text_buf, sizeof(bubble_text_buf), "%.*s%s", static_cast<int>(prefix_len), text,
+                     message_start);
+            if (bubble_text_buf[0] != '\0') {
+              bubble_text = bubble_text_buf;
+            }
+          } else {
+            bubble_text = message_start;
+          }
+        }
+      }
+    }
+  }
+
+  lv_color_t kind_color = kColorBorder;
+  switch (kind) {
+    case ChatLineKind::Rx:
+      kind_color = kColorRx;
+      break;
+    case ChatLineKind::Tx:
+      kind_color = kColorTx;
+      break;
+    case ChatLineKind::Ack:
+      kind_color = kColorAck;
+      break;
+    case ChatLineKind::Error:
+      kind_color = kColorErr;
+      break;
+    case ChatLineKind::Normal:
+    default:
+      kind_color = kColorBorder;
+      break;
+  }
+
+  lv_color_t accent_color = kind_color;
+  if (chat_render_colors_ && effective_identity[0] != '\0') {
+    accent_color = contactChatColorForIdentity(effective_identity);
+  }
+
+  lv_obj_t* bubble = lv_obj_create(stack);
+  lv_obj_set_width(bubble, bubble_w);
+  lv_obj_set_height(bubble, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_radius(bubble, bubble_radius, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(bubble, bubble_pad_v, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(bubble, bubble_pad_v, LV_PART_MAIN);
+  lv_obj_set_style_pad_left(bubble, bubble_pad_h, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(bubble, bubble_pad_h, LV_PART_MAIN);
+
+  if (chat_render_style_ == ChatRenderStyle::Bubble) {
+    lv_obj_set_style_bg_color(bubble, chat_render_colors_ ? accent_color : kColorPanelAlt, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bubble, chat_render_colors_ ? LV_OPA_30 : LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bubble, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bubble, chat_render_colors_ ? accent_color : kColorBorder, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
+  } else {
+    lv_obj_set_style_bg_opa(bubble, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bubble, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bubble, chat_render_colors_ ? accent_color : kColorBorder, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
+  }
+
+  lv_obj_t* label = lv_label_create(bubble);
+  lv_obj_set_width(label, LV_PCT(100));
+  lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+  lv_obj_add_style(label, &style_text_main_, 0);
+  lv_obj_set_style_text_font(label, chatConversationFont(), 0);
+
+  if (chat_render_style_ == ChatRenderStyle::Outline && chat_render_colors_) {
+    if (effective_identity[0] != '\0') {
+      lv_obj_set_style_text_color(label, accent_color, 0);
+    } else {
+      switch (kind) {
+        case ChatLineKind::Rx:
+        case ChatLineKind::Tx:
+        case ChatLineKind::Ack:
+        case ChatLineKind::Error:
+          lv_obj_set_style_text_color(label, kind_color, 0);
+          break;
+        case ChatLineKind::Normal:
+        default:
+          break;
+      }
+    }
+  }
+
+  lv_label_set_text(label, bubble_text);
+  return row_wrap;
+}
+
+// Frees the property arrays LVGL allocated for each style so createStyles()
+// can re-run against a new palette without leaking them.
+void StandaloneUi::destroyStyles() {
+  if (!styles_ready_) {
+    return;
+  }
+  lv_style_t* const styles[] = {
+      &style_root_,        &style_panel_,           &style_header_,
+      &style_chat_,        &style_chat_focused_,    &style_button_,
+      &style_button_focused_, &style_button_active_, &style_selector_anchor_,
+      &style_dropdown_panel_, &style_dropdown_highlight_, &style_dropdown_active_,
+      &style_shortcut_active_, &style_unread_edge_, &style_text_main_,
+      &style_text_dim_,    &style_msg_rx_,          &style_msg_tx_,
+      &style_msg_ack_,     &style_msg_err_,
+  };
+  for (lv_style_t* style : styles) {
+    lv_style_reset(style);
+  }
+  styles_ready_ = false;
+}
 
 bool StandaloneUi::createStyles() {
   if (styles_ready_) {
@@ -2519,20 +2972,6 @@ bool StandaloneUi::ensureContactActionsPopupBuilt() {
     lv_obj_clear_flag(b, LV_OBJ_FLAG_HIDDEN);  // visibility now follows the backdrop
   }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  contacts_actions_close_btn_ = lv_btn_create(contacts_actions_panel_);
-  lv_obj_set_width(contacts_actions_close_btn_, LV_PCT(49));
-  lv_obj_set_height(contacts_actions_close_btn_, 28);
-  lv_obj_add_style(contacts_actions_close_btn_, &style_button_, 0);
-  lv_obj_add_style(contacts_actions_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_clear_flag(contacts_actions_close_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
-  lv_obj_add_event_cb(contacts_actions_close_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(contacts_actions_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-  lv_obj_t* clbl = lv_label_create(contacts_actions_close_btn_);
-  lv_obj_add_style(clbl, &style_text_main_, 0);
-  lv_label_set_text(clbl, "Close");
-  lv_obj_center(clbl);
-#endif
 
   if (key_group_) {
     lv_group_add_obj(key_group_, contacts_actions_admin_btn_);
@@ -2616,6 +3055,516 @@ void StandaloneUi::openRegionListDialog() {
     if (first) {
       lv_group_focus_obj(first);
     }
+  }
+}
+
+// Clears every widget handle after lv_obj_del(root_) tore the tree down. Kept
+// in the same order as the member declarations in standalone_ui.h so the two
+// stay easy to diff; splash_overlay_ is deliberately absent (it lives on the
+// screen, not under root_, and is long gone by the time a theme can change).
+void StandaloneUi::resetUiObjectHandles() {
+  root_ = nullptr;
+  main_panel_ = nullptr;
+  header_bar_ = nullptr;
+  channel_selector_btn_ = nullptr;
+  channel_selector_label_ = nullptr;
+  channel_selector_caret_ = nullptr;
+  channel_dropdown_panel_ = nullptr;
+  channel_dropdown_list_ = nullptr;
+  memset(channel_dropdown_rows_, 0, sizeof(channel_dropdown_rows_));
+  memset(channel_dropdown_labels_, 0, sizeof(channel_dropdown_labels_));
+  gps_label_ = nullptr;
+  wifi_label_ = nullptr;
+  wifi_ap_badge_label_ = nullptr;
+  time_label_ = nullptr;
+  battery_pct_label_ = nullptr;
+  battery_bar_ = nullptr;
+  chat_panel_ = nullptr;
+  chat_advz_btn_ = nullptr;
+  chat_advz_label_ = nullptr;
+  chat_advf_btn_ = nullptr;
+  chat_advf_label_ = nullptr;
+  chat_new_btn_ = nullptr;
+  chat_new_label_ = nullptr;
+  memset(chat_rows_, 0, sizeof(chat_rows_));
+  compose_dialog_ = nullptr;
+  compose_title_label_ = nullptr;
+  compose_hint_label_ = nullptr;
+  compose_input_ = nullptr;
+  compose_action_row_ = nullptr;
+  compose_cancel_btn_ = nullptr;
+  compose_cancel_label_ = nullptr;
+  compose_send_btn_ = nullptr;
+  compose_send_label_ = nullptr;
+  compose_keyboard_ = nullptr;
+  cfg_dialog_ = nullptr;
+  cfg_title_label_ = nullptr;
+  cfg_action_label_ = nullptr;
+  cfg_status_label_ = nullptr;
+  cfg_close_btn_ = nullptr;
+  cfg_close_label_ = nullptr;
+  cfg_content_panel_ = nullptr;
+  memset(cfg_rows_, 0, sizeof(cfg_rows_));
+  memset(cfg_row_labels_, 0, sizeof(cfg_row_labels_));
+  confirm_backdrop_ = nullptr;
+  confirm_dialog_ = nullptr;
+  confirm_title_label_ = nullptr;
+  confirm_action_label_ = nullptr;
+  confirm_yes_btn_ = nullptr;
+  confirm_yes_label_ = nullptr;
+  confirm_no_btn_ = nullptr;
+  confirm_no_label_ = nullptr;
+  contacts_dialog_ = nullptr;
+  contacts_status_label_ = nullptr;
+  contacts_detail_panel_ = nullptr;
+  contacts_detail_info_panel_ = nullptr;
+  memset(contacts_action_rows_, 0, sizeof(contacts_action_rows_));
+  memset(contacts_action_labels_, 0, sizeof(contacts_action_labels_));
+  contacts_full_name_label_ = nullptr;
+  contacts_lat_lon_label_ = nullptr;
+  contacts_last_heard_label_ = nullptr;
+  contacts_telemetry_label_ = nullptr;
+  contacts_dm_panel_ = nullptr;
+  contacts_dm_clear_btn_ = nullptr;
+  contacts_dm_clear_label_ = nullptr;
+  contacts_dm_new_btn_ = nullptr;
+  contacts_dm_new_label_ = nullptr;
+  contacts_dm_hint_label_ = nullptr;
+  contacts_path_btn_ = nullptr;
+  contacts_path_label_ = nullptr;
+  contacts_ignore_btn_ = nullptr;
+  contacts_ignore_label_ = nullptr;
+  contacts_del_btn_ = nullptr;
+  contacts_del_label_ = nullptr;
+  contacts_actions_btn_ = nullptr;
+  contacts_actions_label_ = nullptr;
+  contacts_actions_backdrop_ = nullptr;
+  contacts_actions_panel_ = nullptr;
+  contacts_actions_admin_btn_ = nullptr;
+  contacts_actions_admin_label_ = nullptr;
+  contacts_actions_refresh_btn_ = nullptr;
+  contacts_actions_refresh_label_ = nullptr;
+  contacts_actions_close_btn_ = nullptr;
+  contacts_path_dialog_ = nullptr;
+  contacts_path_title_label_ = nullptr;
+  contacts_path_body_panel_ = nullptr;
+  contacts_path_body_label_ = nullptr;
+  contacts_path_close_btn_ = nullptr;
+  contacts_path_close_label_ = nullptr;
+  dm_dialog_ = nullptr;
+  dm_title_label_ = nullptr;
+  dm_clear_btn_ = nullptr;
+  dm_clear_label_ = nullptr;
+  dm_new_btn_ = nullptr;
+  dm_new_label_ = nullptr;
+  dm_panel_ = nullptr;
+  dm_close_btn_ = nullptr;
+  dm_close_label_ = nullptr;
+  dm_hint_label_ = nullptr;
+  memset(dm_rows_, 0, sizeof(dm_rows_));
+  dm_pending_ack_label_ = nullptr;
+  admin_pw_dialog_ = nullptr;
+  admin_pw_title_label_ = nullptr;
+  admin_pw_input_ = nullptr;
+  admin_pw_keyboard_ = nullptr;
+  admin_pw_save_btn_ = nullptr;
+  admin_pw_save_label_ = nullptr;
+  admin_pw_ok_btn_ = nullptr;
+  admin_pw_cancel_btn_ = nullptr;
+  admin_screen_dialog_ = nullptr;
+  admin_screen_title_label_ = nullptr;
+  admin_screen_auth_label_ = nullptr;
+  admin_screen_close_btn_ = nullptr;
+  admin_screen_status_label_ = nullptr;
+  admin_screen_history_panel_ = nullptr;
+  admin_screen_history_label_ = nullptr;
+  admin_screen_hint_label_ = nullptr;
+  admin_cmd_dialog_ = nullptr;
+  admin_cmd_title_label_ = nullptr;
+  admin_cmd_input_ = nullptr;
+  admin_cmd_run_btn_ = nullptr;
+  admin_cmd_cancel_btn_ = nullptr;
+  help_dialog_ = nullptr;
+  help_body_panel_ = nullptr;
+  help_title_label_ = nullptr;
+  help_body_label_ = nullptr;
+  help_close_btn_ = nullptr;
+  help_close_label_ = nullptr;
+  live_dialog_ = nullptr;
+  live_title_label_ = nullptr;
+  live_body_panel_ = nullptr;
+  live_hint_label_ = nullptr;
+  live_close_btn_ = nullptr;
+  live_close_label_ = nullptr;
+  live_util_dialog_ = nullptr;
+  live_util_title_label_ = nullptr;
+  live_util_chart_ = nullptr;
+  live_util_units_label_ = nullptr;
+  live_util_hint_label_ = nullptr;
+  live_util_stats_label_ = nullptr;
+  live_snr_dialog_ = nullptr;
+  live_snr_title_label_ = nullptr;
+  live_snr_chart_ = nullptr;
+  live_snr_units_label_ = nullptr;
+  live_snr_hint_label_ = nullptr;
+  live_snr_stats_label_ = nullptr;
+  memset(live_rows_, 0, sizeof(live_rows_));
+  advert_popup_ = nullptr;
+  advert_popup_label_ = nullptr;
+  shortcut_strip_ = nullptr;
+  memset(shortcut_btns_, 0, sizeof(shortcut_btns_));
+  memset(shortcut_labels_, 0, sizeof(shortcut_labels_));
+  region_list_backdrop_ = nullptr;
+  region_list_panel_ = nullptr;
+  theme_list_backdrop_ = nullptr;
+  theme_list_panel_ = nullptr;
+  memset(theme_list_rows_, 0, sizeof(theme_list_rows_));
+  memset(theme_list_labels_, 0, sizeof(theme_list_labels_));
+}
+
+void StandaloneUi::onThemeListEvent(lv_event_t* event) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(event));
+  if (!ui || lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    return;
+  }
+  if (ui->theme_list_swallow_first_activate_) {
+    lv_indev_t* indev = lv_indev_get_act();
+    const bool pointer_click = indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER;
+    if (!pointer_click) {
+      // Keyboard/encoder/button can emit a synthetic CLICKED from the same
+      // keypress that opened the dialog; swallow that once.
+      ui->theme_list_swallow_first_activate_ = false;
+      return;
+    }
+    ui->theme_list_swallow_first_activate_ = false;
+  }
+  if (ui->theme_list_opened_ms_ != 0 &&
+      static_cast<uint32_t>(millis() - ui->theme_list_opened_ms_) < kThemeOpenInputIgnoreMs) {
+    return;
+  }
+  lv_obj_t* target = lv_event_get_target(event);
+  const int visible_index = static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
+  const int index = (static_cast<int>(ui->theme_list_window_start_) + visible_index) % kUiThemePresetCount;
+  ui->applyThemeSelection(index);
+}
+
+bool StandaloneUi::ensureThemeListDialogBuilt() {
+  if (theme_list_backdrop_) {
+    return true;
+  }
+  if (!root_) {
+    return false;
+  }
+
+  theme_list_backdrop_ = lv_obj_create(root_);
+  if (!theme_list_backdrop_) {
+    return false;
+  }
+  lv_obj_set_size(theme_list_backdrop_, LV_PCT(92), LV_PCT(90));
+  lv_obj_align(theme_list_backdrop_, LV_ALIGN_CENTER, 0, kModalVerticalNudgeY);
+  lv_obj_clear_flag(theme_list_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_color(theme_list_backdrop_, lv_color_hex(0x0E285B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(theme_list_backdrop_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(theme_list_backdrop_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(theme_list_backdrop_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(theme_list_backdrop_, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(theme_list_backdrop_, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(theme_list_backdrop_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(theme_list_backdrop_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_flag(theme_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* title = lv_label_create(theme_list_backdrop_);
+  lv_obj_t* hint = lv_label_create(theme_list_backdrop_);
+  theme_list_panel_ = lv_obj_create(theme_list_backdrop_);
+  if (!title || !hint || !theme_list_panel_) {
+    lv_obj_del(theme_list_backdrop_);
+    theme_list_backdrop_ = nullptr;
+    theme_list_panel_ = nullptr;
+    return false;
+  }
+
+  lv_obj_add_style(title, &style_text_main_, 0);
+  lv_label_set_text(title, "Theme");
+
+  lv_obj_add_style(hint, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(hint, "j/k or arrows, Enter=apply, Bcksp=close");
+
+  lv_obj_set_width(theme_list_panel_, LV_PCT(100));
+  lv_obj_set_flex_grow(theme_list_panel_, 1);
+  lv_obj_set_style_bg_opa(theme_list_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(theme_list_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(theme_list_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(theme_list_panel_, 3, LV_PART_MAIN);
+  lv_obj_set_flex_flow(theme_list_panel_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scroll_dir(theme_list_panel_, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(theme_list_panel_, LV_SCROLLBAR_MODE_AUTO);
+
+  const int row_count =
+      (kUiThemePresetCount < static_cast<int>(kThemePickerVisibleRows))
+          ? kUiThemePresetCount
+          : static_cast<int>(kThemePickerVisibleRows);
+  for (int i = 0; i < row_count; i++) {
+    lv_obj_t* row = lv_btn_create(theme_list_panel_);
+    lv_obj_t* label = row ? lv_label_create(row) : nullptr;
+    if (!row || !label) {
+      // Out of LVGL memory. Tear the whole dialog down rather than leaving a
+      // half-built list behind, and let the caller report it.
+      lv_obj_del(theme_list_backdrop_);
+      theme_list_backdrop_ = nullptr;
+      theme_list_panel_ = nullptr;
+      memset(theme_list_rows_, 0, sizeof(theme_list_rows_));
+      memset(theme_list_labels_, 0, sizeof(theme_list_labels_));
+      return false;
+    }
+
+    lv_obj_set_size(row, LV_PCT(100), kThemeRowHeight);
+    lv_obj_add_style(row, &style_button_, 0);
+    lv_obj_add_style(row, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_user_data(row, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+    lv_obj_add_event_cb(row, onThemeListEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(row, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(row, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    if (key_group_) {
+      lv_group_add_obj(key_group_, row);
+    }
+
+    lv_obj_add_style(label, &style_text_main_, 0);
+    lv_obj_set_style_text_font(label, compactUiFont(), 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 4, 0);
+    lv_label_set_text(label, "-");
+
+    theme_list_rows_[i] = row;
+    theme_list_labels_[i] = label;
+  }
+  return true;
+}
+
+void StandaloneUi::refreshThemeListDialog() {
+  if (!theme_list_open_) {
+    return;
+  }
+  const int active = uiThemePresetIndex(activeUiTheme(), activeUiMode());
+  const int row_count =
+      (kUiThemePresetCount < static_cast<int>(kThemePickerVisibleRows))
+          ? kUiThemePresetCount
+          : static_cast<int>(kThemePickerVisibleRows);
+
+  int start = static_cast<int>(theme_list_selected_) - (row_count / 2);
+  while (start < 0) {
+    start += kUiThemePresetCount;
+  }
+  theme_list_window_start_ = static_cast<uint8_t>(start % kUiThemePresetCount);
+
+  for (int i = 0; i < row_count; i++) {
+    lv_obj_t* row = theme_list_rows_[i];
+    if (!row) {
+      continue;
+    }
+    const int preset_index = (start + i) % kUiThemePresetCount;
+    lv_obj_remove_style(row, &style_button_active_, 0);
+    const bool selected = (preset_index == static_cast<int>(theme_list_selected_));
+    if (selected) {
+      lv_obj_add_style(row, &style_button_active_, 0);
+    }
+    if (theme_list_labels_[i]) {
+      char text[48] = {};
+      snprintf(text, sizeof(text), "%s%s", (preset_index == active) ? LV_SYMBOL_OK " " : "",
+               kUiThemePresets[preset_index].name);
+      lv_label_set_text(theme_list_labels_[i], text);
+    }
+  }
+  const int selected_row =
+      (static_cast<int>(theme_list_selected_) - start + kUiThemePresetCount) % kUiThemePresetCount;
+  if (selected_row >= 0 && selected_row < row_count && theme_list_rows_[selected_row]) {
+    lv_obj_scroll_to_view(theme_list_rows_[selected_row], LV_ANIM_OFF);
+  }
+}
+
+void StandaloneUi::openThemeListDialog() {
+  if (theme_list_open_) {
+    return;
+  }
+  if (!ensureThemeListDialogBuilt()) {
+    // Only realistic cause is an exhausted LVGL pool; say so instead of
+    // looking like a dead menu row.
+    strncpy(cfg_action_text_, "Theme picker: out of memory", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    refreshCfgDialog();
+    return;
+  }
+  theme_list_open_ = true;
+  theme_list_opened_ms_ = millis();
+  theme_list_swallow_first_activate_ = true;
+  const int active = uiThemePresetIndex(activeUiTheme(), activeUiMode());
+  theme_list_selected_ = static_cast<uint8_t>(active);
+  theme_list_window_start_ = theme_list_selected_;
+  lv_obj_clear_flag(theme_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(theme_list_backdrop_);
+  refreshThemeListDialog();
+  const int row_count =
+      (kUiThemePresetCount < static_cast<int>(kThemePickerVisibleRows))
+          ? kUiThemePresetCount
+          : static_cast<int>(kThemePickerVisibleRows);
+  const int selected_row =
+      (static_cast<int>(theme_list_selected_) - static_cast<int>(theme_list_window_start_) + kUiThemePresetCount) %
+      kUiThemePresetCount;
+  if (key_group_ && selected_row >= 0 && selected_row < row_count && theme_list_rows_[selected_row]) {
+    lv_group_focus_obj(theme_list_rows_[selected_row]);
+  }
+}
+
+void StandaloneUi::closeThemeListDialog(bool focus_cfg) {
+  if (!theme_list_open_) {
+    return;
+  }
+  theme_list_open_ = false;
+  theme_list_opened_ms_ = 0;
+  theme_list_swallow_first_activate_ = false;
+  if (theme_list_backdrop_) {
+    lv_obj_add_flag(theme_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (focus_cfg && key_group_ && cfg_open_ && cfg_rows_[cfg_selected_row_]) {
+    lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
+  }
+}
+
+void StandaloneUi::moveThemeSelection(int delta) {
+  if (!theme_list_open_) {
+    return;
+  }
+  int next = static_cast<int>(theme_list_selected_) + delta;
+  if (next < 0) {
+    next = kUiThemePresetCount - 1;
+  } else if (next >= kUiThemePresetCount) {
+    next = 0;
+  }
+  theme_list_selected_ = static_cast<uint8_t>(next);
+  refreshThemeListDialog();
+  const int row_count =
+      (kUiThemePresetCount < static_cast<int>(kThemePickerVisibleRows))
+          ? kUiThemePresetCount
+          : static_cast<int>(kThemePickerVisibleRows);
+  const int selected_row =
+      (static_cast<int>(theme_list_selected_) - static_cast<int>(theme_list_window_start_) + kUiThemePresetCount) %
+      kUiThemePresetCount;
+  if (key_group_ && selected_row >= 0 && selected_row < row_count && theme_list_rows_[selected_row]) {
+    lv_group_focus_obj(theme_list_rows_[selected_row]);
+  }
+}
+
+void StandaloneUi::applyThemeSelection(int preset_index) {
+  if (preset_index < 0 || preset_index >= kUiThemePresetCount) {
+    return;
+  }
+  const UiThemePreset& preset = kUiThemePresets[preset_index];
+  theme_list_selected_ = static_cast<uint8_t>(preset_index);
+
+  if (preset.theme == activeUiTheme() && preset.mode == activeUiMode()) {
+    snprintf(cfg_action_text_, sizeof(cfg_action_text_), "Theme: %s (unchanged)", preset.name);
+    return;
+  }
+
+  char err[64] = {};
+  if (!plumeria::web::setUiTheme(preset.theme, preset.mode, err, sizeof(err))) {
+    snprintf(cfg_action_text_, sizeof(cfg_action_text_), "Theme save failed: %s",
+             err[0] ? err : "unknown");
+    closeThemeListDialog();
+    refreshCfgDialog();
+    return;
+  }
+
+  snprintf(cfg_action_text_, sizeof(cfg_action_text_), "Theme: %s", preset.name);
+  applyUiThemePalette(preset.theme, preset.mode);
+  closeThemeListDialog(false);
+  // The rebuild frees the row that raised this event, so defer it to loop().
+  scheduleThemeRebuild(true);
+}
+
+void StandaloneUi::scheduleThemeRebuild(bool reopen_cfg) {
+  theme_rebuild_pending_ = true;
+  theme_rebuild_reopen_cfg_ = reopen_cfg;
+  theme_rebuild_cfg_row_ = cfg_selected_row_;
+}
+
+void StandaloneUi::processPendingThemeRebuild() {
+  if (!theme_rebuild_pending_) {
+    return;
+  }
+  theme_rebuild_pending_ = false;
+  rebuildUiForThemeChange(theme_rebuild_reopen_cfg_, theme_rebuild_cfg_row_);
+}
+
+void StandaloneUi::rebuildUiForThemeChange(bool reopen_cfg, uint8_t reopen_cfg_row) {
+  if (!started_ || !root_) {
+    return;
+  }
+
+  // Flush anything dirty before the widget tree goes away; the in-memory
+  // history itself survives and is re-rendered below.
+  if (chat_history_dirty_) {
+    saveChatHistoryToFs();
+  }
+  if (contact_colors_dirty_) {
+    saveChatContactColorsToFs();
+  }
+  if (dm_history_dirty_) {
+    saveDmHistoryToFs();
+  }
+
+  if (key_group_) {
+    lv_group_del(key_group_);
+    key_group_ = nullptr;
+  }
+  lv_obj_del(root_);
+  resetUiObjectHandles();
+
+  // Every dialog is lazily rebuilt on next open, so clear the "is open" state
+  // that would otherwise point at freed objects.
+  channel_dropdown_open_ = false;
+  compose_open_ = false;
+  compose_dm_mode_ = false;
+  compose_return_to_dm_ = false;
+  cfg_open_ = false;
+  contacts_open_ = false;
+  contacts_nav_focused_ = false;
+  contacts_dm_open_ = false;
+  contacts_path_open_ = false;
+  contacts_actions_open_ = false;
+  dm_open_ = false;
+  help_open_ = false;
+  live_open_ = false;
+  live_util_open_ = false;
+  live_snr_open_ = false;
+  advert_popup_open_ = false;
+  confirm_open_ = false;
+  confirm_kind_ = ConfirmKind::None;
+  confirm_pending_row_ = 0xFF;
+  identity_prompt_open_ = false;
+  theme_list_open_ = false;
+  theme_list_opened_ms_ = 0;
+  theme_list_swallow_first_activate_ = false;
+
+  destroyStyles();
+  if (!createStyles()) {
+    return;
+  }
+  buildLayout();
+  bindInputGroup();
+  rebuildChatForActiveChannel();
+  refreshHeaderVisuals();
+  refreshShortcutVisuals();
+
+  if (reopen_cfg) {
+    cfg_selected_row_ = (reopen_cfg_row < kCfgRowCount) ? reopen_cfg_row : 0;
+    openCfgDialog();
+  } else {
+    setFocusZone(FocusZone::Chat);
   }
 }
 
@@ -2737,56 +3686,6 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
     lv_label_set_long_mode(contacts_telemetry_label_, LV_LABEL_LONG_WRAP);
     lv_label_set_text(contacts_telemetry_label_, "Telemetry: -");
 
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    contacts_dm_clear_btn_ = lv_btn_create(contacts_dialog_);
-    if (!contacts_dm_clear_btn_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_set_size(contacts_dm_clear_btn_, 56, 18);
-    lv_obj_align(contacts_dm_clear_btn_, LV_ALIGN_TOP_RIGHT, -60, 18);
-    lv_obj_add_style(contacts_dm_clear_btn_, &style_button_, 0);
-    lv_obj_add_style(contacts_dm_clear_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-    lv_obj_clear_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_add_event_cb(contacts_dm_clear_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-    lv_obj_add_event_cb(contacts_dm_clear_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
-    lv_obj_add_event_cb(contacts_dm_clear_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-    lv_obj_add_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
-
-    contacts_dm_clear_label_ = lv_label_create(contacts_dm_clear_btn_);
-    if (!contacts_dm_clear_label_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_add_style(contacts_dm_clear_label_, &style_text_main_, 0);
-    lv_label_set_text(contacts_dm_clear_label_, "CLEAR");
-    lv_obj_center(contacts_dm_clear_label_);
-
-    contacts_dm_new_btn_ = lv_btn_create(contacts_dialog_);
-    if (!contacts_dm_new_btn_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_set_size(contacts_dm_new_btn_, 56, 18);
-    lv_obj_align(contacts_dm_new_btn_, LV_ALIGN_TOP_RIGHT, -2, 18);
-    lv_obj_add_style(contacts_dm_new_btn_, &style_button_, 0);
-    lv_obj_add_style(contacts_dm_new_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-    lv_obj_clear_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_add_event_cb(contacts_dm_new_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-    lv_obj_add_event_cb(contacts_dm_new_btn_, onContactsEvent, LV_EVENT_CLICKED, this);
-    lv_obj_add_event_cb(contacts_dm_new_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-    lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
-
-    contacts_dm_new_label_ = lv_label_create(contacts_dm_new_btn_);
-    if (!contacts_dm_new_label_) {
-      contacts_init_failed = true;
-      break;
-    }
-    lv_obj_add_style(contacts_dm_new_label_, &style_text_main_, 0);
-    lv_label_set_text(contacts_dm_new_label_, "NEW");
-    lv_obj_center(contacts_dm_new_label_);
-    contacts_dm_hint_label_ = nullptr;
-  #else
     contacts_dm_clear_btn_ = nullptr;
     contacts_dm_clear_label_ = nullptr;
     contacts_dm_new_btn_ = nullptr;
@@ -2805,7 +3704,6 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
     lv_label_set_text(contacts_dm_hint_label_, "Enter for new message, c to clear messages");
     lv_obj_align(contacts_dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
     lv_obj_add_flag(contacts_dm_hint_label_, LV_OBJ_FLAG_HIDDEN);
-  #endif
 
     contacts_dm_panel_ = lv_obj_create(contacts_dialog_);
     if (!contacts_dm_panel_) {
@@ -2832,50 +3730,23 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
       break;
     }
     lv_obj_set_size(contacts_detail_panel_, LV_PCT(100),
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-            50
-  #else
             22
-  #endif
     );
     lv_obj_align(contacts_detail_panel_, LV_ALIGN_BOTTOM_MID, 0, -1);
     lv_obj_set_style_bg_opa(contacts_detail_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(contacts_detail_panel_, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(contacts_detail_panel_, 0, LV_PART_MAIN);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_obj_set_style_pad_top(contacts_detail_panel_, 1, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(contacts_detail_panel_, 1, LV_PART_MAIN);
-#endif
     lv_obj_set_style_pad_column(contacts_detail_panel_, 2, LV_PART_MAIN);
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_obj_set_style_pad_row(contacts_detail_panel_, 4, LV_PART_MAIN);
-  #else
     lv_obj_set_style_pad_row(contacts_detail_panel_, 2, LV_PART_MAIN);
-  #endif
     lv_obj_set_layout(contacts_detail_panel_, LV_LAYOUT_FLEX);
-  #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_obj_set_flex_flow(contacts_detail_panel_, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(contacts_detail_panel_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_CENTER);
-  #else
     lv_obj_set_flex_flow(contacts_detail_panel_, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(contacts_detail_panel_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                 LV_FLEX_ALIGN_CENTER);
-  #endif
 
     static const char* kContactActionInitLabels[kContactActionCount] = {
       addFavoriteActionLabel(),
-    #if defined(DEVICE_HELTEC_V4_EXPANSION)
-      "Admin",      // index 1 — shown/hidden based on contact type
-    #else
       "(A)dmin",    // index 1 — shown/hidden based on contact type
-    #endif
-    #if defined(DEVICE_HELTEC_V4_EXPANSION)
-      "DM",         // index 2
-      "CLOSE",      // index 3
-    #else
       "D(M)",       // index 2
-    #endif
     };
     for (uint8_t i = 0; i < kContactActionCount; i++) {
       contacts_action_rows_[i] = lv_btn_create(contacts_detail_panel_);
@@ -2883,15 +3754,7 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
         contacts_init_failed = true;
         break;
       }
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-      if (i == kContactActionCount - 1) {
-        lv_obj_set_width(contacts_action_rows_[i], LV_PCT(100));
-      } else {
-        lv_obj_set_width(contacts_action_rows_[i], LV_PCT(32));
-      }
-#else
       lv_obj_set_width(contacts_action_rows_[i], LV_PCT(49));
-#endif
       lv_obj_set_height(contacts_action_rows_[i], 22);
       lv_obj_add_style(contacts_action_rows_[i], &style_button_, 0);
       lv_obj_add_style(contacts_action_rows_[i], &style_button_focused_, LV_STATE_FOCUSED);
@@ -3142,11 +4005,7 @@ void StandaloneUi::buildLayout() {
   contacts_del_label_ = lv_label_create(contacts_del_btn_);
   lv_obj_add_style(contacts_del_label_, &style_text_main_, 0);
   lv_obj_set_style_text_font(contacts_del_label_, header_font, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_label_set_text(contacts_del_label_, "Del");
-#else
   lv_label_set_text(contacts_del_label_, "(D)el");
-#endif
   lv_obj_center(contacts_del_label_);
 
   // "Contact Actions" header button (top-right). Opens a pop-up that holds the
@@ -3200,78 +4059,20 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_event_cb(chat_panel_, onFocusableEvent, LV_EVENT_CLICKED, this);
   lv_obj_add_event_cb(chat_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  chat_advz_btn_ = lv_btn_create(main_panel_);
-  lv_obj_set_size(chat_advz_btn_, 56, 18);
-  lv_obj_align(chat_advz_btn_, LV_ALIGN_BOTTOM_RIGHT, -122,
-               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + kHeltecMainButtonBottomInset)));
-  lv_obj_add_style(chat_advz_btn_, &style_button_, 0);
-  lv_obj_add_style(chat_advz_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_add_event_cb(chat_advz_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(chat_advz_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(chat_advz_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  chat_advz_label_ = lv_label_create(chat_advz_btn_);
-  lv_obj_add_style(chat_advz_label_, &style_text_main_, 0);
-  lv_label_set_text(chat_advz_label_, "ADVZ");
-  lv_obj_center(chat_advz_label_);
-
-  chat_advf_btn_ = lv_btn_create(main_panel_);
-  lv_obj_set_size(chat_advf_btn_, 56, 18);
-  lv_obj_align(chat_advf_btn_, LV_ALIGN_BOTTOM_RIGHT, -62,
-               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + kHeltecMainButtonBottomInset)));
-  lv_obj_add_style(chat_advf_btn_, &style_button_, 0);
-  lv_obj_add_style(chat_advf_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_add_event_cb(chat_advf_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(chat_advf_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(chat_advf_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  chat_advf_label_ = lv_label_create(chat_advf_btn_);
-  lv_obj_add_style(chat_advf_label_, &style_text_main_, 0);
-  lv_label_set_text(chat_advf_label_, "ADVF");
-  lv_obj_center(chat_advf_label_);
-
-  chat_new_btn_ = lv_btn_create(main_panel_);
-  lv_obj_set_size(chat_new_btn_, 56, 18);
-  lv_obj_align(chat_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2,
-               static_cast<lv_coord_t>(-(shortcut_h + kMainBottomInset + kHeltecMainButtonBottomInset)));
-  lv_obj_add_style(chat_new_btn_, &style_button_, 0);
-  lv_obj_add_style(chat_new_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_add_event_cb(chat_new_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(chat_new_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(chat_new_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  chat_new_label_ = lv_label_create(chat_new_btn_);
-  lv_obj_add_style(chat_new_label_, &style_text_main_, 0);
-  lv_label_set_text(chat_new_label_, "NEW");
-  lv_obj_center(chat_new_label_);
-#else
   chat_advz_btn_ = nullptr;
   chat_advz_label_ = nullptr;
   chat_advf_btn_ = nullptr;
   chat_advf_label_ = nullptr;
   chat_new_btn_ = nullptr;
   chat_new_label_ = nullptr;
-#endif
 
   compose_dialog_ = lv_obj_create(root_);
   lv_obj_add_style(compose_dialog_, &style_panel_, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_obj_set_size(compose_dialog_, clampCoord(static_cast<lv_coord_t>(main_w - 8), 180, main_w),
-                  clampCoord(static_cast<lv_coord_t>(screen_h - 8), 120, screen_h));
-  lv_obj_align(compose_dialog_, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_set_style_pad_all(compose_dialog_, 4, LV_PART_MAIN);
-  lv_obj_set_style_pad_bottom(compose_dialog_, 2, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(compose_dialog_, 1, LV_PART_MAIN);
-  lv_obj_set_flex_flow(compose_dialog_, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(compose_dialog_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-#else
   lv_obj_set_size(compose_dialog_,
                   clampCoord(main_w - dialogInsetW(8, 2), kComposeDialogMinW,
                              dialogMaxW(kComposeDialogMaxW, 338)),
                   kComposeDialogH);
   lv_obj_center(compose_dialog_);
-#endif
   lv_obj_add_flag(compose_dialog_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(compose_dialog_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(compose_dialog_, LV_OBJ_FLAG_CLICKABLE);
@@ -3279,16 +4080,10 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_style_border_width(compose_dialog_, 1, LV_PART_MAIN);
   lv_obj_set_style_border_color(compose_dialog_, kColorBorder, LV_PART_MAIN);
   lv_obj_set_style_border_opa(compose_dialog_, LV_OPA_40, LV_PART_MAIN);
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
   lv_obj_add_event_cb(compose_dialog_, onFocusableEvent, LV_EVENT_CLICKED, this);
-#endif
   compose_title_label_ = lv_label_create(compose_dialog_);
   lv_obj_add_style(compose_title_label_, &style_text_main_, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_obj_set_width(compose_title_label_, LV_PCT(100));
-#else
   lv_obj_align(compose_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
-#endif
 
   compose_hint_label_ = lv_label_create(compose_dialog_);
   lv_obj_add_style(compose_hint_label_, &style_text_dim_, 0);
@@ -3299,92 +4094,31 @@ void StandaloneUi::buildLayout() {
   lv_label_set_long_mode(compose_hint_label_, LV_LABEL_LONG_WRAP);
   lv_obj_align(compose_hint_label_, LV_ALIGN_TOP_LEFT, kPagerWideDialogLayout ? 2 : 4, 16);
   lv_label_set_text(compose_hint_label_, "");
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_obj_add_flag(compose_hint_label_, LV_OBJ_FLAG_HIDDEN);
-#endif
 
   compose_input_ = lv_textarea_create(compose_dialog_);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_obj_set_width(compose_input_, LV_PCT(100));
-  lv_obj_set_height(compose_input_, 38);
-  lv_obj_set_style_text_color(compose_input_, lv_color_hex(0xE8F1FF), 0);
-  lv_obj_set_style_bg_color(compose_input_, lv_color_hex(0x102B61), 0);
-  lv_obj_set_style_bg_opa(compose_input_, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(compose_input_, 1, 0);
-  lv_obj_set_style_border_color(compose_input_, lv_color_hex(0x4C76BA), 0);
-  lv_obj_set_style_pad_top(compose_input_, 1, 0);
-  lv_obj_set_style_pad_bottom(compose_input_, 1, 0);
-  lv_obj_set_style_pad_left(compose_input_, 3, 0);
-  lv_obj_set_style_pad_right(compose_input_, 3, 0);
-  lv_textarea_set_one_line(compose_input_, true);
-#else
   lv_obj_set_size(compose_input_, LV_PCT(composeInputWidthPct()), kComposeInputH);
   lv_obj_align(compose_input_, LV_ALIGN_BOTTOM_MID, 0, composeInputBottomInset());
   lv_textarea_set_one_line(compose_input_, false);
-#endif
 #if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
   lv_obj_set_style_text_font(compose_input_, &lv_font_montserrat_10, 0);
 #endif
   lv_textarea_set_max_length(compose_input_, static_cast<uint16_t>(kComposeMessageMaxChars));
   lv_textarea_set_placeholder_text(compose_input_, "Type and press Enter");
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_KEY, this);
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_CLICKED, this);
   lv_obj_add_event_cb(compose_input_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-#endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  compose_action_row_ = lv_obj_create(compose_dialog_);
-  lv_obj_set_width(compose_action_row_, LV_PCT(100));
-  lv_obj_set_height(compose_action_row_, 28);
-  lv_obj_clear_flag(compose_action_row_, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_style_bg_opa(compose_action_row_, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(compose_action_row_, 0, 0);
-  lv_obj_set_style_pad_all(compose_action_row_, 0, 0);
-  lv_obj_set_style_pad_column(compose_action_row_, 4, 0);
-  lv_obj_set_flex_flow(compose_action_row_, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(compose_action_row_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_CENTER);
-
-  compose_cancel_btn_ = lv_btn_create(compose_action_row_);
-  lv_obj_set_flex_grow(compose_cancel_btn_, 1);
-  lv_obj_set_height(compose_cancel_btn_, LV_PCT(100));
-  lv_obj_add_style(compose_cancel_btn_, &style_button_, 0);
-  lv_obj_add_style(compose_cancel_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_add_event_cb(compose_cancel_btn_, onComposeActionEvent, LV_EVENT_CLICKED, this);
-  compose_cancel_label_ = lv_label_create(compose_cancel_btn_);
-  lv_obj_add_style(compose_cancel_label_, &style_text_main_, 0);
-  lv_label_set_text(compose_cancel_label_, "Cancel");
-  lv_obj_center(compose_cancel_label_);
-
-  compose_send_btn_ = lv_btn_create(compose_action_row_);
-  lv_obj_set_flex_grow(compose_send_btn_, 1);
-  lv_obj_set_height(compose_send_btn_, LV_PCT(100));
-  lv_obj_add_style(compose_send_btn_, &style_button_, 0);
-  lv_obj_add_style(compose_send_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_add_event_cb(compose_send_btn_, onComposeActionEvent, LV_EVENT_CLICKED, this);
-  compose_send_label_ = lv_label_create(compose_send_btn_);
-  lv_obj_add_style(compose_send_label_, &style_text_main_, 0);
-  lv_label_set_text(compose_send_label_, "Send");
-  lv_obj_center(compose_send_label_);
-#else
   compose_action_row_ = nullptr;
   compose_cancel_btn_ = nullptr;
   compose_cancel_label_ = nullptr;
   compose_send_btn_ = nullptr;
   compose_send_label_ = nullptr;
-#endif
 
 #if defined(LV_USE_KEYBOARD) && LV_USE_KEYBOARD
   compose_keyboard_ = lv_keyboard_create(compose_dialog_);
   if (compose_keyboard_) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_obj_set_width(compose_keyboard_, LV_PCT(100));
-    lv_obj_set_flex_grow(compose_keyboard_, 1);
-#else
     lv_obj_set_size(compose_keyboard_, LV_PCT(100), clampCoord(static_cast<lv_coord_t>(screen_h / 2), 74, 118));
     lv_obj_align(compose_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
-#endif
     lv_obj_add_style(compose_keyboard_, &style_panel_, LV_PART_MAIN);
     lv_obj_clear_flag(compose_keyboard_, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_keyboard_set_textarea(compose_keyboard_, compose_input_);
@@ -3430,26 +4164,8 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_width(cfg_status_label_, LV_PCT(100));
   lv_obj_align(cfg_status_label_, LV_ALIGN_BOTTOM_LEFT, kPagerWideDialogLayout ? 1 : 4, -2);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  cfg_close_btn_ = lv_btn_create(cfg_dialog_);
-  lv_obj_set_size(cfg_close_btn_, LV_PCT(100), 22);
-  lv_obj_align(cfg_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
-  lv_obj_add_style(cfg_close_btn_, &style_button_, 0);
-  lv_obj_add_style(cfg_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_add_event_cb(cfg_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(cfg_close_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(cfg_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  cfg_close_label_ = lv_label_create(cfg_close_btn_);
-  lv_obj_add_style(cfg_close_label_, &style_text_main_, 0);
-  lv_label_set_text(cfg_close_label_, "CLOSE");
-  lv_obj_center(cfg_close_label_);
-
-  lv_obj_add_flag(cfg_status_label_, LV_OBJ_FLAG_HIDDEN);
-#else
   cfg_close_btn_ = nullptr;
   cfg_close_label_ = nullptr;
-#endif
 
   const lv_coord_t cfg_row_h = kPagerWideDialogLayout ? 22 : 20;
   const lv_coord_t cfg_row_step = kPagerWideDialogLayout ? 22 : 20;
@@ -3459,13 +4175,8 @@ void StandaloneUi::buildLayout() {
   // Cardputer 240x135) can pan through all rows. The panel sits between the
   // title bar at the top and the status label at the bottom; LVGL's group
   // focus auto-scrolls the focused row into view during keyboard nav.
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  const lv_coord_t cfg_content_top = 18;
-  const lv_coord_t cfg_content_bottom_reserved = 26;  // close btn + padding
-#else
   const lv_coord_t cfg_content_top = 18;
   const lv_coord_t cfg_content_bottom_reserved = kPagerWideDialogLayout ? 16 : 14;
-#endif
 
   cfg_content_panel_ = lv_obj_create(cfg_dialog_);
   lv_obj_set_pos(cfg_content_panel_, cfg_rows_x, cfg_content_top);
@@ -3553,38 +4264,6 @@ void StandaloneUi::buildLayout() {
   lv_label_set_text(dm_title_label_, "DM");
   lv_obj_align(dm_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  dm_clear_btn_ = lv_btn_create(dm_dialog_);
-  lv_obj_set_size(dm_clear_btn_, 56, 18);
-  lv_obj_align(dm_clear_btn_, LV_ALIGN_BOTTOM_RIGHT, -60, -30);
-  lv_obj_add_style(dm_clear_btn_, &style_button_, 0);
-  lv_obj_add_style(dm_clear_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_clear_flag(dm_clear_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
-  lv_obj_add_event_cb(dm_clear_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(dm_clear_btn_, onDmEvent, LV_EVENT_PRESSED, this);
-  lv_obj_add_event_cb(dm_clear_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  dm_clear_label_ = lv_label_create(dm_clear_btn_);
-  lv_obj_add_style(dm_clear_label_, &style_text_main_, 0);
-  lv_label_set_text(dm_clear_label_, "CLEAR");
-  lv_obj_center(dm_clear_label_);
-
-  dm_new_btn_ = lv_btn_create(dm_dialog_);
-  lv_obj_set_size(dm_new_btn_, 56, 18);
-  lv_obj_align(dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -30);
-  lv_obj_add_style(dm_new_btn_, &style_button_, 0);
-  lv_obj_add_style(dm_new_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_clear_flag(dm_new_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
-  lv_obj_add_event_cb(dm_new_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(dm_new_btn_, onDmEvent, LV_EVENT_PRESSED, this);
-  lv_obj_add_event_cb(dm_new_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  dm_new_label_ = lv_label_create(dm_new_btn_);
-  lv_obj_add_style(dm_new_label_, &style_text_main_, 0);
-  lv_label_set_text(dm_new_label_, "NEW");
-  lv_obj_center(dm_new_label_);
-  dm_hint_label_ = nullptr;
-#else
   dm_clear_btn_ = nullptr;
   dm_clear_label_ = nullptr;
   dm_new_btn_ = nullptr;
@@ -3598,15 +4277,10 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_style_text_align(dm_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text(dm_hint_label_, "Enter for new message, c to clear messages");
   lv_obj_align(dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
-#endif
 
   dm_panel_ = lv_obj_create(dm_dialog_);
   lv_obj_set_pos(dm_panel_, 2, 18);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(lv_obj_get_height(dm_dialog_) - 42));
-#else
   lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(lv_obj_get_height(dm_dialog_) - 34));
-#endif
   lv_obj_add_style(dm_panel_, &style_chat_, 0);
   lv_obj_set_scroll_dir(dm_panel_, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(dm_panel_, LV_SCROLLBAR_MODE_OFF);
@@ -3618,34 +4292,8 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_event_cb(dm_panel_, onDmEvent, LV_EVENT_PRESSED, this);
   lv_obj_add_event_cb(dm_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  dm_close_btn_ = lv_btn_create(dm_dialog_);
-  lv_obj_set_size(dm_close_btn_, LV_PCT(100), 22);
-  lv_obj_align(dm_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
-  lv_obj_add_style(dm_close_btn_, &style_button_, 0);
-  lv_obj_add_style(dm_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
-  lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(dm_close_btn_, onDmEvent, LV_EVENT_PRESSED, this);
-  lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  dm_close_label_ = lv_label_create(dm_close_btn_);
-  lv_obj_add_style(dm_close_label_, &style_text_main_, 0);
-  lv_label_set_text(dm_close_label_, "CLOSE");
-  lv_obj_center(dm_close_label_);
-
-  // Keep overlay controls above the scrollable message panel.
-  lv_obj_move_foreground(dm_close_btn_);
-  if (dm_clear_btn_) {
-    lv_obj_move_foreground(dm_clear_btn_);
-  }
-  if (dm_new_btn_) {
-    lv_obj_move_foreground(dm_new_btn_);
-  }
-#else
   dm_close_btn_ = nullptr;
   dm_close_label_ = nullptr;
-#endif
 
   memset(dm_rows_, 0, sizeof(dm_rows_));
   dm_row_count_ = 0;
@@ -3678,11 +4326,7 @@ void StandaloneUi::buildLayout() {
   lv_obj_align(help_title_label_, LV_ALIGN_TOP_LEFT, 4, 2);
 
   const lv_coord_t help_body_y = 18;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  const lv_coord_t help_body_h = static_cast<lv_coord_t>(help_dialog_h - 44);
-#else
   const lv_coord_t help_body_h = static_cast<lv_coord_t>(help_dialog_h - 24);
-#endif
 
   help_body_panel_ = lv_obj_create(help_dialog_);
   lv_obj_set_pos(help_body_panel_, 2, help_body_y);
@@ -3715,27 +4359,8 @@ void StandaloneUi::buildLayout() {
   lv_label_set_text(help_body_label_, kHelpBodyText);
   lv_obj_align(help_body_label_, LV_ALIGN_TOP_LEFT, kPagerWideDialogLayout ? 1 : 4, 0);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  help_close_btn_ = lv_btn_create(help_dialog_);
-  lv_obj_set_size(help_close_btn_, LV_PCT(100), 22);
-  lv_obj_align(help_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
-  lv_obj_add_style(help_close_btn_, &style_button_, 0);
-  lv_obj_add_style(help_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_add_event_cb(help_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(help_close_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(help_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  help_close_label_ = lv_label_create(help_close_btn_);
-  lv_obj_add_style(help_close_label_, &style_text_main_, 0);
-  lv_label_set_text(help_close_label_, "CLOSE");
-  lv_obj_center(help_close_label_);
-
-  // Keep the footer control fixed over the scrollable body panel.
-  lv_obj_move_foreground(help_close_btn_);
-#else
   help_close_btn_ = nullptr;
   help_close_label_ = nullptr;
-#endif
 
   const lv_coord_t live_dialog_w = clampCoord(main_w - dialogInsetW(10, 2), 210, dialogMaxW(300, 340));
   const lv_coord_t live_dialog_h = clampCoord(main_h - 16, 150, 220);
@@ -3765,18 +4390,10 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_style_text_font(live_hint_label_, &lv_font_montserrat_10, 0);
 #endif
   lv_label_set_text(live_hint_label_, "c: clear  u: util  s: snr/rssi");
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_obj_align(live_hint_label_, LV_ALIGN_BOTTOM_LEFT, 4, -26);
-#else
   lv_obj_align(live_hint_label_, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
-#endif
 
   const lv_coord_t live_body_y = 18;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  const lv_coord_t live_body_h = static_cast<lv_coord_t>(live_dialog_h - 56);
-#else
   const lv_coord_t live_body_h = static_cast<lv_coord_t>(live_dialog_h - 36);
-#endif
 
   live_body_panel_ = lv_obj_create(live_dialog_);
   lv_obj_set_pos(live_body_panel_, 2, live_body_y);
@@ -3795,27 +4412,8 @@ void StandaloneUi::buildLayout() {
   lv_obj_add_event_cb(live_body_panel_, onFocusableEvent, LV_EVENT_CLICKED, this);
   lv_obj_add_event_cb(live_body_panel_, onFocusableEvent, LV_EVENT_FOCUSED, this);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  live_close_btn_ = lv_btn_create(live_dialog_);
-  lv_obj_set_size(live_close_btn_, LV_PCT(100), 22);
-  lv_obj_align(live_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
-  lv_obj_add_style(live_close_btn_, &style_button_, 0);
-  lv_obj_add_style(live_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-  lv_obj_add_event_cb(live_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-  lv_obj_add_event_cb(live_close_btn_, onFocusableEvent, LV_EVENT_CLICKED, this);
-  lv_obj_add_event_cb(live_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-
-  live_close_label_ = lv_label_create(live_close_btn_);
-  lv_obj_add_style(live_close_label_, &style_text_main_, 0);
-  lv_label_set_text(live_close_label_, "CLOSE");
-  lv_obj_center(live_close_label_);
-
-  // Keep the footer control fixed over the scrollable body panel.
-  lv_obj_move_foreground(live_close_btn_);
-#else
   live_close_btn_ = nullptr;
   live_close_label_ = nullptr;
-#endif
 
   live_util_dialog_ = lv_obj_create(root_);
   lv_obj_add_style(live_util_dialog_, &style_panel_, 0);
@@ -4147,12 +4745,17 @@ bool StandaloneUi::begin() {
     setChannels(defaults, 1);
   }
 
+  // Must precede createStyles(): the styles bake in the palette's colors.
+  loadUiThemeFromSettings();
+  loadChatRenderSettings();
+
   if (!createStyles()) {
     return false;
   }
 
   buildLayout();
   loadChatHistoryFromFs();
+  loadChatContactColorsFromFs();
   loadDmHistoryFromFs();
   bindInputGroup();
   active_channel_ = selected_channel_;
@@ -4326,20 +4929,8 @@ void StandaloneUi::showSplash(const char* node_name, uint32_t duration_ms) {
   lv_label_set_text(title, "Plumeria for MeshCore");
   lv_obj_set_style_text_color(title, lv_color_hex(kSplashTitle), LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(title, 2, LV_PART_MAIN);
-  const lv_font_t* title_font = nullptr;
-#if defined(LV_FONT_MONTSERRAT_18) && LV_FONT_MONTSERRAT_18
-  if (!tiny) {
-    title_font = &lv_font_montserrat_18;
-  }
-#endif
-#if defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
-  if (!title_font && !tiny) {
-    title_font = &lv_font_montserrat_16;
-  }
-#endif
-  if (!title_font) {
-    title_font = &lv_font_montserrat_14;
-  }
+  // Keep splash typography stable even when chat font options enable more LVGL fonts.
+  const lv_font_t* title_font = &lv_font_montserrat_14;
   lv_obj_set_style_text_font(title, title_font, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_CENTER, 0,
                static_cast<lv_coord_t>(main_cy + main_flower_r + (tiny ? 14 : 22)));
@@ -4366,10 +4957,10 @@ void StandaloneUi::showSplash(const char* node_name, uint32_t duration_ms) {
   subtitle_font = &lv_font_montserrat_12;
 #endif
 #else
-#if defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
-  subtitle_font = &lv_font_montserrat_12;
-#elif defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
   subtitle_font = &lv_font_montserrat_10;
+#elif defined(LV_FONT_MONTSERRAT_12) && LV_FONT_MONTSERRAT_12
+  subtitle_font = &lv_font_montserrat_12;
 #endif
 #endif
   lv_obj_set_style_text_font(subtitle, subtitle_font, LV_PART_MAIN);
@@ -4502,10 +5093,6 @@ void StandaloneUi::refreshComposeDialog() {
   }
 
   if (compose_hint_label_) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(compose_hint_label_, "");
-    lv_obj_add_flag(compose_hint_label_, LV_OBJ_FLAG_HIDDEN);
-#else
     if (kUseOnscreenKeyboard) {
       lv_label_set_text(compose_hint_label_, identity_prompt_open_ ? "Tap OK to save name." : "Tap OK to send.");
     } else {
@@ -4517,7 +5104,6 @@ void StandaloneUi::refreshComposeDialog() {
         lv_label_set_text(compose_hint_label_, "Enter=Save");
       }
     }
-#endif
   }
 }
 
@@ -4534,14 +5120,9 @@ void StandaloneUi::showComposeKeyboard() {
   }
 
   const lv_coord_t screen_h = lv_disp_get_ver_res(nullptr);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_obj_set_width(compose_keyboard_, LV_PCT(100));
-  lv_obj_set_flex_grow(compose_keyboard_, 1);
-#else
   const lv_coord_t kb_h = clampCoord(static_cast<lv_coord_t>(screen_h / 2), 74, 118);
   lv_obj_set_size(compose_keyboard_, LV_PCT(100), kb_h);
   lv_obj_align(compose_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
-#endif
   lv_obj_clear_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(compose_keyboard_, LV_OBJ_FLAG_CLICKABLE);
   CTS_TRACE("showComposeKeyboard done hidden=%d", lv_obj_has_flag(compose_keyboard_, LV_OBJ_FLAG_HIDDEN) ? 1 : 0);
@@ -5157,17 +5738,6 @@ void StandaloneUi::closeComposeDialog(bool restore_chat_focus) {
   if (restore_chat_focus && compose_return_to_dm_ && dm_open_ && dm_panel_) {
     compose_return_to_dm_ = false;
     lv_obj_move_foreground(dm_dialog_);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (dm_close_btn_) {
-      lv_obj_move_foreground(dm_close_btn_);
-    }
-    if (dm_clear_btn_) {
-      lv_obj_move_foreground(dm_clear_btn_);
-    }
-    if (dm_new_btn_) {
-      lv_obj_move_foreground(dm_new_btn_);
-    }
-#endif
     lv_group_focus_obj(dm_panel_);
     return;
   }
@@ -5326,6 +5896,14 @@ void StandaloneUi::onOpenComposeDialogAsync(void* user_data) {
     return;
   }
   ui->openComposeDialog();
+}
+
+void StandaloneUi::onOpenThemeListDialogAsync(void* user_data) {
+  auto* ui = static_cast<StandaloneUi*>(user_data);
+  if (!ui) {
+    return;
+  }
+  ui->openThemeListDialog();
 }
 
 void StandaloneUi::onComposePostOpenAsync(void* user_data) {
@@ -5588,36 +6166,11 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
       lv_obj_add_flag(contacts_action_rows_[1], LV_OBJ_FLAG_HIDDEN);
     }
     if (contacts_action_labels_[1]) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-      lv_label_set_text(contacts_action_labels_[1], "Admin");
-#else
       lv_label_set_text(contacts_action_labels_[1], "(A)dmin");
-#endif
     }
     if (contacts_action_labels_[2]) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-      lv_label_set_text(contacts_action_labels_[2], "DM");
-#else
       lv_label_set_text(contacts_action_labels_[2], "D(M)");
-#endif
     }
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (contacts_action_labels_[3]) {
-      lv_label_set_text(contacts_action_labels_[3], "CLOSE");
-    }
-    if (contacts_action_rows_[0]) {
-      lv_obj_set_width(contacts_action_rows_[0], LV_PCT(49));
-    }
-    if (contacts_action_rows_[2]) {
-      lv_obj_set_width(contacts_action_rows_[2], LV_PCT(49));
-    }
-    if (contacts_action_rows_[1]) {
-      lv_obj_set_width(contacts_action_rows_[1], LV_PCT(32));
-    }
-    if (contacts_detail_panel_) {
-      lv_obj_invalidate(contacts_detail_panel_);
-    }
-#else
     // Reset non-Heltec widths to default
     if (contacts_action_rows_[0]) {
       lv_obj_set_width(contacts_action_rows_[0], LV_PCT(49));
@@ -5628,7 +6181,6 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     if (contacts_detail_panel_) {
       lv_obj_invalidate(contacts_detail_panel_);
     }
-#endif
     if (contacts_dm_new_btn_) {
       lv_obj_add_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
     }
@@ -5688,24 +6240,11 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
   }
 
   if (contacts_action_labels_[1]) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(contacts_action_labels_[1], "Admin");
-#else
     lv_label_set_text(contacts_action_labels_[1], "(A)dmin");
-#endif
   }
   if (contacts_action_labels_[2]) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(contacts_action_labels_[2], selected.type == 3 ? "Join" : "DM");
-#else
     lv_label_set_text(contacts_action_labels_[2], selected.type == 3 ? "(J)oin" : "D(M)");
-#endif
   }
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (contacts_action_labels_[3]) {
-    lv_label_set_text(contacts_action_labels_[3], "CLOSE");
-  }
-#endif
 
 // Keep Heltec contact actions dense: with no Admin action (non-repeater),
 // Fav and DM each take half of the row.
@@ -5748,22 +6287,6 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     }
     lv_obj_clear_flag(contacts_dm_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_pos(contacts_dm_panel_, 0, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), LV_PCT(100));
-    if (contacts_dm_new_btn_) {
-      lv_obj_clear_flag(contacts_dm_new_btn_, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_align(contacts_dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
-      lv_obj_move_foreground(contacts_dm_new_btn_);
-    }
-    if (contacts_dm_clear_btn_) {
-      lv_obj_clear_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_align(contacts_dm_clear_btn_, LV_ALIGN_BOTTOM_RIGHT, -60, -2);
-      lv_obj_move_foreground(contacts_dm_clear_btn_);
-    }
-    if (contacts_dm_hint_label_) {
-      lv_obj_add_flag(contacts_dm_hint_label_, LV_OBJ_FLAG_HIDDEN);
-    }
-#else
     const lv_coord_t helper_h = 16;
     const lv_coord_t dm_full_h = dialog_h > helper_h ? static_cast<lv_coord_t>(dialog_h - helper_h) : 14;
     lv_obj_set_size(contacts_dm_panel_, LV_PCT(100), dm_full_h);
@@ -5778,7 +6301,6 @@ void StandaloneUi::refreshContactsDialog(bool reload_from_mesh) {
     if (contacts_dm_clear_btn_) {
       lv_obj_add_flag(contacts_dm_clear_btn_, LV_OBJ_FLAG_HIDDEN);
     }
-#endif
     lv_obj_add_flag(contacts_detail_info_panel_, LV_OBJ_FLAG_HIDDEN);
     // Hide the Contact Actions button in the DM sub-view; NEW owns the top-right.
     if (contacts_actions_btn_) {
@@ -5869,37 +6391,14 @@ void StandaloneUi::rebuildContactsDmPanel() {
     const uint32_t date_key = dateKeyFromEpoch(line.timestamp_epoch);
     if (line.timestamp_epoch != 0 && date_key != 0 && date_key != rendered_date_key) {
       createDateMarkerRow(contacts_dm_panel_, row_w > 0 ? row_w : LV_PCT(100), line.timestamp_epoch,
-                          chatPanelFont());
+                          chatConversationFont());
       rendered_date_key = date_key;
     }
 
     char display_line[112] = {};
     formatDmDisplayLine(line.text, line.timestamp_epoch, display_line, sizeof(display_line));
-    lv_obj_t* row = lv_label_create(contacts_dm_panel_);
-    lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
-    lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
-    lv_obj_add_style(row, &style_text_main_, 0);
-    lv_obj_set_style_text_font(row, chatPanelFont(), 0);
-
-    switch (line.kind) {
-      case ChatLineKind::Rx:
-        lv_obj_add_style(row, &style_msg_rx_, 0);
-        break;
-      case ChatLineKind::Tx:
-        lv_obj_add_style(row, &style_msg_tx_, 0);
-        break;
-      case ChatLineKind::Ack:
-        lv_obj_add_style(row, &style_msg_ack_, 0);
-        break;
-      case ChatLineKind::Error:
-        lv_obj_add_style(row, &style_msg_err_, 0);
-        break;
-      case ChatLineKind::Normal:
-      default:
-        break;
-    }
-
-    lv_label_set_text(row, display_line);
+    const char* line_identity = line.contact_key[0] != '\0' ? line.contact_key : line.contact_name;
+    createChatRenderableRow(contacts_dm_panel_, row_w, display_line, line.kind, true, line_identity);
   }
 
   if (recent_count == 0) {
@@ -5907,7 +6406,7 @@ void StandaloneUi::rebuildContactsDmPanel() {
     lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
     lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
     lv_obj_add_style(row, &style_text_dim_, 0);
-    lv_obj_set_style_text_font(row, chatPanelFont(), 0);
+    lv_obj_set_style_text_font(row, chatConversationFont(), 0);
     lv_label_set_text(row, "No messages yet");
   }
 
@@ -6255,12 +6754,6 @@ void StandaloneUi::activateContactsAction(uint8_t action_idx) {
     return;
   }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (action_idx == 3) {
-    closeContactsDialog(true);
-    return;
-  }
-#endif
 
   if (contacts_count_ == 0) {
     return;
@@ -7298,16 +7791,29 @@ void StandaloneUi::refreshCfgDialog() {
                     web_settings.repeater_mode ? "Repeater: ON" : "Repeater: OFF");
   lv_label_set_text(cfg_row_labels_[kCfgRowNotifications],
                     web_settings.notifications_enabled ? "Notifications: ON" : "Notifications: OFF");
+
+  snprintf(row_text, sizeof(row_text), "Theme: %s",
+           uiThemePresetName(activeUiTheme(), activeUiMode()));
+  lv_label_set_text(cfg_row_labels_[kCfgRowTheme], row_text);
+
+  snprintf(row_text, sizeof(row_text), "Chat Style: %s",
+           chatRenderStyleNameFromValue(static_cast<uint8_t>(chat_render_style_)));
+  lv_label_set_text(cfg_row_labels_[kCfgRowChatStyle], row_text);
+
+  snprintf(row_text, sizeof(row_text), "Chat Font: %s",
+           chatFontSizeNameFromValue(static_cast<uint8_t>(chat_font_size_)));
+  lv_label_set_text(cfg_row_labels_[kCfgRowChatFont], row_text);
+
+  lv_label_set_text(cfg_row_labels_[kCfgRowChatColors],
+                    chat_render_colors_ ? "Chat Colors: ON" : "Chat Colors: OFF");
 #if PLUMERIA_OTA_ENABLED
   lv_label_set_text(cfg_row_labels_[kCfgRowOtaUpdate], "OTA Update");
 #else
   lv_label_set_text(cfg_row_labels_[kCfgRowOtaUpdate], "OTA Update: Disabled on this build");
 #endif
-#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   lv_label_set_text(cfg_row_labels_[kCfgRowExportConfig], "Export Config to SD");
   lv_label_set_text(cfg_row_labels_[kCfgRowImportConfig], "Import Config from SD");
   lv_label_set_text(cfg_row_labels_[kCfgRowDeleteConfig], "Delete Config from SD");
-#endif
 
   for (uint8_t i = 0; i < kCfgRowCount; i++) {
     lv_obj_remove_style(cfg_rows_[i], &style_button_active_, 0);
@@ -7316,11 +7822,7 @@ void StandaloneUi::refreshCfgDialog() {
     }
   }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  lv_label_set_text(cfg_status_label_, "");
-#else
   lv_label_set_text(cfg_status_label_, "Enter - Activate, Bcksp - Close");
-#endif
   lv_label_set_text(cfg_action_label_, cfg_action_text_);
 }
 
@@ -7645,14 +8147,7 @@ void StandaloneUi::otaWorkerTask(void* user_data) {
     plumeria::ota::preferExternalHeap();
 
     plumeria::ota::OtaCheckResult check{};
-    bool check_ok = plumeria::ota::checkLatestRelease(check) && check.ok;
-    if (!check_ok && isLikelyOtaTlsLowMemError(check.error)) {
-      Serial.println("[OTADBG] low-mem TLS during check; retrying after WiFi recycle");
-      if (recycleOtaWifiConnection(err, sizeof(err))) {
-        memset(&check, 0, sizeof(check));
-        check_ok = plumeria::ota::checkLatestRelease(check) && check.ok;
-      }
-    }
+    const bool check_ok = plumeria::ota::checkLatestRelease(check) && check.ok;
 
     if (!check_ok) {
       snprintf(status, sizeof(status), "OTA check failed: %s",
@@ -7665,18 +8160,8 @@ void StandaloneUi::otaWorkerTask(void* user_data) {
       action[sizeof(action) - 1] = '\0';
     } else {
       err[0] = '\0';
-      bool install_ok = plumeria::ota::installLatestRelease(check.latest_tag[0] ? check.latest_tag : nullptr,
-                                                            err,
-                                                            sizeof(err));
-      if (!install_ok && isLikelyOtaTlsLowMemError(err)) {
-        Serial.println("[OTADBG] low-mem TLS during install; retrying after WiFi recycle");
-        if (recycleOtaWifiConnection(err, sizeof(err))) {
-          err[0] = '\0';
-          install_ok = plumeria::ota::installLatestRelease(check.latest_tag[0] ? check.latest_tag : nullptr,
-                                                           err,
-                                                           sizeof(err));
-        }
-      }
+      const bool install_ok = plumeria::ota::installLatestRelease(
+          check.latest_tag[0] ? check.latest_tag : nullptr, err, sizeof(err));
 
       if (!install_ok) {
         snprintf(status, sizeof(status), "OTA failed: %s", err[0] ? err : "install failed");
@@ -8192,11 +8677,7 @@ bool StandaloneUi::cfgActionNeedsConfirm(uint8_t row) const {
     return false;
 #endif
   }
-#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   return row == kCfgRowExportConfig || row == kCfgRowImportConfig || row == kCfgRowDeleteConfig;
-#else
-  return false;
-#endif
 }
 
 const char* StandaloneUi::cfgConfirmActionText(uint8_t row) const {
@@ -8206,7 +8687,6 @@ const char* StandaloneUi::cfgConfirmActionText(uint8_t row) const {
   if (row == kCfgRowOtaUpdate) {
     return "Install latest OTA release now?";
   }
-#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   switch (row) {
     case kCfgRowExportConfig:
       return "Export config to SD";
@@ -8217,9 +8697,6 @@ const char* StandaloneUi::cfgConfirmActionText(uint8_t row) const {
     default:
       break;
   }
-#else
-  (void)row;
-#endif
   return "Run action";
 }
 
@@ -8335,7 +8812,6 @@ void StandaloneUi::performCfgConfirmedAction(uint8_t row) {
     return;
   }
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
   switch (row) {
     case kCfgRowExportConfig:
       if (exportConfigToSd()) {
@@ -8374,9 +8850,6 @@ void StandaloneUi::performCfgConfirmedAction(uint8_t row) {
     default:
       break;
   }
-#else
-  (void)row;
-#endif
 }
 
 void StandaloneUi::acceptConfirmDialog() {
@@ -8492,6 +8965,9 @@ void StandaloneUi::activateCfgSelection() {
   }
 
   switch (cfg_selected_row_) {
+    case kCfgRowTheme:
+      lv_async_call(onOpenThemeListDialogAsync, this);
+      return;
     case kCfgRowNodeName:
     case kCfgRowRadioPreset:
     case kCfgRowMeshRegion:
@@ -8613,6 +9089,74 @@ void StandaloneUi::activateCfgSelection() {
       }
       break;
     }
+    case kCfgRowChatStyle: {
+      plumeria::web::WebSettings web_settings{};
+      plumeria::web::loadSettings(&web_settings);
+      const uint8_t current = web_settings.chat_style <= 2 ? web_settings.chat_style : 0;
+      const uint8_t next = static_cast<uint8_t>((current + 1) % 3);
+      char err[96] = {};
+      if (plumeria::web::setChatStyle(next, err, sizeof(err))) {
+        loadChatRenderSettings();
+        rebuildChatViewsForRenderSettingChange();
+        snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Chat style: %s",
+                 chatRenderStyleNameFromValue(next));
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Chat style updated", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      } else {
+        strncpy(cfg_status_text_, err[0] ? err : "Chat style update failed", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+      break;
+    }
+    case kCfgRowChatFont: {
+      plumeria::web::WebSettings web_settings{};
+      plumeria::web::loadSettings(&web_settings);
+      const uint8_t current = web_settings.chat_font_size <= 3 ? web_settings.chat_font_size : 0;
+      const uint8_t next = static_cast<uint8_t>((current + 1) % 4);
+      char err[96] = {};
+      if (plumeria::web::setChatFontSize(next, err, sizeof(err))) {
+        loadChatRenderSettings();
+        rebuildChatViewsForRenderSettingChange();
+        snprintf(cfg_status_text_, sizeof(cfg_status_text_), "Chat font: %s",
+                 chatFontSizeNameFromValue(next));
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Chat font updated", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      } else {
+        strncpy(cfg_status_text_, err[0] ? err : "Chat font update failed", sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+      break;
+    }
+    case kCfgRowChatColors: {
+      plumeria::web::WebSettings web_settings{};
+      plumeria::web::loadSettings(&web_settings);
+      const bool next = !web_settings.chat_style_colors;
+      char err[96] = {};
+      if (plumeria::web::setChatStyleColors(next, err, sizeof(err))) {
+        // Apply immediately in-memory; persistence is handled by web settings.
+        chat_render_colors_ = next;
+        rebuildChatViewsForRenderSettingChange();
+        strncpy(cfg_status_text_, next ? "Chat colors enabled" : "Chat colors disabled",
+                sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, next ? "Chat colors ON" : "Chat colors OFF",
+                sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      } else {
+        strncpy(cfg_status_text_, err[0] ? err : "Chat colors update failed",
+                sizeof(cfg_status_text_) - 1);
+        cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+        strncpy(cfg_action_text_, "Failed", sizeof(cfg_action_text_) - 1);
+        cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+      }
+      break;
+    }
     case kCfgRowRepeater: {
       // Enabling is routed through the confirm dialog (see cfgActionNeedsConfirm),
       // so reaching here means we are toggling repeater mode OFF.
@@ -8641,7 +9185,6 @@ void StandaloneUi::activateCfgSelection() {
 #endif
       break;
     }
-#if !defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     case kCfgRowExportConfig:
       openCfgConfirmDialog(cfg_selected_row_);
       break;
@@ -8651,7 +9194,6 @@ void StandaloneUi::activateCfgSelection() {
     case kCfgRowDeleteConfig:
       openCfgConfirmDialog(cfg_selected_row_);
       break;
-#endif
     default:
       break;
   }
@@ -8946,8 +9488,7 @@ void StandaloneUi::triggerMessageNotificationChime() {
   if (!plumeria::web::notificationsEnabled()) {
     return;
   }
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) || \
-    (defined(DEVICE_HELTEC_V4_EXPANSION) && defined(PLUMERIA_HAS_HELTEC_BUZZER_BACKEND))
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
   message_chime_active_ = true;
   message_chime_note_index_ = 0;
   message_chime_next_ms_ = 0;
@@ -9034,33 +9575,6 @@ void StandaloneUi::serviceMessageNotificationChime(uint32_t now_ms) {
   message_chime_note_index_++;
   if (message_chime_note_index_ >= kMessageChimeNoteCount) {
     pagerStopPlayback();
-    message_chime_active_ = false;
-    message_chime_next_ms_ = 0;
-  } else {
-    message_chime_next_ms_ = now_ms + kMessageChimeNoteMs;
-  }
-#elif defined(DEVICE_HELTEC_V4_EXPANSION) && defined(PLUMERIA_HAS_HELTEC_BUZZER_BACKEND)
-  if (!plumeria::web::notificationsEnabled()) {
-    message_chime_active_ = false;
-    message_chime_note_index_ = 0;
-    message_chime_next_ms_ = 0;
-    return;
-  }
-  if (!message_chime_active_) {
-    return;
-  }
-  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
-    message_chime_active_ = false;
-    message_chime_next_ms_ = 0;
-    return;
-  }
-  if (message_chime_next_ms_ != 0 && static_cast<int32_t>(now_ms - message_chime_next_ms_) < 0) {
-    return;
-  }
-
-  playHeltecTone(kMessageChimeHz[message_chime_note_index_], kMessageChimeNoteMs);
-  message_chime_note_index_++;
-  if (message_chime_note_index_ >= kMessageChimeNoteCount) {
     message_chime_active_ = false;
     message_chime_next_ms_ = 0;
   } else {
@@ -9280,7 +9794,7 @@ void StandaloneUi::appendChatLine(const char* text, ChatLineKind kind, uint32_t 
   if (date_key != 0 && date_key != chat_last_date_key_) {
     ensure_capacity();
     lv_obj_t* marker = createDateMarkerRow(chat_panel_, row_w > 0 ? row_w : LV_PCT(100), timestamp_epoch,
-                                           chatPanelFont());
+                                           chatConversationFont());
     if (marker) {
       chat_rows_[chat_row_count_++] = marker;
       chat_last_date_key_ = date_key;
@@ -9289,32 +9803,10 @@ void StandaloneUi::appendChatLine(const char* text, ChatLineKind kind, uint32_t 
 
   ensure_capacity();
 
-  lv_obj_t* row = lv_label_create(chat_panel_);
-  lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
-  lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
-  lv_obj_add_style(row, &style_text_main_, 0);
-  lv_obj_set_style_text_font(row, chatPanelFont(), 0);
-
-  switch (kind) {
-    case ChatLineKind::Rx:
-      lv_obj_add_style(row, &style_msg_rx_, 0);
-      break;
-    case ChatLineKind::Tx:
-      lv_obj_add_style(row, &style_msg_tx_, 0);
-      break;
-    case ChatLineKind::Ack:
-      lv_obj_add_style(row, &style_msg_ack_, 0);
-      break;
-    case ChatLineKind::Error:
-      lv_obj_add_style(row, &style_msg_err_, 0);
-      break;
-    case ChatLineKind::Normal:
-    default:
-      break;
+  lv_obj_t* row = createChatRenderableRow(chat_panel_, row_w, text, kind, true);
+  if (row) {
+    chat_rows_[chat_row_count_++] = row;
   }
-
-  lv_label_set_text(row, text);
-  chat_rows_[chat_row_count_++] = row;
   if (date_key != 0) {
     chat_last_date_key_ = date_key;
   }
@@ -9594,7 +10086,7 @@ void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_ke
   if (date_key != 0 && date_key != dm_last_date_key_) {
     ensure_capacity();
     lv_obj_t* marker = createDateMarkerRow(dm_panel_, row_w > 0 ? row_w : LV_PCT(100), line_epoch,
-                                           chatPanelFont());
+                                           chatConversationFont());
     if (marker) {
       dm_rows_[dm_row_count_++] = marker;
       dm_last_date_key_ = date_key;
@@ -9603,32 +10095,11 @@ void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_ke
 
   ensure_capacity();
 
-  lv_obj_t* row = lv_label_create(dm_panel_);
-  lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
-  lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
-  lv_obj_add_style(row, &style_text_main_, 0);
-  lv_obj_set_style_text_font(row, chatPanelFont(), 0);
-
-  switch (kind) {
-    case ChatLineKind::Rx:
-      lv_obj_add_style(row, &style_msg_rx_, 0);
-      break;
-    case ChatLineKind::Tx:
-      lv_obj_add_style(row, &style_msg_tx_, 0);
-      break;
-    case ChatLineKind::Ack:
-      lv_obj_add_style(row, &style_msg_ack_, 0);
-      break;
-    case ChatLineKind::Error:
-      lv_obj_add_style(row, &style_msg_err_, 0);
-      break;
-    case ChatLineKind::Normal:
-    default:
-      break;
+  const char* dm_identity = (contact_key && contact_key[0] != '\0') ? contact_key : contact_name;
+  lv_obj_t* row = createChatRenderableRow(dm_panel_, row_w, text, kind, true, dm_identity);
+  if (row) {
+    dm_rows_[dm_row_count_++] = row;
   }
-
-  lv_label_set_text(row, text);
-  dm_rows_[dm_row_count_++] = row;
   if (date_key != 0) {
     dm_last_date_key_ = date_key;
   }
@@ -9660,44 +10131,16 @@ void StandaloneUi::rebuildDmDialog() {
   }
   lv_obj_set_size(dm_dialog_, dlg_w, dlg_h);
   lv_obj_set_pos(dm_panel_, 2, 18);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (dm_clear_btn_) {
-    lv_obj_set_size(dm_clear_btn_, 56, 18);
-    lv_obj_align(dm_clear_btn_, LV_ALIGN_BOTTOM_RIGHT, -60, -30);
-  }
-  if (dm_new_btn_) {
-    lv_obj_set_size(dm_new_btn_, 56, 18);
-    lv_obj_align(dm_new_btn_, LV_ALIGN_BOTTOM_RIGHT, -2, -30);
-  }
-  if (dm_close_btn_) {
-    lv_obj_set_size(dm_close_btn_, LV_PCT(100), 22);
-    lv_obj_align(dm_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
-  }
-  lv_coord_t panel_h = static_cast<lv_coord_t>(dlg_h - 42);
-#else
   lv_coord_t panel_h = static_cast<lv_coord_t>(dlg_h - 34);
-#endif
   if (panel_h < 40) {
     panel_h = 40;
   }
   lv_obj_set_size(dm_panel_, LV_PCT(100), panel_h);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (dm_close_btn_) {
-    lv_obj_move_foreground(dm_close_btn_);
-  }
-  if (dm_clear_btn_) {
-    lv_obj_move_foreground(dm_clear_btn_);
-  }
-  if (dm_new_btn_) {
-    lv_obj_move_foreground(dm_new_btn_);
-  }
-#else
   if (dm_hint_label_) {
     lv_obj_align(dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
     lv_obj_move_foreground(dm_hint_label_);
   }
-#endif
 
   lv_obj_update_layout(dm_dialog_);
   lv_obj_update_layout(dm_panel_);
@@ -9744,7 +10187,7 @@ void StandaloneUi::rebuildDmDialog() {
         break;
       }
       lv_obj_t* marker = createDateMarkerRow(dm_panel_, row_w > 0 ? row_w : LV_PCT(100), line.timestamp_epoch,
-                                             chatPanelFont());
+                                             chatConversationFont());
       if (marker) {
         dm_rows_[dm_row_count_++] = marker;
       }
@@ -9758,32 +10201,11 @@ void StandaloneUi::rebuildDmDialog() {
       break;
     }
 
-    lv_obj_t* row = lv_label_create(dm_panel_);
-    lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
-    lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
-    lv_obj_add_style(row, &style_text_main_, 0);
-    lv_obj_set_style_text_font(row, chatPanelFont(), 0);
-
-    switch (line.kind) {
-      case ChatLineKind::Rx:
-        lv_obj_add_style(row, &style_msg_rx_, 0);
-        break;
-      case ChatLineKind::Tx:
-        lv_obj_add_style(row, &style_msg_tx_, 0);
-        break;
-      case ChatLineKind::Ack:
-        lv_obj_add_style(row, &style_msg_ack_, 0);
-        break;
-      case ChatLineKind::Error:
-        lv_obj_add_style(row, &style_msg_err_, 0);
-        break;
-      case ChatLineKind::Normal:
-      default:
-        break;
+    const char* line_identity = line.contact_key[0] != '\0' ? line.contact_key : line.contact_name;
+    lv_obj_t* row = createChatRenderableRow(dm_panel_, row_w, display_line, line.kind, true, line_identity);
+    if (row) {
+      dm_rows_[dm_row_count_++] = row;
     }
-
-    lv_label_set_text(row, display_line);
-    dm_rows_[dm_row_count_++] = row;
   }
 
   if (dm_row_count_ == 0) {
@@ -9791,7 +10213,7 @@ void StandaloneUi::rebuildDmDialog() {
     lv_obj_set_width(row, row_w > 0 ? row_w : LV_PCT(100));
     lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
     lv_obj_add_style(row, &style_text_dim_, 0);
-    lv_obj_set_style_text_font(row, chatPanelFont(), 0);
+    lv_obj_set_style_text_font(row, chatConversationFont(), 0);
     lv_label_set_text(row, "No messages yet");
     dm_rows_[dm_row_count_++] = row;
   }
@@ -9834,11 +10256,7 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
         dlg_h = 180;
       }
       lv_obj_set_pos(dm_panel_, 2, 18);
-    #if defined(DEVICE_HELTEC_V4_EXPANSION)
-      lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(dlg_h - 42));
-    #else
       lv_obj_set_size(dm_panel_, LV_PCT(100), static_cast<lv_coord_t>(dlg_h - 34));
-    #endif
       lv_obj_add_style(dm_panel_, &style_chat_, 0);
       lv_obj_set_scroll_dir(dm_panel_, LV_DIR_VER);
       lv_obj_set_scrollbar_mode(dm_panel_, LV_SCROLLBAR_MODE_OFF);
@@ -9861,32 +10279,6 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
     return;
   }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (!dm_close_btn_) {
-    dm_close_btn_ = lv_btn_create(dm_dialog_);
-    if (dm_close_btn_) {
-      lv_obj_set_size(dm_close_btn_, LV_PCT(100), 22);
-      lv_obj_align(dm_close_btn_, LV_ALIGN_BOTTOM_MID, 0, -2);
-      lv_obj_add_style(dm_close_btn_, &style_button_, 0);
-      lv_obj_add_style(dm_close_btn_, &style_button_focused_, LV_STATE_FOCUSED);
-      lv_obj_clear_flag(dm_close_btn_, LV_OBJ_FLAG_EVENT_BUBBLE);
-      lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_KEY, this);
-      lv_obj_add_event_cb(dm_close_btn_, onDmEvent, LV_EVENT_PRESSED, this);
-      lv_obj_add_event_cb(dm_close_btn_, onFocusableEvent, LV_EVENT_FOCUSED, this);
-      if (key_group_) {
-        lv_group_add_obj(key_group_, dm_close_btn_);
-      }
-    }
-  }
-  if (dm_close_btn_ && !dm_close_label_) {
-    dm_close_label_ = lv_label_create(dm_close_btn_);
-    if (dm_close_label_) {
-      lv_obj_add_style(dm_close_label_, &style_text_main_, 0);
-      lv_label_set_text(dm_close_label_, "CLOSE");
-      lv_obj_center(dm_close_label_);
-    }
-  }
-#endif
 
   strncpy(dm_active_name_, contact_name, sizeof(dm_active_name_) - 1);
   dm_active_name_[sizeof(dm_active_name_) - 1] = '\0';
@@ -9935,22 +10327,10 @@ void StandaloneUi::openDmDialog(const char* contact_name, const char* contact_ke
     lv_obj_add_flag(dm_new_btn_, LV_OBJ_FLAG_CLICKABLE);
   }
   lv_obj_move_foreground(dm_dialog_);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (dm_close_btn_) {
-    lv_obj_move_foreground(dm_close_btn_);
-  }
-  if (dm_clear_btn_) {
-    lv_obj_move_foreground(dm_clear_btn_);
-  }
-  if (dm_new_btn_) {
-    lv_obj_move_foreground(dm_new_btn_);
-  }
-#else
   if (dm_hint_label_) {
     lv_obj_align(dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
     lv_obj_move_foreground(dm_hint_label_);
   }
-#endif
   lv_obj_update_layout(dm_dialog_);
   rebuildDmDialog();
 
@@ -10493,6 +10873,128 @@ void StandaloneUi::pushChannelHistoryLine(const char* channel_name, const char* 
   chat_history_dirty_ = true;
 }
 
+bool StandaloneUi::loadChatContactColorsFromFs() {
+  contact_color_count_ = 0;
+  memset(contact_color_entries_, 0, sizeof(contact_color_entries_));
+
+  Preferences prefs;
+  if (!prefs.begin(kUiPrefsNs, false)) {
+    return false;
+  }
+
+  if (!prefs.isKey(kChatColorBlobKey)) {
+    prefs.end();
+    contact_colors_dirty_ = false;
+    return false;
+  }
+
+  const size_t blob_len = prefs.getBytesLength(kChatColorBlobKey);
+  if (blob_len < sizeof(PersistedContactColor) || (blob_len % sizeof(PersistedContactColor)) != 0) {
+    prefs.end();
+    contact_colors_dirty_ = false;
+    return false;
+  }
+
+  int count = static_cast<int>(blob_len / sizeof(PersistedContactColor));
+  const uint16_t declared = prefs.getUShort(kChatColorCountKey, static_cast<uint16_t>(count));
+  if (declared > 0 && declared < static_cast<uint16_t>(count)) {
+    count = declared;
+  }
+  if (count > static_cast<int>(kMaxContactColorEntries)) {
+    count = static_cast<int>(kMaxContactColorEntries);
+  }
+
+  const size_t to_read = static_cast<size_t>(count) * sizeof(PersistedContactColor);
+  auto* persisted_buf = static_cast<PersistedContactColor*>(malloc(to_read));
+  if (!persisted_buf) {
+    prefs.end();
+    return false;
+  }
+  memset(persisted_buf, 0, to_read);
+  const size_t got = prefs.getBytes(kChatColorBlobKey, persisted_buf, to_read);
+  prefs.end();
+
+  const size_t loaded_count = got / sizeof(PersistedContactColor);
+  for (size_t i = 0; i < loaded_count && contact_color_count_ < kMaxContactColorEntries; i++) {
+    char normalized[65] = {};
+    normalizeContactColorIdentity(persisted_buf[i].identity, normalized, sizeof(normalized));
+    if (normalized[0] == '\0') {
+      continue;
+    }
+
+    bool exists = false;
+    for (size_t j = 0; j < contact_color_count_; j++) {
+      if (strcmp(contact_color_entries_[j].identity, normalized) == 0) {
+        exists = true;
+        break;
+      }
+    }
+    if (exists) {
+      continue;
+    }
+
+    ContactColorEntry& entry = contact_color_entries_[contact_color_count_++];
+    strncpy(entry.identity, normalized, sizeof(entry.identity) - 1);
+    entry.identity[sizeof(entry.identity) - 1] = '\0';
+    entry.slot = static_cast<uint8_t>(persisted_buf[i].slot % kContactColorPaletteCount);
+  }
+
+  free(persisted_buf);
+  contact_colors_dirty_ = false;
+  return contact_color_count_ > 0;
+}
+
+bool StandaloneUi::saveChatContactColorsToFs() {
+  Preferences prefs;
+  if (!prefs.begin(kUiPrefsNs, false)) {
+    return false;
+  }
+
+  const size_t count =
+      contact_color_count_ > kMaxContactColorEntries ? kMaxContactColorEntries : contact_color_count_;
+  const size_t blob_len = count * sizeof(PersistedContactColor);
+  PersistedContactColor* persisted_buf = nullptr;
+
+  if (count > 0) {
+    persisted_buf = static_cast<PersistedContactColor*>(malloc(blob_len));
+    if (!persisted_buf) {
+      prefs.end();
+      return false;
+    }
+    memset(persisted_buf, 0, blob_len);
+
+    for (size_t i = 0; i < count; i++) {
+      strncpy(persisted_buf[i].identity, contact_color_entries_[i].identity,
+              sizeof(persisted_buf[i].identity) - 1);
+      persisted_buf[i].identity[sizeof(persisted_buf[i].identity) - 1] = '\0';
+      persisted_buf[i].slot = static_cast<uint8_t>(contact_color_entries_[i].slot % kContactColorPaletteCount);
+    }
+  }
+
+  bool ok = true;
+  if (count > 0) {
+    const size_t wrote = prefs.putBytes(kChatColorBlobKey, persisted_buf, blob_len);
+    if (wrote != blob_len) {
+      ok = false;
+    }
+  } else if (prefs.isKey(kChatColorBlobKey)) {
+    ok = prefs.remove(kChatColorBlobKey);
+  }
+
+  prefs.putUShort(kChatColorCountKey, static_cast<uint16_t>(count));
+  prefs.end();
+  if (persisted_buf) {
+    free(persisted_buf);
+  }
+
+  if (!ok) {
+    return false;
+  }
+
+  contact_colors_dirty_ = false;
+  return true;
+}
+
 bool StandaloneUi::loadChatHistoryFromFs() {
   Preferences prefs;
   if (!prefs.begin(kUiPrefsNs, false)) {
@@ -10971,6 +11473,30 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
+  // Theme picker is modal over the config dialog: swallow everything else.
+  if (theme_list_open_) {
+    if (theme_list_swallow_first_activate_ &&
+        (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r')) {
+      theme_list_swallow_first_activate_ = false;
+      return;
+    }
+    if (theme_list_opened_ms_ != 0 &&
+        static_cast<uint32_t>(now - theme_list_opened_ms_) < kThemeOpenInputIgnoreMs) {
+      return;
+    }
+    if (norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127 ||
+        (kKeyboardNavEnabled && norm_key == 'c')) {
+      closeThemeListDialog();
+    } else if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+      moveThemeSelection(-1);
+    } else if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+      moveThemeSelection(1);
+    } else if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      applyThemeSelection(static_cast<int>(theme_list_selected_));
+    }
+    return;
+  }
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
   if (compose_open_ && (key == '`' || key == '~')) {
     handleComposeKey(LV_KEY_ESC);
@@ -11203,12 +11729,10 @@ void StandaloneUi::handleKey(uint32_t key) {
       lv_obj_scroll_by(dm_panel_, 0, kMsgScrollStep, LV_ANIM_OFF);
       return;
     }
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
     if (norm_key == 'c' || norm_key == 'C') {
       clearActiveDmConversation(false);
       return;
     }
-#endif
     return;
   }
 
@@ -11319,7 +11843,6 @@ void StandaloneUi::handleKey(uint32_t key) {
 
     const uint8_t contacts_option_count = clampOptionCount(contacts_count_, kChannelCount);
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
     if (kKeyboardNavEnabled && norm_key == 'c') {
       if (contacts_count_ > 0 && !channel_dropdown_open_ && !contacts_dm_open_) {
         if (now - last_selector_action_ms_ < kNavDebounceMs) {
@@ -11334,7 +11857,6 @@ void StandaloneUi::handleKey(uint32_t key) {
         return;
       }
     }
-#endif
 
     if (kKeyboardNavEnabled && norm_key == 'f') {
       activateContactsAction(0);
@@ -11363,7 +11885,6 @@ void StandaloneUi::handleKey(uint32_t key) {
       activateContactsAction(2);
       return;
     }
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
     if (kKeyboardNavEnabled && norm_key == 'j') {
       if (!channel_dropdown_open_ && !contacts_nav_focused_ && !contacts_dm_open_ &&
           contacts_count_ > 0 && contacts_selected_index_ < contacts_count_ &&
@@ -11372,7 +11893,6 @@ void StandaloneUi::handleKey(uint32_t key) {
         return;
       }
     }
-#endif
     if (kKeyboardNavEnabled && norm_key == 'd') {
       openContactDeleteConfirm();
       return;
@@ -11385,12 +11905,6 @@ void StandaloneUi::handleKey(uint32_t key) {
       toggleSelectedContactIgnored();
       return;
     }
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (kKeyboardNavEnabled && norm_key == 'c') {
-      activateContactsAction(3);
-      return;
-    }
-#endif
 
     if (norm_key == LV_KEY_ESC) {
       closeContactsDialog(true);
@@ -11487,12 +12001,10 @@ void StandaloneUi::handleKey(uint32_t key) {
         startComposeForSelectedContact();
         return;
       }
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
   if (norm_key == 'c' || norm_key == 'C') {
         clearActiveDmConversation(true);
         return;
       }
-#endif
       if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
         if (contacts_dm_panel_) {
           lv_obj_scroll_by(contacts_dm_panel_, 0, -kMsgScrollStep, LV_ANIM_OFF);
@@ -12421,6 +12933,14 @@ void StandaloneUi::loop() {
     return;
   }
 
+  // A theme change from the web UI or a config import lands here; the
+  // on-device picker schedules its own rebuild directly.
+  if (plumeria::web::consumeUiThemeChanged() && !theme_rebuild_pending_) {
+    loadUiThemeFromSettings();
+    scheduleThemeRebuild(cfg_open_);
+  }
+  processPendingThemeRebuild();
+
   const uint32_t now = millis();
   applyOtaWorkerResult(now);
 
@@ -12467,6 +12987,11 @@ void StandaloneUi::loop() {
     last_chat_persist_ms_ = now;
   }
 
+  if (contact_colors_dirty_ && now - last_chat_persist_ms_ >= kChatPersistFlushMs) {
+    saveChatContactColorsToFs();
+    last_chat_persist_ms_ = now;
+  }
+
   if (dm_history_dirty_ && now - last_dm_persist_ms_ >= kDmPersistFlushMs) {
     saveDmHistoryToFs();
     last_dm_persist_ms_ = now;
@@ -12498,6 +13023,7 @@ void StandaloneUi::setMeshReady(bool ready) {
 
   if (ready) {
     saveChatHistoryToFs();
+    saveChatContactColorsToFs();
     saveDmHistoryToFs();
     last_chat_persist_ms_ = millis();
     last_dm_persist_ms_ = last_chat_persist_ms_;

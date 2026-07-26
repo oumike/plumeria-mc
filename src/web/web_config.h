@@ -31,6 +31,11 @@ struct WebSettings {
   bool notifications_enabled;
   uint16_t screen_timeout_seconds;
   char mesh_region[32];
+  uint8_t ui_theme;  // ui::UiThemeFamily
+  uint8_t ui_mode;   // ui::UiThemeMode (0=dark, 1=light)
+  uint8_t chat_style;      // 0=Classic, 1=Bubble, 2=Outline
+  uint8_t chat_font_size;  // 0=Small, 1=Medium, 2=Large, 3=X-Large
+  bool chat_style_colors;  // Bubble/Outline tint toggle
 };
 
 void loadSettings(WebSettings* out_settings);
@@ -53,6 +58,13 @@ bool setPathHashMode(uint8_t mode, char* err, size_t err_size);
 bool setMultiAck(bool enabled, char* err, size_t err_size);
 bool setRepeaterMode(bool enabled, char* err, size_t err_size);
 bool setNotificationsEnabled(bool enabled, char* err, size_t err_size);
+bool setUiTheme(uint8_t theme, uint8_t mode, char* err, size_t err_size);
+bool setChatStyle(uint8_t style, char* err, size_t err_size);
+bool setChatFontSize(uint8_t size, char* err, size_t err_size);
+bool setChatStyleColors(bool enabled, char* err, size_t err_size);
+// True once after the theme was changed from the web UI or a config import, so
+// the on-device UI knows to repaint itself.
+bool consumeUiThemeChanged();
 
 // Region radio presets (used by first-install onboarding).
 int regionPresetCount();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mesh/mesh_adapter.h"
+#include "ui/ui_theme.h"
 
 #include <lvgl.h>
 
@@ -39,20 +40,26 @@ class StandaloneUi {
     Error,
   };
 
+  enum class ChatRenderStyle : uint8_t {
+    Classic = 0,
+    Bubble = 1,
+    Outline = 2,
+  };
+
+  enum class ChatFontSize : uint8_t {
+    Small = 0,
+    Medium = 1,
+    Large = 2,
+    XLarge = 3,
+  };
+
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 4;
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
-  static constexpr uint8_t kCfgRowCount = 10;
-#else
-  static constexpr uint8_t kCfgRowCount = 13;
-#endif
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
-  static constexpr uint8_t kContactActionCount = 4;  // Fav, Admin, DM, Close
-#else
+  static constexpr uint8_t kCfgRowCount = 17;
   static constexpr uint8_t kContactActionCount = 3;  // Fav, Admin, DM
-#endif
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
+  static constexpr size_t kMaxContactColorEntries = 96;
 #if defined(DEVICE_TLORA_PAGER_TFT)
   static constexpr size_t kMaxStoredChatRows = 88;
 #elif defined(DEVICE_TDECK)
@@ -63,8 +70,26 @@ class StandaloneUi {
   static constexpr size_t kMetricChartPoints = 60;
 
   bool createStyles();
+  void destroyStyles();
   void buildLayout();
   void bindInputGroup();
+
+  // Theme picker. Applying a theme repaints every style, so the whole widget
+  // tree is torn down and rebuilt; that must not happen inside an LVGL event
+  // callback (the callback's own object would be freed under it), so the work
+  // is deferred to loop() via theme_rebuild_pending_.
+  static void loadUiThemeFromSettings();
+  bool ensureThemeListDialogBuilt();
+  void openThemeListDialog();
+  void closeThemeListDialog(bool focus_cfg = true);
+  void refreshThemeListDialog();
+  void moveThemeSelection(int delta);
+  void applyThemeSelection(int preset_index);
+  void scheduleThemeRebuild(bool reopen_cfg);
+  void processPendingThemeRebuild();
+  void rebuildUiForThemeChange(bool reopen_cfg, uint8_t reopen_cfg_row);
+  void resetUiObjectHandles();
+  static void onThemeListEvent(lv_event_t* event);
 
   void refreshChannelVisuals();
   void refreshSelectorVisuals();
@@ -186,6 +211,16 @@ class StandaloneUi {
   void triggerShortcut(uint8_t index);
 
   void appendChatLine(const char* text, ChatLineKind kind, uint32_t timestamp_epoch = 0);
+  const lv_font_t* chatConversationFont() const;
+  lv_color_t contactChatColorForIdentity(const char* identity);
+  uint8_t getOrCreateContactColorSlot(const char* identity);
+  bool loadChatContactColorsFromFs();
+  bool saveChatContactColorsToFs();
+  lv_obj_t* createChatRenderableRow(lv_obj_t* panel, lv_coord_t row_w, const char* text,
+                                    ChatLineKind kind, bool include_rx_sender,
+                                    const char* contact_identity = nullptr);
+  void loadChatRenderSettings();
+  void rebuildChatViewsForRenderSettingChange();
   int findConfiguredChannelIndex(const char* channel_name) const;
   void pushChannelHistoryLine(const char* channel_name, const char* text, ChatLineKind kind,
                               uint32_t timestamp_epoch = 0);
@@ -213,6 +248,7 @@ class StandaloneUi {
   static void onOpenContactsDialogAsync(void* user_data);
   static void onContactsPostOpenAsync(void* user_data);
   static void onOpenComposeDialogAsync(void* user_data);
+  static void onOpenThemeListDialogAsync(void* user_data);
   static void onComposePostOpenAsync(void* user_data);
   static void otaWorkerTask(void* user_data);
   static void onAdminPwEvent(lv_event_t* e);
@@ -510,6 +546,21 @@ class StandaloneUi {
   lv_obj_t* region_list_backdrop_ = nullptr;
   lv_obj_t* region_list_panel_ = nullptr;
   uint8_t region_list_selected_ = 0;
+  lv_obj_t* theme_list_backdrop_ = nullptr;
+  lv_obj_t* theme_list_panel_ = nullptr;
+  lv_obj_t* theme_list_rows_[kUiThemePresetCount]{};
+  lv_obj_t* theme_list_labels_[kUiThemePresetCount]{};
+  bool theme_list_open_ = false;
+  uint8_t theme_list_selected_ = 0;
+  uint8_t theme_list_window_start_ = 0;
+  uint32_t theme_list_opened_ms_ = 0;
+  bool theme_list_swallow_first_activate_ = false;
+  ChatRenderStyle chat_render_style_ = ChatRenderStyle::Classic;
+  ChatFontSize chat_font_size_ = ChatFontSize::Small;
+  bool chat_render_colors_ = true;
+  bool theme_rebuild_pending_ = false;
+  bool theme_rebuild_reopen_cfg_ = false;
+  uint8_t theme_rebuild_cfg_row_ = 0;
   uint8_t pending_chat_focus_attempts_ = 0;
   uint8_t dropdown_highlight_channel_ = 0;
   uint8_t cfg_selected_row_ = 0;
@@ -589,6 +640,14 @@ class StandaloneUi {
   size_t stored_chat_count_ = 0;
   uint32_t chat_last_date_key_ = 0;
   StoredChatLine stored_live_[kMaxStoredChatRows]{};
+
+  struct ContactColorEntry {
+    char identity[65];
+    uint8_t slot;
+  };
+  ContactColorEntry contact_color_entries_[kMaxContactColorEntries]{};
+  size_t contact_color_count_ = 0;
+
   size_t stored_live_head_ = 0;
   size_t stored_live_count_ = 0;
   uint16_t util_history_[kMetricChartPoints]{};
@@ -605,6 +664,7 @@ class StandaloneUi {
   uint32_t last_util_sample_ms_ = 0;
   uint32_t last_util_raw_rx_count_ = 0;
   bool chat_history_dirty_ = false;
+  bool contact_colors_dirty_ = false;
   uint32_t last_chat_persist_ms_ = 0;
   bool dm_history_dirty_ = false;
   uint32_t last_dm_persist_ms_ = 0;

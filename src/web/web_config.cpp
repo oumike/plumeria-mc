@@ -1,5 +1,7 @@
 #include "web/web_config.h"
 
+#include "ui/ui_theme.h"
+
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -30,6 +32,13 @@ constexpr uint16_t kDefaultScreenTimeoutSeconds = 30;
 constexpr uint16_t kMinScreenTimeoutSeconds = 1;
 constexpr uint16_t kMaxScreenTimeoutSeconds = 600;
 constexpr bool kDefaultNotificationsEnabled = true;
+constexpr uint8_t kDefaultChatStyle = 0;  // Classic
+#if defined(DEVICE_TLORA_PAGER_TFT)
+constexpr uint8_t kDefaultChatFontSize = 1;  // Medium
+#else
+constexpr uint8_t kDefaultChatFontSize = 0;  // Small
+#endif
+constexpr bool kDefaultChatStyleColors = true;
 constexpr char kDefaultTimezone[] = "UTC0";
 constexpr char kDefaultRegion[] = "US";
 constexpr uint8_t kDefaultPathHashMode = 0;
@@ -69,6 +78,9 @@ plumeria::mesh::MeshAdapter* g_mesh = nullptr;
 plumeria::web::WebSettings g_settings{};
 bool g_reboot_pending = false;
 uint32_t g_reboot_at_ms = 0;
+// Set when the theme changes through the web UI or config import; the on-device
+// UI polls consumeUiThemeChanged() and repaints itself.
+bool g_ui_theme_changed = false;
 char g_channels_web_buf[40][32]{};
 plumeria::mesh::MeshContactSummary g_contacts_web_buf[160]{};
 plumeria::mesh::MeshChannelConfig g_imported_channels_buf[40]{};
@@ -209,6 +221,11 @@ void saveSettings(const plumeria::web::WebSettings& settings) {
   prefs.putBool("notifications", settings.notifications_enabled);
   prefs.putUShort("screen_timeout", settings.screen_timeout_seconds);
   prefs.putString("mesh_region", settings.mesh_region);
+  prefs.putUChar("ui_theme", settings.ui_theme);
+  prefs.putUChar("ui_mode", settings.ui_mode);
+  prefs.putUChar("chat_style", settings.chat_style);
+  prefs.putUChar("chat_font_size", settings.chat_font_size);
+  prefs.putBool("chat_style_colors", settings.chat_style_colors);
   prefs.end();
 }
 
@@ -353,6 +370,27 @@ String buildConfigText() {
   out += "\n";
   out += "screen_timeout_seconds: ";
   out += String(g_settings.screen_timeout_seconds);
+  out += "\n";
+  out += "ui_theme: ";
+  out += String(static_cast<unsigned>(g_settings.ui_theme));
+  out += "\n";
+  out += "ui_mode: ";
+  out += String(static_cast<unsigned>(g_settings.ui_mode));
+  out += "\n";
+  out += "chat_style: ";
+  out += String(static_cast<unsigned>(g_settings.chat_style));
+  out += "\n";
+  out += "chat_font_size: ";
+  out += String(static_cast<unsigned>(g_settings.chat_font_size));
+  out += "\n";
+  out += "chat_style_colors: ";
+  out += g_settings.chat_style_colors ? "1" : "0";
+  out += "\n";
+  out += "ui_theme_name: ";
+  out += configSafeValue(plumeria::ui::uiThemePresetName(g_settings.ui_theme, g_settings.ui_mode));
+  out += "\n";
+  out += "ui_mode_name: ";
+  out += (g_settings.ui_mode == plumeria::ui::UI_MODE_LIGHT) ? "light" : "dark";
   out += "\n";
 
   if (g_mesh) {
@@ -631,6 +669,28 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
       imported.repeater_mode = parseBoolArg(value, imported.repeater_mode);
     } else if (key.equals("notifications_enabled")) {
       imported.notifications_enabled = parseBoolArg(value, imported.notifications_enabled);
+    } else if (key.equals("ui_theme")) {
+      const long theme = value.toInt();
+      if (theme >= 0 && theme < plumeria::ui::UI_THEME_COUNT) {
+        imported.ui_theme = static_cast<uint8_t>(theme);
+      }
+    } else if (key.equals("ui_mode")) {
+      const long mode = value.toInt();
+      if (mode >= 0 && mode <= plumeria::ui::UI_MODE_LIGHT) {
+        imported.ui_mode = static_cast<uint8_t>(mode);
+      }
+    } else if (key.equals("chat_style")) {
+      const long style = value.toInt();
+      if (style >= 0 && style <= 2) {
+        imported.chat_style = static_cast<uint8_t>(style);
+      }
+    } else if (key.equals("chat_font_size")) {
+      const long size = value.toInt();
+      if (size >= 0 && size <= 3) {
+        imported.chat_font_size = static_cast<uint8_t>(size);
+      }
+    } else if (key.equals("chat_style_colors")) {
+      imported.chat_style_colors = parseBoolArg(value, imported.chat_style_colors);
     } else if (key.equals("ignore")) {
       // Format: "<pubkey_hex>|<name>". Applied inline to avoid a large static
       // buffer: the first entry clears the existing list; persisted at apply.
@@ -819,6 +879,9 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
   Serial.printf("[IMPORT] notifications_enabled=%s\n", boolToText(imported.notifications_enabled));
   Serial.printf("[IMPORT] mesh_region=%s\n", imported.mesh_region[0] ? imported.mesh_region : "(empty)");
   Serial.printf("[IMPORT] screen_timeout_seconds=%u\n", static_cast<unsigned>(imported.screen_timeout_seconds));
+  Serial.printf("[IMPORT] chat_style=%u\n", static_cast<unsigned>(imported.chat_style));
+  Serial.printf("[IMPORT] chat_font_size=%u\n", static_cast<unsigned>(imported.chat_font_size));
+  Serial.printf("[IMPORT] chat_style_colors=%s\n", boolToText(imported.chat_style_colors));
   Serial.printf("[IMPORT] identity_public_key_present=%s\n", boolToText(saw_identity_public_key));
   Serial.printf("[IMPORT] identity_private_key_present=%s\n", boolToText(saw_identity_private_key));
   Serial.printf("[IMPORT] channels_section=%s count=%d\n", boolToText(saw_channels), imported_channel_count);
@@ -850,6 +913,9 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
     return false;
   }
 
+  if (imported.ui_theme != g_settings.ui_theme || imported.ui_mode != g_settings.ui_mode) {
+    g_ui_theme_changed = true;
+  }
   g_settings = imported;
 
   if (g_mesh) {
@@ -1134,6 +1200,39 @@ small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 <label><input id='notifications_enabled' type='checkbox' style='width:auto;margin-right:8px'>Notifications (new message chime)</label>
 <label>Mesh Region (filter; blank = unfiltered)<input id='mesh_region' maxlength='31' placeholder='e.g. #mountains-west or leave blank'></label>
 <label>Screen Timeout Seconds<input id='screen_timeout_sec' type='number' min='1' max='600' step='1'></label>
+<div class='row'>
+<label>Display Theme
+<select id='ui_theme'>
+<option value='0'>Plumeria</option>
+<option value='1'>Evergreen</option>
+<option value='2'>Earthy</option>
+<option value='3'>Solarized</option>
+<option value='4'>Crimson Blue</option>
+<option value='5'>Scarlet Pop</option>
+<option value='6'>Ink Wash</option>
+<option value='7'>Lavendar Fields</option>
+<option value='8'>Wild Flowers</option>
+<option value='9'>Quiet Luxury</option>
+<option value='10'>Morning Dew</option>
+<option value='11'>Winter Chill</option>
+</select>
+</label>
+<label>Theme Mode
+<select id='ui_mode'>
+<option value='0'>Dark</option>
+<option value='1'>Light</option>
+</select>
+</label>
+</div>
+<label>Chat Font Size
+<select id='chat_font_size'>
+<option value='0'>Small</option>
+<option value='1'>Medium</option>
+<option value='2'>Large</option>
+<option value='3'>X-Large</option>
+</select>
+</label>
+<div style='color:#7a7a7a;font-size:0.85em;margin:2px 0 8px 0'>Applies to the on-device screen. Saving repaints the UI without a reboot.</div>
 </section>
 
 <section><h3>Channels</h3>
@@ -1223,7 +1322,7 @@ function bindDirtyTracking(){
   const sendLoc=document.getElementById('send_loc_adv');
   if(sendLoc){sendLoc.addEventListener('change',()=>{locationDirty=true;});}
   ['wifi_ssid','wifi_pass'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{wifiDirty=true;});e.addEventListener('change',()=>{wifiDirty=true;});}});
-  ['region','freq','bw','sf','cr','pwr','adv_int_min','path_hash_mode','screen_timeout_sec','mesh_region','notifications_enabled'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{radioDirty=true;});e.addEventListener('change',()=>{radioDirty=true;});}});
+  ['region','freq','bw','sf','cr','pwr','adv_int_min','path_hash_mode','screen_timeout_sec','mesh_region','notifications_enabled','ui_theme','ui_mode','chat_font_size'].forEach(id=>{const e=document.getElementById(id);if(e){e.addEventListener('input',()=>{radioDirty=true;});e.addEventListener('change',()=>{radioDirty=true;});}});
   const tz=document.getElementById('timezone');
   if(tz){tz.addEventListener('input',()=>{timezoneDirty=true;});tz.addEventListener('change',()=>{timezoneDirty=true;});}
 }
@@ -1277,7 +1376,10 @@ async function loadStatus(force=false){
   const pathHashEl=document.getElementById('path_hash_mode');
   const timeoutEl=document.getElementById('screen_timeout_sec');
   const meshRegionEl=document.getElementById('mesh_region');
-  const radioFocused=(document.activeElement===regionEl||document.activeElement===freqEl||document.activeElement===bwEl||document.activeElement===sfEl||document.activeElement===crEl||document.activeElement===pwrEl||document.activeElement===advEl||document.activeElement===pathHashEl||document.activeElement===timeoutEl||document.activeElement===meshRegionEl);
+  const themeEl=document.getElementById('ui_theme');
+  const modeEl=document.getElementById('ui_mode');
+  const chatFontEl=document.getElementById('chat_font_size');
+  const radioFocused=(document.activeElement===regionEl||document.activeElement===freqEl||document.activeElement===bwEl||document.activeElement===sfEl||document.activeElement===crEl||document.activeElement===pwrEl||document.activeElement===advEl||document.activeElement===pathHashEl||document.activeElement===timeoutEl||document.activeElement===meshRegionEl||document.activeElement===themeEl||document.activeElement===modeEl||document.activeElement===chatFontEl);
   if(force||(!radioDirty&&!radioFocused)){
     if(regionEl)regionEl.value=s.region||'US';
     if(freqEl)freqEl.value=s.freq;
@@ -1291,6 +1393,9 @@ async function loadStatus(force=false){
       pathHashEl.value=String(mode);
     }
     if(timeoutEl)timeoutEl.value=s.screen_timeout_sec||30;
+    if(themeEl&&typeof s.ui_theme==='number')themeEl.value=String(s.ui_theme);
+    if(modeEl&&typeof s.ui_mode==='number')modeEl.value=String(s.ui_mode);
+    if(chatFontEl&&typeof s.chat_font_size==='number')chatFontEl.value=String(s.chat_font_size);
     if(meshRegionEl)meshRegionEl.value=s.mesh_region||'';
     const multiAckEl=document.getElementById('multi_ack');if(multiAckEl)multiAckEl.checked=!!s.multi_ack;
     const repEl=document.getElementById('repeater_mode');if(repEl)repEl.checked=!!s.repeater_mode;
@@ -1328,7 +1433,7 @@ async function loadContacts(){const c=await jget('/api/contacts');contactsCache=
 
 async function addChannel(){const name=(document.getElementById('ch_name').value||'').trim();const psk=(document.getElementById('ch_psk').value||'').trim();if(!name){alert('Channel name is required');return;}if(name[0]!=='#'&&!psk){alert('PSK is required for non-# channels');return;}let r=null;try{r=await jpost('/api/channels/add',{name,psk});}catch(e){alert('Add channel request failed: '+(e&&e.message?e.message:String(e)));return;}if(!r||!r.ok){alert((r&&r.error)||'failed');return;}document.getElementById('ch_name').value='';document.getElementById('ch_psk').value='';await loadChannels();}
 
-async function saveAll(){const tz=document.getElementById('timezone').value;const tzOffset=tzOffsetMinutes(tz);const tzPosix=tzPosixFromOffsetMinutes(tzOffset);let r=null;try{r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,timezone_posix:tzPosix,tz_offset:String(tzOffset),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',repeater_mode:document.getElementById('repeater_mode').checked?'1':'0',notifications_enabled:document.getElementById('notifications_enabled').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value,mesh_region:document.getElementById('mesh_region').value});}catch(e){alert('Save request failed: '+(e&&e.message?e.message:String(e)));return;}alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
+async function saveAll(){const tz=document.getElementById('timezone').value;const tzOffset=tzOffsetMinutes(tz);const tzPosix=tzPosixFromOffsetMinutes(tzOffset);let r=null;try{r=await jpost('/api/save',{node_name:document.getElementById('node_name').value,node_lat:document.getElementById('node_lat').value,node_lon:document.getElementById('node_lon').value,send_loc_adv:document.getElementById('send_loc_adv').checked?'1':'0',ssid:document.getElementById('wifi_ssid').value,pass:document.getElementById('wifi_pass').value,timezone:tz,timezone_posix:tzPosix,tz_offset:String(tzOffset),region:document.getElementById('region').value,freq:document.getElementById('freq').value,bw:document.getElementById('bw').value,sf:document.getElementById('sf').value,cr:document.getElementById('cr').value,pwr:document.getElementById('pwr').value,adv_int_min:document.getElementById('adv_int_min').value,path_hash_mode:document.getElementById('path_hash_mode').value,multi_ack:document.getElementById('multi_ack').checked?'1':'0',repeater_mode:document.getElementById('repeater_mode').checked?'1':'0',notifications_enabled:document.getElementById('notifications_enabled').checked?'1':'0',screen_timeout_sec:document.getElementById('screen_timeout_sec').value,mesh_region:document.getElementById('mesh_region').value,ui_theme:document.getElementById('ui_theme').value,ui_mode:document.getElementById('ui_mode').value,chat_font_size:document.getElementById('chat_font_size').value});}catch(e){alert('Save request failed: '+(e&&e.message?e.message:String(e)));return;}alert((r&&r.message)||((r&&r.error)||'done'));if(r&&r.ok){nodeNameDirty=false;locationDirty=false;wifiDirty=false;radioDirty=false;timezoneDirty=false;await loadStatus(true);}}
 
 async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||((r&&r.error)||'done'));}
 async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||((r&&r.error)||'done'));}
@@ -1621,6 +1726,16 @@ void handleStatus() {
   payload += jsonString(g_settings.mesh_region);
   payload += ",\"screen_timeout_sec\":";
   payload += String(g_settings.screen_timeout_seconds);
+  payload += ",\"ui_theme\":";
+  payload += String(static_cast<unsigned>(g_settings.ui_theme));
+  payload += ",\"ui_mode\":";
+  payload += String(static_cast<unsigned>(g_settings.ui_mode));
+  payload += ",\"chat_style\":";
+  payload += String(static_cast<unsigned>(g_settings.chat_style));
+  payload += ",\"chat_font_size\":";
+  payload += String(static_cast<unsigned>(g_settings.chat_font_size));
+  payload += ",\"chat_style_colors\":";
+  payload += g_settings.chat_style_colors ? "true" : "false";
   payload += ",\"rx_raw\":";
   payload += String(radio_stats.rx_raw_count);
   payload += ",\"rx_pkt\":";
@@ -1845,6 +1960,11 @@ void handleSaveAll() {
   String notifications_str = g_server.arg("notifications_enabled");
   String screen_timeout_sec = g_server.arg("screen_timeout_sec");
   String mesh_region = g_server.arg("mesh_region");
+  String ui_theme_str = g_server.arg("ui_theme");
+  String ui_mode_str = g_server.arg("ui_mode");
+  String chat_style_str = g_server.arg("chat_style");
+  String chat_font_size_str = g_server.arg("chat_font_size");
+  String chat_style_colors_str = g_server.arg("chat_style_colors");
 
   node_name.trim();
   node_lat.trim();
@@ -1876,6 +1996,11 @@ void handleSaveAll() {
   notifications_str.trim();
   screen_timeout_sec.trim();
   mesh_region.trim();
+  ui_theme_str.trim();
+  ui_mode_str.trim();
+  chat_style_str.trim();
+  chat_font_size_str.trim();
+  chat_style_colors_str.trim();
 
   if (ssid.length() == 0) {
     sendJsonError("SSID is required");
@@ -2037,6 +2162,43 @@ void handleSaveAll() {
         (notifications_str == "1" || notifications_str.equalsIgnoreCase("true"));
   }
   g_settings.screen_timeout_seconds = static_cast<uint16_t>(screen_timeout_seconds);
+  // Guard against older cached pages that omit the fields: only overwrite when present.
+  if (ui_theme_str.length() > 0) {
+    const long theme = ui_theme_str.toInt();
+    if (theme >= 0 && theme < plumeria::ui::UI_THEME_COUNT &&
+        static_cast<uint8_t>(theme) != g_settings.ui_theme) {
+      g_settings.ui_theme = static_cast<uint8_t>(theme);
+      g_ui_theme_changed = true;
+    }
+  }
+  if (ui_mode_str.length() > 0) {
+    const long mode = ui_mode_str.toInt();
+    if (mode >= 0 && mode <= plumeria::ui::UI_MODE_LIGHT &&
+        static_cast<uint8_t>(mode) != g_settings.ui_mode) {
+      g_settings.ui_mode = static_cast<uint8_t>(mode);
+      g_ui_theme_changed = true;
+    }
+  }
+  if (chat_style_str.length() > 0) {
+    const long style = chat_style_str.toInt();
+    if (style < 0 || style > 2) {
+      sendJsonError("Chat style out of range");
+      return;
+    }
+    g_settings.chat_style = static_cast<uint8_t>(style);
+  }
+  if (chat_font_size_str.length() > 0) {
+    const long size = chat_font_size_str.toInt();
+    if (size < 0 || size > 3) {
+      sendJsonError("Chat font size out of range");
+      return;
+    }
+    g_settings.chat_font_size = static_cast<uint8_t>(size);
+  }
+  if (chat_style_colors_str.length() > 0) {
+    g_settings.chat_style_colors =
+        (chat_style_colors_str == "1" || chat_style_colors_str.equalsIgnoreCase("true"));
+  }
   copyString(g_settings.wifi_ssid, sizeof(g_settings.wifi_ssid), ssid.c_str());
   copyString(g_settings.wifi_pass, sizeof(g_settings.wifi_pass), pass.c_str());
   copyString(g_settings.node_name, sizeof(g_settings.node_name), node_name.c_str());
@@ -2316,7 +2478,40 @@ void loadSettings(WebSettings* out_settings) {
   if (prefs.isKey("mesh_region")) {
     mesh_region = prefs.getString("mesh_region", "");
   }
+  uint8_t ui_theme = plumeria::ui::UI_THEME_PLUMERIA;
+  uint8_t ui_mode = plumeria::ui::UI_MODE_DARK;
+  uint8_t chat_style = kDefaultChatStyle;
+  uint8_t chat_font_size = kDefaultChatFontSize;
+  bool chat_style_colors = kDefaultChatStyleColors;
+  if (prefs.isKey("ui_theme")) {
+    ui_theme = prefs.getUChar("ui_theme", plumeria::ui::UI_THEME_PLUMERIA);
+  }
+  if (prefs.isKey("ui_mode")) {
+    ui_mode = prefs.getUChar("ui_mode", plumeria::ui::UI_MODE_DARK);
+  }
+  if (prefs.isKey("chat_style")) {
+    chat_style = prefs.getUChar("chat_style", kDefaultChatStyle);
+  }
+  if (prefs.isKey("chat_font_size")) {
+    chat_font_size = prefs.getUChar("chat_font_size", kDefaultChatFontSize);
+  }
+  if (prefs.isKey("chat_style_colors")) {
+    chat_style_colors = prefs.getBool("chat_style_colors", kDefaultChatStyleColors);
+  }
   prefs.end();
+
+  if (ui_theme >= plumeria::ui::UI_THEME_COUNT) {
+    ui_theme = plumeria::ui::UI_THEME_PLUMERIA;
+  }
+  if (ui_mode > plumeria::ui::UI_MODE_LIGHT) {
+    ui_mode = plumeria::ui::UI_MODE_DARK;
+  }
+  if (chat_style > 2) {
+    chat_style = kDefaultChatStyle;
+  }
+  if (chat_font_size > 3) {
+    chat_font_size = kDefaultChatFontSize;
+  }
 
   if (path_hash_mode > 2) {
     path_hash_mode = kDefaultPathHashMode;
@@ -2349,6 +2544,11 @@ void loadSettings(WebSettings* out_settings) {
   out_settings->repeater_mode = repeater_mode;
   out_settings->notifications_enabled = notifications_enabled;
   copyString(out_settings->mesh_region, sizeof(out_settings->mesh_region), mesh_region.c_str());
+  out_settings->ui_theme = ui_theme;
+  out_settings->ui_mode = ui_mode;
+  out_settings->chat_style = chat_style;
+  out_settings->chat_font_size = chat_font_size;
+  out_settings->chat_style_colors = chat_style_colors;
 }
 
 void applyRadioProfile(hal::RadioConfig* radio_config, const WebSettings& settings) {
@@ -2447,6 +2647,13 @@ bool exportConfigText(String* out_text) {
   if (!out_text) {
     return false;
   }
+
+  // Export should always reflect persisted settings even when the web server
+  // is currently off and in-memory state has not been refreshed.
+  WebSettings latest{};
+  loadSettings(&latest);
+  g_settings = latest;
+
   *out_text = buildConfigText();
   return true;
 }
@@ -2589,6 +2796,92 @@ bool setNotificationsEnabled(bool enabled, char* err, size_t err_size) {
   }
   setImportError(err, err_size, "");
   return true;
+}
+
+bool setUiTheme(uint8_t theme, uint8_t mode, char* err, size_t err_size) {
+  if (theme >= plumeria::ui::UI_THEME_COUNT) {
+    setImportError(err, err_size, "ui_theme out of range");
+    return false;
+  }
+  if (mode > plumeria::ui::UI_MODE_LIGHT) {
+    setImportError(err, err_size, "ui_mode out of range");
+    return false;
+  }
+
+  WebSettings next{};
+  loadSettings(&next);
+  if (next.ui_theme == theme && next.ui_mode == mode) {
+    setImportError(err, err_size, "");
+    return true;
+  }
+
+  next.ui_theme = theme;
+  next.ui_mode = mode;
+  saveSettings(next);
+  g_settings = next;
+  setImportError(err, err_size, "");
+  return true;
+}
+
+bool setChatStyle(uint8_t style, char* err, size_t err_size) {
+  if (style > 2) {
+    setImportError(err, err_size, "chat_style out of range");
+    return false;
+  }
+
+  WebSettings next{};
+  loadSettings(&next);
+  if (next.chat_style == style) {
+    setImportError(err, err_size, "");
+    return true;
+  }
+
+  next.chat_style = style;
+  saveSettings(next);
+  g_settings = next;
+  setImportError(err, err_size, "");
+  return true;
+}
+
+bool setChatFontSize(uint8_t size, char* err, size_t err_size) {
+  if (size > 3) {
+    setImportError(err, err_size, "chat_font_size out of range");
+    return false;
+  }
+
+  WebSettings next{};
+  loadSettings(&next);
+  if (next.chat_font_size == size) {
+    setImportError(err, err_size, "");
+    return true;
+  }
+
+  next.chat_font_size = size;
+  saveSettings(next);
+  g_settings = next;
+  setImportError(err, err_size, "");
+  return true;
+}
+
+bool setChatStyleColors(bool enabled, char* err, size_t err_size) {
+  WebSettings next{};
+  loadSettings(&next);
+  if (next.chat_style_colors == enabled) {
+    setImportError(err, err_size, "");
+    return true;
+  }
+
+  next.chat_style_colors = enabled;
+  saveSettings(next);
+  g_settings = next;
+  setImportError(err, err_size, "");
+  return true;
+}
+
+bool consumeUiThemeChanged() {
+  const bool changed = g_ui_theme_changed;
+  g_ui_theme_changed = false;
+  return changed;
 }
 
 int regionPresetCount() {

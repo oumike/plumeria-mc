@@ -83,62 +83,6 @@ PersistedContact g_contacts_nvs_buf[MAX_CONTACTS + MAX_ANON_CONTACTS]{};
 ChannelDetails g_channel_rollback_snapshot[MAX_GROUP_CHANNELS]{};
 PendingChannelConfig* g_pending_channels_nvs_buf = nullptr;
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-bool waitForBusyLow(int busy_pin, uint32_t timeout_ms, const char* phase) {
-  if (busy_pin < 0) {
-    return true;
-  }
-
-  pinMode(busy_pin, INPUT);
-  const uint32_t start = millis();
-  while ((millis() - start) < timeout_ms) {
-    if (digitalRead(busy_pin) == LOW) {
-      return true;
-    }
-    delay(1);
-  }
-
-  Serial.printf("[RADIO] busy stuck high phase=%s pin=%d level=%d\n",
-                phase ? phase : "unknown",
-                busy_pin,
-                digitalRead(busy_pin));
-  return false;
-}
-
-void pulseRadioResetPin(int rst_pin) {
-  if (rst_pin < 0) {
-    return;
-  }
-
-  pinMode(rst_pin, OUTPUT);
-  digitalWrite(rst_pin, LOW);
-  delay(2);
-  digitalWrite(rst_pin, HIGH);
-  delay(8);
-}
-
-bool preflightHeltecRadio(const plumeria::hal::RadioConfig& radio_config) {
-  if (radio_config.radio_busy >= 0) {
-    pinMode(radio_config.radio_busy, INPUT);
-    Serial.printf("[RADIO] busy preflight initial=%d pin=%d\n",
-                  digitalRead(radio_config.radio_busy),
-                  static_cast<int>(radio_config.radio_busy));
-  }
-
-  for (int attempt = 0; attempt < 2; ++attempt) {
-    Serial.printf("[RADIO] preflight reset attempt=%d rst=%d\n",
-                  attempt + 1,
-                  static_cast<int>(radio_config.radio_rst));
-    pulseRadioResetPin(radio_config.radio_rst);
-    if (waitForBusyLow(radio_config.radio_busy, 800, "preflight")) {
-      Serial.println("[RADIO] preflight busy ready");
-      return true;
-    }
-  }
-
-  return false;
-}
-#endif
 
 PendingChannelConfig* ensurePendingChannelsBuffer() {
   if (!g_pending_channels_nvs_buf) {
@@ -1605,11 +1549,6 @@ bool MeshAdapter::begin(const hal::RadioConfig& radio_config) {
       static_cast<double>(radio_config.bandwidth_khz), static_cast<unsigned>(radio_config.spreading_factor),
       static_cast<unsigned>(radio_config.coding_rate), static_cast<int>(radio_config.tx_power_dbm));
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-  if (!preflightHeltecRadio(radio_config)) {
-    return fail("SX1262 preflight failed (busy line)");
-  }
-#endif
 
   Serial.println("[RADIO] spi begin start");
   runtime_->lora_spi.begin(radio_config.spi_sck, radio_config.spi_miso, radio_config.spi_mosi);

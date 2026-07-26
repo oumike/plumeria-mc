@@ -21,11 +21,12 @@ void preferExternalHeap();
 // Device-specific release artifact slug (for example: tdeck, cardputer-cap).
 const char* currentDeviceAssetSlug();
 
-// Checks GitHub release metadata and computes the expected OTA binary URL.
+// Checks proxied release metadata and computes the expected OTA binary URL.
 bool checkLatestRelease(OtaCheckResult& out);
 
 // Downloads and installs the latest release binary for this device target.
 // If tag is null/empty, it fetches the latest release tag first.
+// The image must pass detached ECDSA-P256 signature verification before commit.
 bool installLatestRelease(const char* tag,
                          char* err_out,
                          size_t err_len,

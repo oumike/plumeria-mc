@@ -117,5 +117,6 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*.bin
+            dist/*.sig
             dist/*.elf
             dist/*.map
