@@ -1,5 +1,7 @@
 #include "mesh/mesh_adapter.h"
 
+#include "mesh/contact_capacity.h"
+
 #include <Arduino.h>
 #include <Preferences.h>
 #include <SPI.h>
@@ -53,6 +55,7 @@ constexpr char kChannelsCountKey[] = "channels_cnt";
 constexpr char kChannelsBlobKey[] = "channels_blob";
 constexpr char kPendingChannelsBlobKey[] = "ch_pend_blob";
 constexpr char kContactTelemetryBlobKey[] = "ctel_blob";
+constexpr char kContactFirstSeenBlobKey[] = "cfirst_blob";
 constexpr char kUiTelemetryUpdatedInfo[] = "__telemetry_updated__";
 
 struct PersistedContact {
@@ -78,11 +81,47 @@ struct PendingChannelConfig {
   char psk_base64[65];
 };
 
+// First-seen timestamps live beside the contacts array rather than inside
+// ContactInfo, so the vendored MeshCore layout (and its persisted contacts
+// blob) stays untouched. An all-zero key marks a free slot; contacts are keyed
+// by public key prefix, like the rest of the firmware's contact lookups.
+constexpr size_t kContactSlotCount = MAX_CONTACTS + MAX_ANON_CONTACTS;
+constexpr size_t kFirstSeenKeyLen = 8;
+
+struct ContactFirstSeenEntry {
+  uint8_t key[kFirstSeenKeyLen];
+  uint32_t first_seen;
+};
+
 PersistedChannel g_channels_nvs_buf[MAX_GROUP_CHANNELS]{};
 PersistedContact g_contacts_nvs_buf[MAX_CONTACTS + MAX_ANON_CONTACTS]{};
+ContactFirstSeenEntry g_contact_first_seen[kContactSlotCount]{};
 ChannelDetails g_channel_rollback_snapshot[MAX_GROUP_CHANNELS]{};
 PendingChannelConfig* g_pending_channels_nvs_buf = nullptr;
 
+bool firstSeenSlotUsed(const ContactFirstSeenEntry& entry) {
+  for (size_t i = 0; i < kFirstSeenKeyLen; i++) {
+    if (entry.key[i] != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int findFirstSeenSlot(const uint8_t* pub_key) {
+  if (!pub_key) {
+    return -1;
+  }
+  for (size_t i = 0; i < kContactSlotCount; i++) {
+    if (!firstSeenSlotUsed(g_contact_first_seen[i])) {
+      continue;
+    }
+    if (memcmp(g_contact_first_seen[i].key, pub_key, kFirstSeenKeyLen) == 0) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
 
 PendingChannelConfig* ensurePendingChannelsBuffer() {
   if (!g_pending_channels_nvs_buf) {
@@ -1042,6 +1081,12 @@ class StandaloneChatMesh : public BaseChatMesh {
     return node_name_;
   }
 
+  // Removing a contact compacts the MeshCore contacts array, so any cached
+  // ContactInfo* into it is stale afterwards.
+  void invalidateCachedContacts() {
+    pending_ack_contact_ = nullptr;
+  }
+
  protected:
   bool regionMatches(::mesh::Packet* packet) const {
     if (!mesh_region_active_) {
@@ -1078,8 +1123,25 @@ class StandaloneChatMesh : public BaseChatMesh {
     if (!regionMatches(packet)) {
       return;
     }
+
+    const bool usable_advert = adapter_ && app_data && app_data_len > 0 && app_data_len <= MAX_ADVERT_DATA_SIZE;
+    const bool known_contact = lookupContactByPubKey(id.pub_key, PUB_KEY_SIZE) != nullptr;
+
+    // Make room before MeshCore allocates a slot for a genuinely new contact:
+    // FIFO-evict the oldest non-favorite. When nothing may be evicted (all
+    // favorites at capacity) block the auto-add so the configured limit holds.
+    block_auto_add_ = false;
+    if (usable_advert && !known_contact) {
+      AdvertDataParser probe(app_data, static_cast<uint8_t>(app_data_len));
+      if (probe.isValid() && probe.hasName() && shouldAutoAddContactType(probe.getType())) {
+        block_auto_add_ = !adapter_->ensureContactCapacityForInsert();
+      }
+    }
+
     BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
-    if (!adapter_ || !app_data || app_data_len == 0 || app_data_len > MAX_ADVERT_DATA_SIZE) {
+    block_auto_add_ = false;
+
+    if (!usable_advert) {
       return;
     }
 
@@ -1088,7 +1150,35 @@ class StandaloneChatMesh : public BaseChatMesh {
       return;
     }
 
+    if (!known_contact && lookupContactByPubKey(id.pub_key, PUB_KEY_SIZE) != nullptr) {
+      adapter_->noteContactFirstSeen(id.pub_key, getRTCClock()->getCurrentTimeUnique());
+    }
+
     adapter_->noteContactAdvertTelemetry(id.pub_key, parser.getType(), parser.getFeat1(), parser.getFeat2());
+  }
+
+  bool shouldAutoAddContactType(uint8_t type) const override {
+    if (block_auto_add_) {
+      return false;  // at capacity with only favorites left
+    }
+    return BaseChatMesh::shouldAutoAddContactType(type);
+  }
+
+  void onContactsFull() override {
+    if (adapter_) {
+      adapter_->noteContactsFull();
+    }
+  }
+
+  // MeshCore reusing a contact slot on its own; our FIFO policy is meant to be
+  // the only thing that frees slots, so this reports as well as cleans up.
+  void onContactOverwrite(const uint8_t* pub_key) override {
+    if (!adapter_ || !pub_key) {
+      return;
+    }
+    const ContactInfo* victim = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+    const bool was_favorite = victim && (victim->flags & 0x01U) != 0;
+    adapter_->noteContactOverwritten(pub_key, was_favorite);
   }
 
   ContactInfo* processAck(const uint8_t* data) override {
@@ -1448,6 +1538,9 @@ class StandaloneChatMesh : public BaseChatMesh {
   char mesh_region_name_[32] = {};
   TransportKey mesh_region_key_{};
   bool mesh_region_active_ = false;
+  // Set for the duration of one advert when the contact table is full of
+  // favorites, so MeshCore skips the auto-add instead of exceeding the limit.
+  mutable bool block_auto_add_ = false;
   ContactInfo* pending_ack_contact_ = nullptr;
   uint32_t pending_ack_crc_ = 0;
   uint8_t ack_recv_count_ = 0;
@@ -1490,6 +1583,7 @@ struct MeshRuntime {
 void MeshAdapter::resetRuntime() {
   ready_ = false;
   adverts_unlocked_for_boot_ = false;
+  memset(g_contact_first_seen, 0, sizeof(g_contact_first_seen));
 
   if (!runtime_) {
     return;
@@ -2379,6 +2473,7 @@ int MeshAdapter::exportContacts(MeshContactSummary contacts[], int max_contacts)
     summary.out_path_len = contact.out_path_len;
     memcpy(summary.out_path, contact.out_path, sizeof(summary.out_path));
     summary.lastmod = contact.lastmod;
+    summary.first_seen = contactFirstSeen(contact.id.pub_key);
     summary.gps_lat_i = contact.gps_lat;
     summary.gps_lon_i = contact.gps_lon;
     loadContactTelemetry(contact.id.pub_key, &summary);
@@ -2386,6 +2481,151 @@ int MeshAdapter::exportContacts(MeshContactSummary contacts[], int max_contacts)
   }
 
   return exported;
+}
+
+int MeshAdapter::contactCount() const {
+  if (!runtime_ || !runtime_->mesh) {
+    return 0;
+  }
+  return runtime_->mesh->getNumContacts();
+}
+
+int MeshAdapter::contactLimit() const {
+  constexpr int kHardLimit = MAX_CONTACTS;
+  return kContactLimitDefault < kHardLimit ? kContactLimitDefault : kHardLimit;
+}
+
+uint32_t MeshAdapter::contactsEvictedCount() const {
+  return contacts_evicted_;
+}
+
+uint32_t MeshAdapter::contactsRejectedCount() const {
+  return contacts_rejected_;
+}
+
+void MeshAdapter::noteContactsFull() {
+  queueInfo("Contact table full");
+}
+
+bool MeshAdapter::addContactWithoutOverwrite(const void* contact_info) {
+  if (!runtime_ || !runtime_->mesh || !contact_info) {
+    return false;
+  }
+  // MeshCore only appends while num_contacts < MAX_CONTACTS; past that its
+  // ADV_TYPE_NONE fallback would reuse an existing slot regardless of the
+  // favorite flag. ensureContactCapacityForInsert() normally guarantees the
+  // free slot, so this is a hard backstop rather than an expected path.
+  if (runtime_->mesh->getNumContacts() >= MAX_CONTACTS) {
+    queueInfo("Contact table full: add refused");
+    return false;
+  }
+  return runtime_->mesh->addContact(*static_cast<const ContactInfo*>(contact_info));
+}
+
+void MeshAdapter::noteContactOverwritten(const uint8_t* pub_key, bool was_favorite) {
+  // Reached only if MeshCore reuses a slot behind our back; keep the side
+  // tables consistent and make the (never-expected) favorite case visible.
+  forgetContactFirstSeen(pub_key);
+  clearContactTelemetry(pub_key);
+  markContactsDirty();
+  if (was_favorite) {
+    contacts_rejected_++;
+    queueInfo("Warning: favorite contact slot overwritten");
+  }
+}
+
+uint32_t MeshAdapter::contactFirstSeen(const uint8_t* pub_key) const {
+  const int slot = findFirstSeenSlot(pub_key);
+  return slot < 0 ? 0 : g_contact_first_seen[slot].first_seen;
+}
+
+void MeshAdapter::noteContactFirstSeen(const uint8_t* pub_key, uint32_t when) {
+  if (!pub_key) {
+    return;
+  }
+  if (findFirstSeenSlot(pub_key) >= 0) {
+    return;  // first-seen is recorded once and never moves
+  }
+
+  for (size_t i = 0; i < kContactSlotCount; i++) {
+    if (firstSeenSlotUsed(g_contact_first_seen[i])) {
+      continue;
+    }
+    memcpy(g_contact_first_seen[i].key, pub_key, kFirstSeenKeyLen);
+    g_contact_first_seen[i].first_seen = when;
+    markContactsDirty();
+    return;
+  }
+}
+
+void MeshAdapter::forgetContactFirstSeen(const uint8_t* pub_key) {
+  const int slot = findFirstSeenSlot(pub_key);
+  if (slot >= 0) {
+    memset(&g_contact_first_seen[slot], 0, sizeof(g_contact_first_seen[slot]));
+  }
+}
+
+bool MeshAdapter::ensureContactCapacityForInsert() {
+  if (!runtime_ || !runtime_->mesh) {
+    return false;
+  }
+
+  const int limit = contactLimit();
+  while (runtime_->mesh->getNumContacts() >= limit) {
+    int count = runtime_->mesh->getNumContacts();
+    if (count > static_cast<int>(kContactSlotCount)) {
+      count = static_cast<int>(kContactSlotCount);
+    }
+
+    const int victim = selectFifoEvictionIndexBy(count, [this](int i) {
+      ContactSlot slot{false, 0};
+      ContactInfo entry{};
+      if (runtime_->mesh->getContactByIdx(static_cast<uint32_t>(i), entry)) {
+        slot.favorite = (entry.flags & 0x01U) != 0;
+        slot.first_seen = contactFirstSeen(entry.id.pub_key);
+      }
+      return slot;
+    });
+    if (victim < 0) {
+      contacts_rejected_++;
+      // Every advert from an unknown node re-hits this path, so the message is
+      // throttled; contactsRejectedCount() carries the true tally.
+      const uint32_t now = millis();
+      if (last_contacts_full_notice_ms_ == 0 || now - last_contacts_full_notice_ms_ >= kContactsFullNoticeMs) {
+        last_contacts_full_notice_ms_ = now;
+        queueInfo("Contacts full (all favorites): new contact dropped");
+      }
+      return false;
+    }
+
+    ContactInfo contact{};
+    if (!runtime_->mesh->getContactByIdx(static_cast<uint32_t>(victim), contact)) {
+      return false;
+    }
+
+    char evicted_name[32] = {};
+    strncpy(evicted_name, contact.name[0] != '\0' ? contact.name : "(unnamed)", sizeof(evicted_name) - 1);
+
+    uint8_t evicted_key[PUB_KEY_SIZE] = {};
+    memcpy(evicted_key, contact.id.pub_key, sizeof(evicted_key));
+
+    ContactInfo* live = runtime_->mesh->lookupContactByPubKey(evicted_key, PUB_KEY_SIZE);
+    if (!live || !runtime_->mesh->removeContact(*live)) {
+      return false;
+    }
+
+    runtime_->mesh->invalidateCachedContacts();
+    forgetContactFirstSeen(evicted_key);
+    clearContactTelemetry(evicted_key);
+    contacts_evicted_++;
+    markContactsDirty();
+
+    char info[96];
+    snprintf(info, sizeof(info), "Contacts full: evicted %s", evicted_name);
+    queueInfo(info);
+  }
+
+  return true;
 }
 
 bool MeshAdapter::importContactByPublicKeyHex(const char* public_key_hex, const char* contact_name,
@@ -2407,6 +2647,10 @@ bool MeshAdapter::importContactByPublicKeyHex(const char* public_key_hex, const 
 
   ContactInfo* contact = runtime_->mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
   if (!contact) {
+    if (!ensureContactCapacityForInsert()) {
+      return false;  // at capacity with only favorites left
+    }
+
     ContactInfo created{};
     created.id = ::mesh::Identity(pub_key);
     if (resolved_name[0] != '\0') {
@@ -2426,7 +2670,7 @@ bool MeshAdapter::importContactByPublicKeyHex(const char* public_key_hex, const 
     created.sync_since = 0;
     created.shared_secret_valid = false;
 
-    if (!runtime_->mesh->addContact(created)) {
+    if (!addContactWithoutOverwrite(&created)) {
       return false;
     }
 
@@ -2434,6 +2678,7 @@ bool MeshAdapter::importContactByPublicKeyHex(const char* public_key_hex, const 
     if (!contact) {
       return false;
     }
+    noteContactFirstSeen(pub_key, runtime_->rtc_clock.getCurrentTimeUnique());
   } else {
     if (resolved_name[0] != '\0') {
       strncpy(contact->name, resolved_name, sizeof(contact->name) - 1);
@@ -2709,18 +2954,9 @@ bool MeshAdapter::removeContactByPublicKeyHex(const char* public_key_hex) {
     return false;
   }
 
-  bool telemetry_cleared = false;
-  for (size_t i = 0; i < kMaxContactTelemetry; i++) {
-    ContactTelemetrySnapshot& slot = contact_telemetry_[i];
-    if (!slot.used) {
-      continue;
-    }
-    if (memcmp(slot.pub_key, pub_key, kPubKeySize) == 0) {
-      memset(&slot, 0, sizeof(slot));
-      telemetry_cleared = true;
-      break;
-    }
-  }
+  runtime_->mesh->invalidateCachedContacts();
+  forgetContactFirstSeen(pub_key);
+  const bool telemetry_cleared = clearContactTelemetry(pub_key);
 
   markContactsDirty();
   if (!saveContactsToFs()) {
@@ -3334,6 +3570,26 @@ bool MeshAdapter::loadContactTelemetry(const uint8_t* pub_key, MeshContactSummar
   return false;
 }
 
+bool MeshAdapter::clearContactTelemetry(const uint8_t* pub_key) {
+  if (!pub_key) {
+    return false;
+  }
+
+  for (size_t i = 0; i < kMaxContactTelemetry; i++) {
+    ContactTelemetrySnapshot& slot = contact_telemetry_[i];
+    if (!slot.used) {
+      continue;
+    }
+    if (memcmp(slot.pub_key, pub_key, kPubKeySize) == 0) {
+      memset(&slot, 0, sizeof(slot));
+      telemetry_dirty_ = true;
+      return true;
+    }
+  }
+
+  return false;
+}
+
 bool MeshAdapter::loadContactTelemetryFromFs() {
   memset(contact_telemetry_, 0, sizeof(contact_telemetry_));
 
@@ -3395,15 +3651,83 @@ bool MeshAdapter::saveContactTelemetryToFs() {
   return ok;
 }
 
+bool MeshAdapter::loadContactFirstSeenFromNvs() {
+  memset(g_contact_first_seen, 0, sizeof(g_contact_first_seen));
+
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, false)) {
+    return false;
+  }
+
+  if (!prefs.isKey(kContactFirstSeenBlobKey)) {
+    prefs.end();
+    return false;
+  }
+
+  const size_t blob_len = prefs.getBytesLength(kContactFirstSeenBlobKey);
+  if (blob_len == 0) {
+    prefs.end();
+    return false;
+  }
+
+  const size_t to_read = blob_len < sizeof(g_contact_first_seen) ? blob_len : sizeof(g_contact_first_seen);
+  const size_t got = prefs.getBytes(kContactFirstSeenBlobKey, g_contact_first_seen, to_read);
+  prefs.end();
+
+  if (got != to_read) {
+    memset(g_contact_first_seen, 0, sizeof(g_contact_first_seen));
+    return false;
+  }
+  return true;
+}
+
+bool MeshAdapter::saveContactFirstSeenToNvs() {
+  Preferences prefs;
+  if (!prefs.begin(kMeshPrefsNs, false)) {
+    return false;
+  }
+
+  bool any_used = false;
+  for (size_t i = 0; i < kContactSlotCount; i++) {
+    if (firstSeenSlotUsed(g_contact_first_seen[i])) {
+      any_used = true;
+      break;
+    }
+  }
+
+  bool ok = true;
+  if (any_used) {
+    const size_t wrote = prefs.putBytes(kContactFirstSeenBlobKey, g_contact_first_seen, sizeof(g_contact_first_seen));
+    ok = (wrote == sizeof(g_contact_first_seen));
+  } else if (prefs.isKey(kContactFirstSeenBlobKey)) {
+    ok = prefs.remove(kContactFirstSeenBlobKey);
+  }
+
+  prefs.end();
+  return ok;
+}
+
 bool MeshAdapter::loadContactsFromFs() {
+  loadContactFirstSeenFromNvs();
+
   const int available = loadContactsSnapshotFromNvs(g_contacts_nvs_buf, MAX_CONTACTS + MAX_ANON_CONTACTS);
   if (available <= 0) {
     return false;
   }
 
   int loaded = 0;
+  int skipped = 0;
   for (int i = 0; i < available; i++) {
     const PersistedContact& record = g_contacts_nvs_buf[i];
+
+    // A snapshot saved under a larger limit (or a lowered PLUMERIA_MAX_CONTACTS)
+    // is trimmed here by the same FIFO rule used at runtime. Once nothing can be
+    // evicted the remaining records have nowhere to go.
+    if (!ensureContactCapacityForInsert()) {
+      skipped = available - i;
+      break;
+    }
+
     ContactInfo contact{};
     contact.id = ::mesh::Identity(record.pub_key);
     strncpy(contact.name, record.name, sizeof(contact.name) - 1);
@@ -3419,8 +3743,12 @@ bool MeshAdapter::loadContactsFromFs() {
     contact.sync_since = 0;
     contact.shared_secret_valid = false;
 
-    if (runtime_->mesh->addContact(contact)) {
+    if (addContactWithoutOverwrite(&contact)) {
       loaded++;
+      // Contacts persisted before first-seen tracking existed fall back to
+      // their last-modified stamp so FIFO order stays stable across upgrades.
+      noteContactFirstSeen(record.pub_key,
+                           record.lastmod != 0 ? record.lastmod : runtime_->rtc_clock.getCurrentTimeUnique());
     }
   }
 
@@ -3428,6 +3756,12 @@ bool MeshAdapter::loadContactsFromFs() {
     char info[96];
     snprintf(info, sizeof(info), "Loaded %d contacts", loaded);
     queueInfo(info);
+  }
+  if (skipped > 0) {
+    char info[96];
+    snprintf(info, sizeof(info), "Dropped %d contacts over limit %d", skipped, contactLimit());
+    queueInfo(info);
+    markContactsDirty();
   }
   return loaded > 0;
 }
@@ -3458,6 +3792,28 @@ bool MeshAdapter::saveContactsToFs() {
     record.gps_lat = contact.gps_lat;
     record.gps_lon = contact.gps_lon;
     persisted++;
+
+    // Safety net for any contact that reached the table without passing through
+    // an insertion hook: give it a first-seen stamp so FIFO order is defined.
+    noteContactFirstSeen(contact.id.pub_key,
+                         contact.lastmod != 0 ? contact.lastmod : runtime_->rtc_clock.getCurrentTimeUnique());
+  }
+
+  // Drop first-seen entries whose contact is gone (removed or evicted).
+  for (size_t i = 0; i < kContactSlotCount; i++) {
+    if (!firstSeenSlotUsed(g_contact_first_seen[i])) {
+      continue;
+    }
+    bool still_present = false;
+    for (int j = 0; j < persisted; j++) {
+      if (memcmp(g_contact_first_seen[i].key, g_contacts_nvs_buf[j].pub_key, kFirstSeenKeyLen) == 0) {
+        still_present = true;
+        break;
+      }
+    }
+    if (!still_present) {
+      memset(&g_contact_first_seen[i], 0, sizeof(g_contact_first_seen[i]));
+    }
   }
 
   Preferences prefs;
@@ -3482,6 +3838,10 @@ bool MeshAdapter::saveContactsToFs() {
 
   prefs.putUShort(kContactsCountKey, static_cast<uint16_t>(persisted));
   prefs.end();
+
+  if (!saveContactFirstSeenToNvs()) {
+    ok = false;
+  }
 
   char info[96];
   snprintf(info, sizeof(info), "Saved %d contacts", persisted);

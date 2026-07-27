@@ -121,3 +121,163 @@ branch (`kUseOnscreenKeyboard`, tdeck) sets sizes but may also thrash when the k
   wifi → reboot).
 - Region-list picker nav (up/down/enter on cardputer; tap on tdeck) and small-screen scrolling.
 - Contact delete button placement/tap; repeater mode actually relaying a 3rd node's traffic.
+
+---
+
+# Contact capacity + CSV export (issue #9)
+
+**Limit.** `PLUMERIA_MAX_CONTACTS` (default 128, `src/mesh/contact_capacity.h`) caps contacts kept in
+memory/NVS; `MeshAdapter::contactLimit()` clamps it to MeshCore's compile-time `MAX_CONTACTS`, so
+lowering it in `platformio.ini` works but raising it past `MAX_CONTACTS` does nothing.
+
+**Eviction.** `MeshAdapter::ensureContactCapacityForInsert()` is called *before* every insert (advert
+path in `StandaloneChatMesh::onAdvertRecv`, plus `importContactByPublicKeyHex` and contact load) and
+FIFO-evicts the oldest non-favorite (`selectFifoEvictionIndexBy`, ordered by first-seen, not
+`lastmod` and not name). Favorites (`ContactInfo::flags & 0x01`) are never evicted; when only
+favorites remain the insert is refused — `block_auto_add_` makes MeshCore's
+`shouldAutoAddContactType()` return false for that one advert so the limit can't be exceeded, and
+`contactsRejectedCount()` counts it. Vendored MeshCore is **unmodified**: its own
+`shouldOverwriteWhenFull()`/`lastmod` policy stays off.
+
+**First-seen.** Kept out of `ContactInfo` (vendored layout untouched) in a file-scope table
+`g_contact_first_seen` in `mesh_adapter.cpp`, keyed by an 8-byte pubkey prefix, persisted in its own
+NVS blob (`cfirst_blob`) and pruned/backfilled in `saveContactsToFs()`. Contacts persisted before
+this feature backfill from `lastmod` at load.
+
+**Pointer hazard.** Evicting/removing compacts MeshCore's contacts array, so
+`StandaloneChatMesh::invalidateCachedContacts()` clears `pending_ack_contact_` on every removal.
+
+**Favorite-safety backstop.** MeshCore's `addContact()` passes `transient_only = (type ==
+ADV_TYPE_NONE)`, and that branch of `allocateContactSlot()` overwrites the oldest `ADV_TYPE_NONE`
+contact **ignoring the favorite flag** — and contacts imported by public key are type
+`ADV_TYPE_NONE`. Never call `mesh->addContact()` directly: use
+`MeshAdapter::addContactWithoutOverwrite()`, which refuses when the table is physically full.
+`onContactOverwrite()` is also overridden to clean the side tables and warn if the library ever
+reuses a favorite's slot.
+
+**Web.** `GET /api/contacts/export.csv` streams a download (chunked, escaping in
+`src/web/csv_field.h`); `/api/status` gained `contact_count`, `contact_limit`, `contacts_evicted`,
+`contacts_rejected`; `/api/contacts` gained `first_seen`.
+
+**Tests.** `pio test -e native` runs `test/test_contacts/` (eviction policy + CSV escaping). This
+required splitting `platformio.ini`'s old `[env]` into `[esp32_common]` with `extends =` on each
+device env, so the native env doesn't inherit board/framework/lib_deps.
+
+---
+
+# WiFi network chooser (issue #10)
+
+**Where it appears.** Onboarding's WiFi step (`openWifiSsidPrompt()` now opens the chooser instead of
+a blank text prompt) and a new config-screen row `kCfgRowWifi` (inserted after Web Config —
+`kCfgRowCount` went 17 -> 18 and the constants below it renumbered).
+
+**Scan.** `startWifiScan()` / `pollWifiScan()` in `standalone_ui.cpp`. The scan is **async**
+(`WiFi.scanNetworks(true, false)`) and polled from `StandaloneUi::loop()`, so the mesh loop keeps
+running — a blocking scan would stall it for seconds. `WIFI_MODE_NULL` -> `WIFI_STA`, `WIFI_MODE_AP`
+-> `WIFI_AP_STA` (never plain STA, so an active AP-mode web config session survives), and
+`restoreWifiModeAfterScan()` puts the radio back on close. Results are de-duplicated by SSID (keeping
+the strongest), hidden SSIDs are dropped, and the list is sorted strongest-first, capped at
+`kWifiScanMaxCount`.
+
+**Rows.** Networks first ("<ssid>  -57 dBm  lock/open"), then three fixed actions: Rescan / Enter SSID
+manually / Skip (onboarding) or Back (config). Row index space is `[0, wifi_scan_count_)` for
+networks then `+kWifiListActionRows`. Keys mirror the region picker (j/k or arrows, Enter, Esc or c,
+plus r and m); touch goes through each row button's `onWifiListEvent`.
+
+**Shared prompt state.** The password (and manual SSID) prompt reuses the onboarding compose steps —
+`OnboardingStep::WifiSsid` / `WifiPass` — because the compose dialog's OK/Cancel handlers already
+route on `onboarding_step_ != None` for both keyboard and touch builds. `wifi_setup_from_config_`
+distinguishes the caller: `finishWifiSetup()` either reboots (onboarding) or writes
+`cfg_status_text_` and returns to the config screen. Anything that exits the picker must clear
+`onboarding_step_` / `identity_prompt_open_` — see `cancelWifiPicker()`.
+
+**Not done:** the web-config scan endpoint/picker from the issue. Scanning forces a station interface
+up while the browser session is riding that same radio, which risks dropping the very connection
+serving the page; on-device is the priority path and covers the use case.
+
+---
+
+# No automatic SD writes (removed)
+
+Onboarding used to call `exportConfigToSd()` from `finishOnboardingAndReboot()` on first install
+(gated by `first_install_auto_export_pending_`, off on Cardputer). It **overwrote an existing
+`/plumeria/plumeria-config.yaml` without asking and destroyed a user's backup**, so the flag and both
+call sites are gone. `exportConfigToSd()` now has exactly one caller: the confirm-gated
+`kCfgRowExportConfig` config row.
+
+Do not reintroduce implicit writes to SD. The exported YAML carries `identity_private_key` and
+`wifi_pass` in plaintext, and the writer does `SD.remove(target)` before writing — so any automatic
+call is both a secret-disclosure and a data-loss path.
+
+The overwrite itself is intended behavior for the manual export: a user picking "Export Config to SD"
+should replace the existing file. No timestamped filenames or "file exists" guards there.
+
+---
+
+# AP-lite web config (issue #11)
+
+**The gate.** `webCfgUseLite()` returns `g_ap_mode || kLiteOnlyBoard`. `g_ap_mode` is set by
+`startFallbackAp()` and cleared on STA connect / `end()`; `kLiteOnlyBoard` is compile-time true for
+`DEVICE_CARDPUTER_LORA_HAT`, so the Cardputer serves lite in **both** AP and STA — same reasoning as
+camillia (no PSRAM, tiny internal heap once WiFi is up, and our full page is a ~28 KB PROGMEM blob
+plus a CDN Leaflet map).
+
+**The lite page** (`sendLitePage()`): server-rendered, **no JavaScript**, streamed. Static CSS head
+goes out via `sendFlashChunked()` (512-byte `sendContent_P` chunks); dynamic markup accumulates in a
+`String` flushed by `sendChunkIfBig(html, 700)`. Carries node identity, WiFi, radio/region, mesh
+settings, device/UI settings, the channel list with add/remove, adverts, export links, and a paste-in
+config import. No contacts list, no heat map, no Leaflet.
+
+**One source of truth.** The lite forms post the *same field names* to the *same handlers* the JSON
+API uses — `/save` -> `handleSaveAll`, `/lite/channels/add` -> `handleChannelAdd`, etc., via the
+`lite_form()` wrapper in `registerRoutes()`. The wrapper sets `g_html_reply`, which makes
+`sendJsonOk()` / `sendJsonError()` emit a small HTML result page instead of JSON (it lifts the
+handler's own `"message"` out of the JSON payload). **Booleans are `<select>` 0/1, not checkboxes** —
+an unchecked checkbox posts nothing, and these handlers treat "absent" as "unchanged", so a checkbox
+could never turn a flag off.
+
+**Cardputer AP fallback re-enabled.** `startFallbackAp()` no longer bails to `WIFI_OFF` on Cardputer.
+It now sets `WiFi.setSleep(false)` (modem sleep stalls the synchronous WebServer until page loads
+time out), starts a captive-portal `DNSServer` answering every lookup with the SoftAP IP (pumped from
+`plumeria::web::loop()`), and fails soft if `softAP()` returns false. Compile out with
+`-DPLUMERIA_AP_FALLBACK_ENABLED=0` if the old bring-up crash reappears.
+
+**Diagnostics.** `logHeapDiag(tag)` prints free heap + largest free block at AP bring-up and around
+the lite page serve — the largest-block number is the one that decides whether a page can be built.
+
+**Still accumulating a whole String:** `buildConfigText()` (config export download). `handleContacts`
+was converted to chunked streaming since it scales with the contact limit; the export path would need
+`buildConfigText` restructured, and it is shared with the on-device SD export.
+
+---
+
+# OTA proxy lives in plumeria-mc-web (not in this repo)
+
+The firmware fetches updates over plain HTTP (no TLS on device) from
+`http://ota.plumeria.sumat.org` — see `kLatestReleaseApiUrl` / `kReleaseDownloadBaseUrl` in
+`src/ota/ota_update.cpp`:
+
+- `GET /firmware/latest` -> GitHub's `releases/latest` JSON (firmware parses `tag_name`)
+- `GET /firmware/<tag>/plumeria-mc-<slug>-<tag>-ota.bin` (+ `.sig`) -> the release asset
+
+That hostname is served by the **reverse proxy (Nginx Proxy Manager)**, not by the website
+container. Verified 2026-07-26 against the working camillia setup: `ota.camillia.sumat.org` returns
+404 for `/index.html` and `/favicon.svg` but 200 for `/firmware/latest`, so it is not forwarding to
+`camillia-mt-web` — that container's `/firmware/*` routes exist for the **browser flasher**
+(same-origin CORS for esp-web-tools), which is a different consumer with the same paths.
+
+Config to paste into the proxy host: `../plumeria-mc-web/deploy/npm-ota-host.conf`.
+
+`deploy/nginx/ota-proxy.conf` used to live here as a standalone vhost. Nothing in this repo ever
+deployed it, and nginx config does not belong in the firmware repo, so it was **deleted 2026-07-26**
+and the proxy-side copy now lives in `plumeria-mc-web/deploy/`.
+
+**The remaining wiring is in Nginx Proxy Manager, not in any repo:** `ota.plumeria.sumat.org` needs a
+proxy host carrying those location blocks, with **Force SSL and HSTS off** — the device cannot follow
+a redirect to `https://`. As of 2026-07-26 that proxy host did not exist: `/` returned NPM's "host
+isn't set up yet" default page and every `/firmware/*` request 404'd, which is the on-device OTA 404.
+`http://plumeria.sumat.org/firmware/latest` is not a substitute — it 301s to https.
+
+Diagnosing OTA 404s: `curl -i http://ota.plumeria.sumat.org/firmware/latest`. An openresty HTML 404
+means the proxy answered locally (host/config missing); a GitHub JSON `{"message":"Not Found"}` means
+the proxy works and the release or asset name is wrong.

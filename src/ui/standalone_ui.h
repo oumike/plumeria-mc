@@ -55,7 +55,7 @@ class StandaloneUi {
 
   static constexpr uint8_t kChannelCount = 40;
   static constexpr uint8_t kShortcutCount = 4;
-  static constexpr uint8_t kCfgRowCount = 17;
+  static constexpr uint8_t kCfgRowCount = 18;
   static constexpr uint8_t kContactActionCount = 3;  // Fav, Admin, DM
   static constexpr uint8_t kMaxContactsUi = 8;
   static constexpr size_t kMaxChatRows = 96;
@@ -119,7 +119,33 @@ class StandaloneUi {
   enum class ConfirmKind : uint8_t { None, CfgRow, ContactDelete, ImportFirstInstall, RegionDefault };
 
   // First-install onboarding wizard: import? -> name -> region -> wifi -> reboot.
-  enum class OnboardingStep : uint8_t { None, Import, Name, Region, RegionList, WifiSsid, WifiPass };
+  enum class OnboardingStep : uint8_t { None, Import, Name, Region, RegionList, WifiList, WifiSsid, WifiPass };
+
+  // WiFi network chooser, shared by onboarding and the config screen.
+  static constexpr uint8_t kWifiScanMaxCount = 16;
+  // Rows appended below the scan results: rescan, manual entry, cancel/skip.
+  static constexpr uint8_t kWifiListActionRows = 3;
+  enum class WifiPickerContext : uint8_t { None, Onboarding, Config };
+
+  struct WifiScanEntry {
+    char ssid[33];
+    int32_t rssi;
+    bool secure;
+  };
+
+  bool ensureWifiListDialogBuilt();
+  void openWifiListDialog(WifiPickerContext context);
+  void closeWifiListDialog();
+  void startWifiScan();
+  void pollWifiScan();
+  void restoreWifiModeAfterScan();
+  void refreshWifiListRows();
+  void moveWifiListSelection(int delta);
+  void activateWifiListRow(uint8_t index);
+  void beginWifiManualEntry();
+  void cancelWifiPicker();
+  void finishWifiSetup(const char* ssid, const char* pass);
+  static void onWifiListEvent(lv_event_t* event);
   void startOnboarding();
   void advanceOnboardingToName();
   void openOnboardingComposePrompt(const char* placeholder, uint16_t max_len, bool allow_skip);
@@ -538,7 +564,6 @@ class StandaloneUi {
   bool contacts_path_open_ = false;
   bool confirm_open_ = false;
   bool first_install_identity_prompt_ = false;
-  bool first_install_auto_export_pending_ = false;
   bool first_install_import_available_ = false;
   bool identity_prompt_open_ = false;
   OnboardingStep onboarding_step_ = OnboardingStep::None;
@@ -546,6 +571,22 @@ class StandaloneUi {
   lv_obj_t* region_list_backdrop_ = nullptr;
   lv_obj_t* region_list_panel_ = nullptr;
   uint8_t region_list_selected_ = 0;
+  lv_obj_t* wifi_list_backdrop_ = nullptr;
+  lv_obj_t* wifi_list_panel_ = nullptr;
+  lv_obj_t* wifi_list_status_label_ = nullptr;
+  WifiScanEntry wifi_scan_entries_[kWifiScanMaxCount]{};
+  uint8_t wifi_scan_count_ = 0;
+  uint8_t wifi_list_selected_ = 0;
+  bool wifi_list_open_ = false;
+  bool wifi_scan_running_ = false;
+  // Radio mode this UI switched away from for the scan, restored on close.
+  bool wifi_scan_mode_changed_ = false;
+  uint8_t wifi_scan_prev_mode_ = 0;
+  uint32_t wifi_scan_started_ms_ = 0;
+  WifiPickerContext wifi_picker_context_ = WifiPickerContext::None;
+  // Set while the config screen (not onboarding) drives the WiFi prompts, so
+  // saving credentials returns to config instead of rebooting.
+  bool wifi_setup_from_config_ = false;
   lv_obj_t* theme_list_backdrop_ = nullptr;
   lv_obj_t* theme_list_panel_ = nullptr;
   lv_obj_t* theme_list_rows_[kUiThemePresetCount]{};

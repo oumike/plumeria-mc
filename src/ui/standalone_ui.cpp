@@ -187,6 +187,8 @@ constexpr uint32_t kDmPersistFlushMs = 1000;
 constexpr uint32_t kDmRetentionPruneMs = 300000;
 constexpr uint32_t kDmRetentionSeconds = 10UL * 24UL * 60UL * 60UL;
 constexpr uint32_t kOtaWifiConnectTimeoutMs = 15000;
+// Async WiFi scans normally finish in 2-4 s; give up well before the user does.
+constexpr uint32_t kWifiScanTimeoutMs = 15000;
 constexpr uint32_t kOtaRebootDelayMs = 900;
 constexpr uint32_t kOtaWorkerStackBytes = 16384;
 constexpr BaseType_t kOtaWorkerCore = 0;
@@ -363,20 +365,21 @@ const char* kCfgRowLabels[] = {
 constexpr uint8_t kCfgRowNodeName = 0;
 constexpr uint8_t kCfgRowRadioPreset = 1;
 constexpr uint8_t kCfgRowWebConfig = 2;
-constexpr uint8_t kCfgRowGps = 3;
-constexpr uint8_t kCfgRowOtaUpdate = 4;
-constexpr uint8_t kCfgRowMultipaths = 5;
-constexpr uint8_t kCfgRowMultiAck = 6;
-constexpr uint8_t kCfgRowMeshRegion = 7;
-constexpr uint8_t kCfgRowRepeater = 8;
-constexpr uint8_t kCfgRowNotifications = 9;
-constexpr uint8_t kCfgRowTheme = 10;
-constexpr uint8_t kCfgRowChatStyle = 11;
-constexpr uint8_t kCfgRowChatFont = 12;
-constexpr uint8_t kCfgRowChatColors = 13;
-constexpr uint8_t kCfgRowExportConfig = 14;
-constexpr uint8_t kCfgRowImportConfig = 15;
-constexpr uint8_t kCfgRowDeleteConfig = 16;
+constexpr uint8_t kCfgRowWifi = 3;
+constexpr uint8_t kCfgRowGps = 4;
+constexpr uint8_t kCfgRowOtaUpdate = 5;
+constexpr uint8_t kCfgRowMultipaths = 6;
+constexpr uint8_t kCfgRowMultiAck = 7;
+constexpr uint8_t kCfgRowMeshRegion = 8;
+constexpr uint8_t kCfgRowRepeater = 9;
+constexpr uint8_t kCfgRowNotifications = 10;
+constexpr uint8_t kCfgRowTheme = 11;
+constexpr uint8_t kCfgRowChatStyle = 12;
+constexpr uint8_t kCfgRowChatFont = 13;
+constexpr uint8_t kCfgRowChatColors = 14;
+constexpr uint8_t kCfgRowExportConfig = 15;
+constexpr uint8_t kCfgRowImportConfig = 16;
+constexpr uint8_t kCfgRowDeleteConfig = 17;
 
 constexpr uint8_t kMessageChimeNoteCount = 3;
 // Requested pattern is E->B->E at octave 0. On tiny speakers, 20-31 Hz is
@@ -2615,11 +2618,6 @@ void StandaloneUi::attachMeshAdapter(mesh::MeshAdapter* adapter) {
 
 void StandaloneUi::setFirstInstallIdentityPrompt(bool enabled) {
   first_install_identity_prompt_ = enabled;
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-  first_install_auto_export_pending_ = false;
-#else
-  first_install_auto_export_pending_ = enabled;
-#endif
 }
 
 void StandaloneUi::setFirstInstallImportAvailable(bool available) {
@@ -2676,9 +2674,9 @@ void StandaloneUi::chooseRegionAndAdvance(const char* region_id) {
 }
 
 void StandaloneUi::openWifiSsidPrompt() {
-  onboarding_step_ = OnboardingStep::WifiSsid;
   onboarding_wifi_ssid_[0] = '\0';
-  openOnboardingComposePrompt("WiFi SSID (blank = skip)", 63, true);
+  // Scan-and-pick first; the chooser still offers manual entry for hidden SSIDs.
+  openWifiListDialog(WifiPickerContext::Onboarding);
 }
 
 void StandaloneUi::openWifiPassPrompt() {
@@ -2714,7 +2712,11 @@ bool StandaloneUi::commitOnboardingText() {
       if (text.length() == 0) {
         identity_prompt_open_ = false;
         closeComposeDialog(false);
-        finishOnboardingAndReboot();
+        if (wifi_setup_from_config_) {
+          cancelWifiPicker();
+        } else {
+          finishOnboardingAndReboot();
+        }
         return true;
       }
       strncpy(onboarding_wifi_ssid_, text.c_str(), sizeof(onboarding_wifi_ssid_) - 1);
@@ -2723,11 +2725,9 @@ bool StandaloneUi::commitOnboardingText() {
       return true;
     }
     case OnboardingStep::WifiPass: {
-      char err[96] = {};
-      plumeria::web::setWifiCredentials(onboarding_wifi_ssid_, text.c_str(), err, sizeof(err));
       identity_prompt_open_ = false;
       closeComposeDialog(false);
-      finishOnboardingAndReboot();
+      finishWifiSetup(onboarding_wifi_ssid_, text.c_str());
       return true;
     }
     default:
@@ -2740,14 +2740,17 @@ void StandaloneUi::onboardingSkipOrCancel() {
     case OnboardingStep::WifiSsid:
       identity_prompt_open_ = false;
       closeComposeDialog(false);
-      finishOnboardingAndReboot();
+      if (wifi_setup_from_config_) {
+        cancelWifiPicker();
+      } else {
+        finishOnboardingAndReboot();
+      }
       break;
     case OnboardingStep::WifiPass: {
-      char err[96] = {};
-      plumeria::web::setWifiCredentials(onboarding_wifi_ssid_, "", err, sizeof(err));
+      // Skipping the password means an open network.
       identity_prompt_open_ = false;
       closeComposeDialog(false);
-      finishOnboardingAndReboot();
+      finishWifiSetup(onboarding_wifi_ssid_, "");
       break;
     }
     default:
@@ -2758,12 +2761,9 @@ void StandaloneUi::onboardingSkipOrCancel() {
 
 void StandaloneUi::finishOnboardingAndReboot() {
   onboarding_step_ = OnboardingStep::None;
-  // Save the freshly-built config to SD (where supported) so it can be
-  // re-imported later, then reboot to bring the radio up on the chosen region.
-  if (first_install_auto_export_pending_) {
-    first_install_auto_export_pending_ = false;
-    exportConfigToSd();
-  }
+  // Nothing is written to SD here on purpose: onboarding used to auto-export the
+  // config, which silently overwrote an existing backup at the same path. Export
+  // is now only ever user-initiated (config screen -> Export Config to SD).
   delay(120);
   ESP.restart();
 }
@@ -2882,6 +2882,407 @@ bool StandaloneUi::ensureRegionListDialogBuilt() {
     lv_obj_center(lbl);
   }
   return true;
+}
+
+void StandaloneUi::onWifiListEvent(lv_event_t* event) {
+  auto* ui = static_cast<StandaloneUi*>(lv_event_get_user_data(event));
+  if (!ui || lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    return;
+  }
+  lv_obj_t* target = lv_event_get_target(event);
+  const int index = static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
+  if (index < 0) {
+    return;
+  }
+  ui->activateWifiListRow(static_cast<uint8_t>(index));
+}
+
+bool StandaloneUi::ensureWifiListDialogBuilt() {
+  if (wifi_list_backdrop_) {
+    return true;
+  }
+  if (!root_) {
+    return false;
+  }
+
+  wifi_list_backdrop_ = lv_obj_create(root_);
+  if (!wifi_list_backdrop_) {
+    return false;
+  }
+  lv_obj_set_size(wifi_list_backdrop_, LV_PCT(90), LV_PCT(90));
+  lv_obj_align(wifi_list_backdrop_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(wifi_list_backdrop_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_color(wifi_list_backdrop_, lv_color_hex(0x0E285B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(wifi_list_backdrop_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(wifi_list_backdrop_, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(wifi_list_backdrop_, lv_color_hex(0x5C86C6), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(wifi_list_backdrop_, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(wifi_list_backdrop_, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(wifi_list_backdrop_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(wifi_list_backdrop_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_flag(wifi_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* title = lv_label_create(wifi_list_backdrop_);
+  lv_obj_add_style(title, &style_text_main_, 0);
+  lv_label_set_text(title, "Select WiFi network");
+
+  wifi_list_status_label_ = lv_label_create(wifi_list_backdrop_);
+  lv_obj_add_style(wifi_list_status_label_, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(wifi_list_status_label_, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(wifi_list_status_label_, "Scanning WiFi networks...");
+
+  lv_obj_t* hint = lv_label_create(wifi_list_backdrop_);
+  lv_obj_add_style(hint, &style_text_dim_, 0);
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+  lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#endif
+  lv_label_set_text(hint, "j/k or arrows, Enter=select, r=rescan, m=manual, c=back");
+
+  wifi_list_panel_ = lv_obj_create(wifi_list_backdrop_);
+  lv_obj_set_width(wifi_list_panel_, LV_PCT(100));
+  lv_obj_set_flex_grow(wifi_list_panel_, 1);
+  lv_obj_set_style_bg_opa(wifi_list_panel_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(wifi_list_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(wifi_list_panel_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(wifi_list_panel_, 3, LV_PART_MAIN);
+  lv_obj_set_flex_flow(wifi_list_panel_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scroll_dir(wifi_list_panel_, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(wifi_list_panel_, LV_SCROLLBAR_MODE_AUTO);
+  return true;
+}
+
+// Rebuilds the row list: one button per scanned network (strongest first),
+// then the fixed rescan / manual / back actions.
+void StandaloneUi::refreshWifiListRows() {
+  if (!wifi_list_panel_) {
+    return;
+  }
+
+  if (key_group_) {
+    for (uint32_t i = 0; i < lv_obj_get_child_cnt(wifi_list_panel_); i++) {
+      lv_group_remove_obj(lv_obj_get_child(wifi_list_panel_, i));
+    }
+  }
+  lv_obj_clean(wifi_list_panel_);
+
+  const uint8_t total = static_cast<uint8_t>(wifi_scan_count_ + kWifiListActionRows);
+  for (uint8_t i = 0; i < total; i++) {
+    lv_obj_t* btn = lv_btn_create(wifi_list_panel_);
+    lv_obj_set_width(btn, LV_PCT(100));
+    lv_obj_set_height(btn, 26);
+    lv_obj_add_style(btn, &style_button_, 0);
+    lv_obj_add_style(btn, &style_button_focused_, LV_STATE_FOCUSED);
+    lv_obj_set_user_data(btn, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+    lv_obj_add_event_cb(btn, onWifiListEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(btn, onFocusableEvent, LV_EVENT_KEY, this);
+    lv_obj_add_event_cb(btn, onFocusableEvent, LV_EVENT_FOCUSED, this);
+    if (key_group_) {
+      lv_group_add_obj(key_group_, btn);
+    }
+
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_obj_add_style(lbl, &style_text_main_, 0);
+    char row[64] = {};
+    if (i < wifi_scan_count_) {
+      const WifiScanEntry& entry = wifi_scan_entries_[i];
+      snprintf(row, sizeof(row), "%s  %ld dBm  %s", entry.ssid, static_cast<long>(entry.rssi),
+               entry.secure ? "lock" : "open");
+    } else {
+      switch (i - wifi_scan_count_) {
+        case 0:
+          snprintf(row, sizeof(row), "(R) Rescan");
+          break;
+        case 1:
+          snprintf(row, sizeof(row), "(M) Enter SSID manually");
+          break;
+        default:
+          strncpy(row, wifi_picker_context_ == WifiPickerContext::Onboarding ? "(C) Skip WiFi" : "(C) Back",
+                  sizeof(row) - 1);
+          break;
+      }
+    }
+    lv_label_set_text(lbl, row);
+    lv_obj_center(lbl);
+  }
+
+  if (wifi_list_selected_ >= total) {
+    wifi_list_selected_ = 0;
+  }
+  lv_obj_t* focus = lv_obj_get_child(wifi_list_panel_, wifi_list_selected_);
+  if (focus && key_group_) {
+    lv_group_focus_obj(focus);
+  }
+}
+
+void StandaloneUi::startWifiScan() {
+  if (wifi_scan_running_) {
+    return;
+  }
+
+  wifi_scan_count_ = 0;
+  wifi_list_selected_ = 0;
+  if (wifi_list_status_label_) {
+    lv_label_set_text(wifi_list_status_label_, "Scanning WiFi networks...");
+  }
+  refreshWifiListRows();
+
+  // Scanning needs a station interface. Keep any SoftAP (web config session)
+  // up by moving to AP_STA rather than STA, and remember the mode so the
+  // chooser can put the radio back exactly as it found it.
+  const wifi_mode_t mode = WiFi.getMode();
+  if (!wifi_scan_mode_changed_) {
+    wifi_scan_prev_mode_ = static_cast<uint8_t>(mode);
+  }
+  if (mode == WIFI_MODE_NULL) {
+    WiFi.mode(WIFI_STA);
+    wifi_scan_mode_changed_ = true;
+  } else if (mode == WIFI_MODE_AP) {
+    WiFi.mode(WIFI_AP_STA);
+    wifi_scan_mode_changed_ = true;
+  }
+
+  WiFi.scanDelete();
+  // Async: a blocking scan would stall the mesh loop for seconds.
+  WiFi.scanNetworks(true, false);
+  wifi_scan_running_ = true;
+  wifi_scan_started_ms_ = millis();
+}
+
+void StandaloneUi::pollWifiScan() {
+  if (!wifi_scan_running_) {
+    return;
+  }
+
+  const int16_t status = WiFi.scanComplete();
+  if (status == WIFI_SCAN_RUNNING) {
+    if (millis() - wifi_scan_started_ms_ >= kWifiScanTimeoutMs) {
+      wifi_scan_running_ = false;
+      WiFi.scanDelete();
+      if (wifi_list_open_ && wifi_list_status_label_) {
+        lv_label_set_text(wifi_list_status_label_, "Scan timed out");
+        refreshWifiListRows();
+      }
+    }
+    return;
+  }
+
+  wifi_scan_running_ = false;
+  if (status < 0) {
+    WiFi.scanDelete();
+    if (wifi_list_open_ && wifi_list_status_label_) {
+      lv_label_set_text(wifi_list_status_label_, "Scan failed");
+      refreshWifiListRows();
+    }
+    return;
+  }
+
+  wifi_scan_count_ = 0;
+  for (int i = 0; i < status; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) {
+      continue;  // hidden network: nothing to show or pick
+    }
+    const int32_t rssi = WiFi.RSSI(i);
+    const bool secure = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+
+    // Same SSID heard on several channels/APs: keep the strongest.
+    bool duplicate = false;
+    for (uint8_t j = 0; j < wifi_scan_count_; j++) {
+      if (ssid.equals(wifi_scan_entries_[j].ssid)) {
+        duplicate = true;
+        if (rssi > wifi_scan_entries_[j].rssi) {
+          wifi_scan_entries_[j].rssi = rssi;
+          wifi_scan_entries_[j].secure = secure;
+        }
+        break;
+      }
+    }
+    if (duplicate || wifi_scan_count_ >= kWifiScanMaxCount) {
+      continue;
+    }
+
+    WifiScanEntry& entry = wifi_scan_entries_[wifi_scan_count_++];
+    memset(&entry, 0, sizeof(entry));
+    strncpy(entry.ssid, ssid.c_str(), sizeof(entry.ssid) - 1);
+    entry.rssi = rssi;
+    entry.secure = secure;
+  }
+  WiFi.scanDelete();
+
+  // Strongest first (insertion sort; the list is at most kWifiScanMaxCount).
+  for (uint8_t i = 1; i < wifi_scan_count_; i++) {
+    WifiScanEntry key = wifi_scan_entries_[i];
+    int j = static_cast<int>(i) - 1;
+    while (j >= 0 && wifi_scan_entries_[j].rssi < key.rssi) {
+      wifi_scan_entries_[j + 1] = wifi_scan_entries_[j];
+      j--;
+    }
+    wifi_scan_entries_[j + 1] = key;
+  }
+
+  if (!wifi_list_open_) {
+    return;
+  }
+  if (wifi_list_status_label_) {
+    char status_text[48] = {};
+    if (wifi_scan_count_ == 0) {
+      snprintf(status_text, sizeof(status_text), "No networks found");
+    } else {
+      snprintf(status_text, sizeof(status_text), "Found %u network(s)",
+               static_cast<unsigned>(wifi_scan_count_));
+    }
+    lv_label_set_text(wifi_list_status_label_, status_text);
+  }
+  refreshWifiListRows();
+}
+
+void StandaloneUi::restoreWifiModeAfterScan() {
+  if (wifi_scan_running_) {
+    wifi_scan_running_ = false;
+    WiFi.scanDelete();
+  }
+  if (!wifi_scan_mode_changed_) {
+    return;
+  }
+  WiFi.mode(static_cast<wifi_mode_t>(wifi_scan_prev_mode_));
+  wifi_scan_mode_changed_ = false;
+}
+
+void StandaloneUi::openWifiListDialog(WifiPickerContext context) {
+  if (!ensureWifiListDialogBuilt()) {
+    // No modal available: fall back to typing the SSID.
+    wifi_picker_context_ = context;
+    beginWifiManualEntry();
+    return;
+  }
+
+  wifi_picker_context_ = context;
+  wifi_list_open_ = true;
+  wifi_list_selected_ = 0;
+  if (context == WifiPickerContext::Onboarding) {
+    onboarding_step_ = OnboardingStep::WifiList;
+  }
+  lv_obj_clear_flag(wifi_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(wifi_list_backdrop_);
+  startWifiScan();
+}
+
+void StandaloneUi::closeWifiListDialog() {
+  wifi_list_open_ = false;
+  restoreWifiModeAfterScan();
+  if (wifi_list_backdrop_) {
+    lv_obj_add_flag(wifi_list_backdrop_, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+void StandaloneUi::beginWifiManualEntry() {
+  closeWifiListDialog();
+  onboarding_step_ = OnboardingStep::WifiSsid;
+  openOnboardingComposePrompt("WiFi SSID", 63, true);
+}
+
+void StandaloneUi::cancelWifiPicker() {
+  const WifiPickerContext context = wifi_picker_context_;
+  closeWifiListDialog();
+  wifi_picker_context_ = WifiPickerContext::None;
+  if (context == WifiPickerContext::Config || wifi_setup_from_config_) {
+    wifi_setup_from_config_ = false;
+    // Leave the shared onboarding prompt state clean for the next caller.
+    onboarding_step_ = OnboardingStep::None;
+    identity_prompt_open_ = false;
+    strncpy(cfg_status_text_, "WiFi unchanged", sizeof(cfg_status_text_) - 1);
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    strncpy(cfg_action_text_, "No change", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    refreshCfgDialog();
+    if (key_group_ && cfg_open_ && cfg_rows_[cfg_selected_row_]) {
+      lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
+    }
+    return;
+  }
+  // Onboarding: skipping WiFi is allowed, same as an empty SSID.
+  finishOnboardingAndReboot();
+}
+
+// Single exit point for both contexts once an SSID (and password) is known.
+void StandaloneUi::finishWifiSetup(const char* ssid, const char* pass) {
+  char err[96] = {};
+  plumeria::web::setWifiCredentials(ssid ? ssid : "", pass ? pass : "", err, sizeof(err));
+
+  if (wifi_setup_from_config_) {
+    wifi_setup_from_config_ = false;
+    wifi_picker_context_ = WifiPickerContext::None;
+    onboarding_step_ = OnboardingStep::None;
+    identity_prompt_open_ = false;
+    snprintf(cfg_status_text_, sizeof(cfg_status_text_), "WiFi saved: %s (reboot to apply)",
+             (ssid && ssid[0]) ? ssid : "(cleared)");
+    cfg_status_text_[sizeof(cfg_status_text_) - 1] = '\0';
+    strncpy(cfg_action_text_, "WiFi saved", sizeof(cfg_action_text_) - 1);
+    cfg_action_text_[sizeof(cfg_action_text_) - 1] = '\0';
+    refreshCfgDialog();
+    if (key_group_ && cfg_open_ && cfg_rows_[cfg_selected_row_]) {
+      lv_group_focus_obj(cfg_rows_[cfg_selected_row_]);
+    }
+    return;
+  }
+
+  wifi_picker_context_ = WifiPickerContext::None;
+  finishOnboardingAndReboot();
+}
+
+void StandaloneUi::activateWifiListRow(uint8_t index) {
+  if (!wifi_list_open_) {
+    return;
+  }
+
+  if (index < wifi_scan_count_) {
+    const WifiScanEntry entry = wifi_scan_entries_[index];
+    strncpy(onboarding_wifi_ssid_, entry.ssid, sizeof(onboarding_wifi_ssid_) - 1);
+    onboarding_wifi_ssid_[sizeof(onboarding_wifi_ssid_) - 1] = '\0';
+    closeWifiListDialog();
+    if (entry.secure) {
+      openWifiPassPrompt();
+    } else {
+      finishWifiSetup(onboarding_wifi_ssid_, "");
+    }
+    return;
+  }
+
+  switch (index - wifi_scan_count_) {
+    case 0:
+      startWifiScan();
+      break;
+    case 1:
+      beginWifiManualEntry();
+      break;
+    default:
+      cancelWifiPicker();
+      break;
+  }
+}
+
+void StandaloneUi::moveWifiListSelection(int delta) {
+  const int total = static_cast<int>(wifi_scan_count_) + kWifiListActionRows;
+  if (total <= 0) {
+    return;
+  }
+  int next = (static_cast<int>(wifi_list_selected_) + delta) % total;
+  if (next < 0) {
+    next += total;
+  }
+  wifi_list_selected_ = static_cast<uint8_t>(next);
+  if (wifi_list_panel_) {
+    lv_obj_t* item = lv_obj_get_child(wifi_list_panel_, wifi_list_selected_);
+    if (item) {
+      if (key_group_) {
+        lv_group_focus_obj(item);
+      }
+      lv_obj_scroll_to_view(item, LV_ANIM_OFF);
+    }
+  }
 }
 
 bool StandaloneUi::ensureContactActionsPopupBuilt() {
@@ -3216,6 +3617,10 @@ void StandaloneUi::resetUiObjectHandles() {
   memset(shortcut_labels_, 0, sizeof(shortcut_labels_));
   region_list_backdrop_ = nullptr;
   region_list_panel_ = nullptr;
+  wifi_list_backdrop_ = nullptr;
+  wifi_list_panel_ = nullptr;
+  wifi_list_status_label_ = nullptr;
+  wifi_list_open_ = false;
   theme_list_backdrop_ = nullptr;
   theme_list_panel_ = nullptr;
   memset(theme_list_rows_, 0, sizeof(theme_list_rows_));
@@ -5068,9 +5473,11 @@ void StandaloneUi::refreshComposeDialog() {
   char title[64];
   if (identity_prompt_open_) {
     if (onboarding_step_ == OnboardingStep::WifiSsid) {
-      snprintf(title, sizeof(title), "WiFi SSID (blank = skip)");
+      strncpy(title, wifi_setup_from_config_ ? "WiFi SSID" : "WiFi SSID (blank = skip)", sizeof(title) - 1);
+      title[sizeof(title) - 1] = '\0';
     } else if (onboarding_step_ == OnboardingStep::WifiPass) {
-      snprintf(title, sizeof(title), "WiFi Password (blank = none)");
+      strncpy(title, "WiFi Password (blank = open)", sizeof(title) - 1);
+      title[sizeof(title) - 1] = '\0';
     } else {
       snprintf(title, sizeof(title), "Identity Name: ");
     }
@@ -5689,11 +6096,6 @@ bool StandaloneUi::applyIdentityNameFromPrompt() {
   if (!plumeria::web::setNodeName(name.c_str(), err, sizeof(err))) {
     appendChatLine(err[0] ? err : "[ERR] Failed to set identity name", ChatLineKind::Error);
     return false;
-  }
-
-  if (first_install_auto_export_pending_) {
-    first_install_auto_export_pending_ = false;
-    exportConfigToSd();
   }
 
   appendChatLine("[OK] Identity name saved", ChatLineKind::Ack);
@@ -7773,6 +8175,14 @@ void StandaloneUi::refreshCfgDialog() {
   }
   lv_label_set_text(cfg_row_labels_[kCfgRowWebConfig], row_text);
 
+  if (web_settings.wifi_ssid[0] == '\0') {
+    snprintf(row_text, sizeof(row_text), "WiFi: (not set)");
+  } else {
+    snprintf(row_text, sizeof(row_text), "WiFi: %s%s", web_settings.wifi_ssid,
+             (wifi_ok_ && !wifi_ap_mode_) ? " (connected)" : "");
+  }
+  lv_label_set_text(cfg_row_labels_[kCfgRowWifi], row_text);
+
   lv_label_set_text(cfg_row_labels_[kCfgRowGps], web_settings.send_location_in_advert
                                               ? "GPS: OFF (using default lat/long)"
                                               : "GPS: ON");
@@ -8967,6 +9377,10 @@ void StandaloneUi::activateCfgSelection() {
   switch (cfg_selected_row_) {
     case kCfgRowTheme:
       lv_async_call(onOpenThemeListDialogAsync, this);
+      return;
+    case kCfgRowWifi:
+      wifi_setup_from_config_ = true;
+      openWifiListDialog(WifiPickerContext::Config);
       return;
     case kCfgRowNodeName:
     case kCfgRowRadioPreset:
@@ -11419,6 +11833,25 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
+  // WiFi chooser is modal: handle its own nav, block everything else.
+  if (wifi_list_open_) {
+    if (norm_key == LV_KEY_ESC || norm_key == LV_KEY_BACKSPACE || norm_key == 8 || norm_key == 127 ||
+        (kKeyboardNavEnabled && norm_key == 'c')) {
+      cancelWifiPicker();
+    } else if (kKeyboardNavEnabled && norm_key == 'r') {
+      startWifiScan();
+    } else if (kKeyboardNavEnabled && norm_key == 'm') {
+      beginWifiManualEntry();
+    } else if (norm_key == LV_KEY_UP || (kKeyboardNavEnabled && norm_key == 'j')) {
+      moveWifiListSelection(-1);
+    } else if (norm_key == LV_KEY_DOWN || (kKeyboardNavEnabled && norm_key == 'k')) {
+      moveWifiListSelection(1);
+    } else if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      activateWifiListRow(wifi_list_selected_);
+    }
+    return;
+  }
+
   // Region picker (onboarding) is modal: handle its own nav, block everything else.
   if (onboarding_step_ == OnboardingStep::RegionList && region_list_panel_) {
     const int count = plumeria::web::regionPresetCount();
@@ -12963,6 +13396,7 @@ void StandaloneUi::loop() {
     onContactsPostOpenAsync(this);
   }
 
+  pollWifiScan();
   syncChannelsFromMeshIfNeeded(now);
   pollRepeaterTelemetryIfNeeded(now);
   serviceMessageNotificationChime(now);

@@ -53,6 +53,8 @@ struct MeshContactSummary {
   // Raw route path bytes (hash-count * hash-size bytes, max 64).
   uint8_t out_path[64];
   uint32_t lastmod;
+  // First time this contact was inserted (our clock); 0 when unknown.
+  uint32_t first_seen;
   int32_t gps_lat_i;
   int32_t gps_lon_i;
   uint8_t telemetry_adv_type;
@@ -96,6 +98,12 @@ class MeshAdapter {
   int exportChannels(char names[][32], int max_names);
   int exportChannelConfigs(MeshChannelConfig configs[], int max_configs) const;
   int exportContacts(MeshContactSummary contacts[], int max_contacts) const;
+  // Contact capacity management (FIFO eviction of non-favorites, see
+  // mesh/contact_capacity.h).
+  int contactCount() const;
+  int contactLimit() const;
+  uint32_t contactsEvictedCount() const;
+  uint32_t contactsRejectedCount() const;
   bool importContactByPublicKeyHex(const char* public_key_hex, const char* contact_name,
                                    uint8_t contact_type = 0);
   bool importFavoriteContactByPublicKeyHex(const char* public_key_hex);
@@ -149,8 +157,24 @@ class MeshAdapter {
   void noteRxPacket();
   void markContactsDirty();
   void markChannelsDirty();
+  // Frees a slot for one new contact by FIFO-evicting the oldest non-favorite
+  // contact(s). Returns false when the mesh is at capacity and every remaining
+  // contact is favorited (the caller must then drop the new contact).
+  bool ensureContactCapacityForInsert();
+  // Wraps MeshCore's addContact(), which silently overwrites the oldest
+  // ADV_TYPE_NONE contact (favorite or not) when the table is physically full.
+  // Refuses instead, so only our FIFO policy ever removes a contact.
+  bool addContactWithoutOverwrite(const void* contact_info);
+  void noteContactsFull();
+  void noteContactOverwritten(const uint8_t* pub_key, bool was_favorite);
+  uint32_t contactFirstSeen(const uint8_t* pub_key) const;
+  void noteContactFirstSeen(const uint8_t* pub_key, uint32_t when);
+  void forgetContactFirstSeen(const uint8_t* pub_key);
+  bool loadContactFirstSeenFromNvs();
+  bool saveContactFirstSeenToNvs();
   void noteContactAdvertTelemetry(const uint8_t* pub_key, uint8_t advert_type, uint16_t feat1, uint16_t feat2);
   bool loadContactTelemetry(const uint8_t* pub_key, MeshContactSummary* out_summary) const;
+  bool clearContactTelemetry(const uint8_t* pub_key);
   bool loadContactTelemetryFromFs();
   bool saveContactTelemetryToFs();
   bool loadContactsFromFs();
@@ -187,6 +211,10 @@ class MeshAdapter {
   bool multi_ack_enabled_ = false;
   bool repeater_enabled_ = false;
   char mesh_region_[32] = {};
+  static constexpr uint32_t kContactsFullNoticeMs = 60000;
+  uint32_t contacts_evicted_ = 0;
+  uint32_t contacts_rejected_ = 0;
+  uint32_t last_contacts_full_notice_ms_ = 0;
   uint32_t rx_raw_count_ = 0;
   uint32_t rx_packet_count_ = 0;
   uint32_t last_rx_ms_ = 0;

@@ -58,6 +58,40 @@ Mesh adapter persistence:
 - Contacts persisted in NVS via `Preferences`.
 - Channels persisted in NVS via `Preferences`.
 
+WiFi setup:
+
+- On-device WiFi picker: onboarding and the config screen scan for nearby networks and let you pick
+  one (signal strength + secured/open shown, strongest first). Manual SSID entry stays available for
+  hidden networks.
+- Scans run asynchronously and use `WIFI_AP_STA` when a SoftAP is up, so an active web config
+  session is not dropped.
+
+Web Config lite (AP mode):
+
+- When the node falls back to its own SoftAP, Web Config serves a lightweight, JavaScript-free page
+  with the full config form (and channels/utilities) instead of the full single-page UI, which does
+  not fit in AP-mode heap. The Cardputer always gets the lite page.
+- The SoftAP fallback runs a captive portal, so connecting a phone opens the page directly. Disable
+  the fallback with `-DPLUMERIA_AP_FALLBACK_ENABLED=0`.
+
+Contact capacity:
+
+- Contacts kept in memory are capped by `PLUMERIA_MAX_CONTACTS` (default 128, override per
+  environment in `platformio.ini`).
+- At capacity, a new contact evicts the oldest non-favorited contact (FIFO by first-seen).
+  Favorited contacts are never evicted; if only favorites remain, the new contact is dropped and
+  counted in `/api/status` (`contacts_evicted`, `contacts_rejected`).
+- Web Config → Contacts → **Export CSV** downloads the contact list
+  (`GET /api/contacts/export.csv`).
+
+## Tests
+
+Host-side unit tests (contact eviction policy, CSV escaping):
+
+```bash
+pio test -e native
+```
+
 ## CI/CD
 
 GitHub Actions workflow at `.github/workflows/build.yml` runs only when a GitHub release is published.

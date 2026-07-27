@@ -1,11 +1,21 @@
 #include "web/web_config.h"
 
 #include "ui/ui_theme.h"
+#include "web/csv_field.h"
 
 #include <Arduino.h>
+#include <DNSServer.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
+
+// SoftAP fallback when no WiFi network is reachable. Previously compiled out on
+// the Cardputer after softAP bring-up crashes; re-enabled now that AP mode
+// serves the lightweight lite page. Set to 0 to disable per environment.
+#ifndef PLUMERIA_AP_FALLBACK_ENABLED
+#define PLUMERIA_AP_FALLBACK_ENABLED 1
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -70,6 +80,28 @@ constexpr RegionPreset kRegionPresets[] = {
 };
 
 WebServer g_server(80);
+// Captive-portal DNS for AP mode: answers every lookup with the SoftAP IP so a
+// phone resolves its portal-detection host to us and opens the page straight
+// away, instead of firing probe requests that stall the synchronous WebServer.
+DNSServer g_dns;
+bool g_captive_active = false;
+// True while serving over our own SoftAP. Tracked separately from
+// g_captive_active because the DNS server can fail to start while the AP is up,
+// and page weight has to follow the radio mode, not the DNS server.
+bool g_ap_mode = false;
+// Boards that always serve web config lite, regardless of radio mode. The
+// Cardputer has no PSRAM and very little internal heap once WiFi is up, which
+// the full page's ~28 KB of markup, its Leaflet map and per-contact JSON cannot
+// fit: writes crawl because the stack cannot get TX buffers. Lite carries the
+// whole Config pane, so nothing configurable is lost.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+constexpr bool kLiteOnlyBoard = true;
+#else
+constexpr bool kLiteOnlyBoard = false;
+#endif
+// Set for the duration of one request when the caller is a plain HTML form and
+// wants a page back rather than JSON.
+bool g_html_reply = false;
 bool g_running = false;
 bool g_server_enabled = false;
 char g_mode[8] = "off";
@@ -88,6 +120,9 @@ plumeria::mesh::MeshChannelConfig g_export_channels_buf[40]{};
 char g_imported_favorite_pubkeys[160][65]{};
 char g_existing_channels_buf[40][32]{};
 char g_export_identity_public_hex[193]{};
+
+void logHeapDiag(const char* tag);
+inline bool webCfgUseLite();
 char g_export_identity_private_hex[193]{};
 
 bool contactSortBefore(const plumeria::mesh::MeshContactSummary& a,
@@ -268,6 +303,7 @@ bool connectSta(const char* ssid, const char* pass) {
     delay(100);
   }
 
+  g_ap_mode = false;
   copyString(g_mode, sizeof(g_mode), "sta");
   setIpFrom(WiFi.localIP());
 
@@ -1063,25 +1099,45 @@ bool applyConfigTextInternal(const char* text, bool queue_reboot, char* err, siz
 }
 
 void startFallbackAp() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-  // Cardputer builds have shown intermittent crashes in softAP startup.
-  // Keep network stack disabled instead of forcing fallback AP mode.
+#if !PLUMERIA_AP_FALLBACK_ENABLED
+  // AP fallback compiled out: keep the network stack down rather than risk a
+  // softAP bring-up crash.
   WiFi.disconnect(true, true);
   WiFi.mode(WIFI_OFF);
   copyString(g_mode, sizeof(g_mode), "off");
   g_ip[0] = '\0';
   return;
-#endif
-
+#else
+  logHeapDiag("AP fallback start");
   WiFi.disconnect(false, true);
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  // Modem sleep stalls the synchronous WebServer on inbound packets until the
+  // page load times out.
   WiFi.setSleep(false);
-  WiFi.softAP(kFallbackApSsid);
+  if (!WiFi.softAP(kFallbackApSsid)) {
+    Serial.println("[web] AP fallback start failed");
+    logHeapDiag("AP fallback failed");
+    WiFi.mode(WIFI_OFF);
+    copyString(g_mode, sizeof(g_mode), "off");
+    g_ip[0] = '\0';
+    return;
+  }
   delay(100);
 
+  g_ap_mode = true;  // "/" serves web config lite for this session
   copyString(g_mode, sizeof(g_mode), "ap");
   setIpFrom(WiFi.softAPIP());
+
+  // Captive portal: resolve every lookup to us so the phone opens the config
+  // page instead of leaving abandoned probe requests on the server.
+  g_dns.setErrorReplyCode(DNSReplyCode::NoError);
+  g_captive_active = g_dns.start(53, "*", WiFi.softAPIP());
+  if (!g_captive_active) {
+    Serial.println("[web] captive DNS start failed (AP still up)");
+  }
+  logHeapDiag("AP fallback ready");
+#endif
 }
 
 void bringupNetwork() {
@@ -1111,18 +1167,318 @@ String jsonString(const char* raw) {
   return escaped;
 }
 
+// True when this response should be the lite page: AP mode, or a board whose
+// heap cannot serve the full one at all.
+inline bool webCfgUseLite() {
+  return g_ap_mode || kLiteOnlyBoard;
+}
+
+// Free heap plus the largest contiguous block — the second number is what
+// actually decides whether a page can be built, and the one that collapses in
+// AP mode.
+void logHeapDiag(const char* tag) {
+  Serial.printf("[web] %s: heap=%u largest=%u\n", tag ? tag : "-",
+                static_cast<unsigned>(ESP.getFreeHeap()),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
+
+String htmlEscape(const char* raw) {
+  String out;
+  if (!raw) {
+    return out;
+  }
+  for (const char* p = raw; *p != '\0'; p++) {
+    switch (*p) {
+      case '&': out += "&amp;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      case '"': out += "&quot;"; break;
+      case '\'': out += "&#39;"; break;
+      default: out += *p; break;
+    }
+  }
+  return out;
+}
+
+// Streams a PROGMEM literal in fixed chunks. One huge send needs a contiguous
+// allocation a fragmented AP-mode heap cannot provide.
+constexpr size_t kFlashChunkBytes = 512;
+void sendFlashChunked(const char* progmem) {
+  if (!progmem) {
+    return;
+  }
+  const size_t total = strlen_P(progmem);
+  for (size_t off = 0; off < total;) {
+    const size_t n = (total - off > kFlashChunkBytes) ? kFlashChunkBytes : (total - off);
+    g_server.sendContent_P(progmem + off, n);
+    off += n;
+    delay(1);
+  }
+}
+
+void sendChunk(String& html) {
+  if (html.length() > 0) {
+    g_server.sendContent(html);
+    html = "";
+  }
+}
+
+// Flush only once the buffer is worth a TCP segment: one big String needs a
+// contiguous allocation, while a flush per row means dozens of tiny writes the
+// synchronous WebServer blocks on.
+void sendChunkIfBig(String& html, size_t threshold = 700) {
+  if (html.length() >= threshold) {
+    sendChunk(html);
+  }
+}
+
+const char kLiteHead[] PROGMEM =
+    "<!doctype html><html><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Plumeria Config Lite</title><style>"
+    "body{font-family:sans-serif;background:#0e1622;color:#e7eef6;margin:0 auto;padding:1em;max-width:40em}"
+    "h2{font-size:1.2em;color:#9fe7ff;margin:0 0 .4em}"
+    "h3{font-size:1em;margin:1.2em 0 .3em;padding-bottom:.2em;border-bottom:1px solid #355674}"
+    "p{font-size:.85em;color:#9bb1c5}"
+    "label{display:block;margin:.5em 0 .1em;font-size:.9em;color:#b7cadd}"
+    "input,select,textarea{width:100%;box-sizing:border-box;padding:.4em;font-size:1em;"
+    "background:#0f1a28;color:#e7eef6;border:1px solid #355674;border-radius:4px}"
+    "button{padding:.6em 1.2em;font-size:1em;margin-top:.6em;background:#2c9bc8;color:#fff;"
+    "border:0;border-radius:4px;font-weight:700}"
+    "a{color:#9fe7ff}"
+    ".msg{background:#15293d;border:1px solid #355674;border-radius:4px;padding:.6em;margin:.6em 0}"
+    "</style></head><body>";
+
+// Small confirmation/error page for form posts (lite has no JavaScript).
+void sendLiteResultPage(const char* title, const char* message, int status) {
+  g_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  g_server.send(status, "text/html", "");
+  sendFlashChunked(kLiteHead);
+  String html = "<h2>";
+  html += htmlEscape(title ? title : "Plumeria");
+  html += "</h2><div class='msg'>";
+  html += htmlEscape(message ? message : "");
+  html += "</div><p><a href='/'>Back to config</a></p></body></html>";
+  sendChunk(html);
+  g_server.sendContent("");
+}
+
 void sendJsonOk(const String& payload) {
+  if (g_html_reply) {
+    // The JSON handlers are reused verbatim by the lite form posts, so their
+    // human-readable message is read back out of the payload here rather than
+    // duplicating any save logic.
+    String message;
+    const int key = payload.indexOf("\"message\":\"");
+    if (key >= 0) {
+      const int start = key + 11;
+      const int stop = payload.indexOf('"', start);
+      if (stop > start) {
+        message = payload.substring(start, stop);
+      }
+    }
+    if (message.length() == 0) {
+      message = (payload.indexOf("\"needs_reboot\":true") >= 0) ? "Saved. Rebooting firmware..." : "Saved.";
+    }
+    sendLiteResultPage("Plumeria", message.c_str(), 200);
+    return;
+  }
   g_server.send(200, "application/json", payload);
 }
 
 void sendJsonError(const char* message, int status = 400) {
+  if (g_html_reply) {
+    sendLiteResultPage("Error", message ? message : "Request failed", status);
+    return;
+  }
   String payload = "{\"ok\":false,\"error\":";
   payload += jsonString(message);
   payload += "}";
   g_server.send(status, "application/json", payload);
 }
 
+// Renders the lite config page: same field names and the same /api/save
+// handler as the full page, server-rendered with no JavaScript, streamed in
+// chunks so nothing needs a large contiguous allocation.
+void sendLitePage() {
+  logHeapDiag("serving config page (lite)");
+
+  g_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  g_server.send(200, "text/html", "");
+  sendFlashChunked(kLiteHead);
+
+  String html;
+  html.reserve(900);
+  html += "<h2>Plumeria &mdash; Config Lite</h2><p>";
+  html += htmlEscape(g_mode);
+  html += " mode";
+  if (g_ip[0] != '\0') {
+    html += " &middot; ";
+    html += htmlEscape(g_ip);
+  }
+  html += "</p><form method='POST' action='/save'>";
+
+  html += "<h3>Node</h3>";
+  html += "<label>Node name<input name='node_name' maxlength='31' value='";
+  html += htmlEscape(g_settings.node_name);
+  html += "'></label>";
+  html += "<label>Latitude<input name='node_lat' value='";
+  html += String(g_settings.node_latitude, 6);
+  html += "'></label>";
+  html += "<label>Longitude<input name='node_lon' value='";
+  html += String(g_settings.node_longitude, 6);
+  html += "'></label>";
+  html += "<label>Send location in advert<select name='send_loc_adv'>";
+  html += g_settings.send_location_in_advert ? "<option value='1' selected>On</option><option value='0'>Off</option>"
+                                             : "<option value='1'>On</option><option value='0' selected>Off</option>";
+  html += "</select></label>";
+  sendChunkIfBig(html);
+
+  html += "<h3>WiFi</h3>";
+  html += "<label>SSID<input name='ssid' maxlength='63' value='";
+  html += htmlEscape(g_settings.wifi_ssid);
+  html += "'></label>";
+  html += "<label>Password<input name='pass' maxlength='63' value='";
+  html += htmlEscape(g_settings.wifi_pass);
+  html += "'></label>";
+  sendChunkIfBig(html);
+
+  html += "<h3>Radio</h3><label>Region<select name='region'>";
+  for (size_t i = 0; i < (sizeof(kRegionPresets) / sizeof(kRegionPresets[0])); i++) {
+    html += "<option value='";
+    html += kRegionPresets[i].id;
+    html += "'";
+    if (strcmp(kRegionPresets[i].id, g_settings.region) == 0) {
+      html += " selected";
+    }
+    html += ">";
+    html += kRegionPresets[i].label;
+    html += "</option>";
+    sendChunkIfBig(html);
+  }
+  html += "</select></label>";
+  html += "<label>Frequency (MHz)<input name='freq' value='";
+  html += String(g_settings.lora_freq_mhz, 3);
+  html += "'></label>";
+  html += "<label>Bandwidth (kHz)<input name='bw' value='";
+  html += String(g_settings.lora_bw_khz, 1);
+  html += "'></label>";
+  html += "<label>Spreading factor<input name='sf' value='";
+  html += String(g_settings.lora_sf);
+  html += "'></label>";
+  html += "<label>Coding rate<input name='cr' value='";
+  html += String(g_settings.lora_cr);
+  html += "'></label>";
+  html += "<label>TX power (dBm)<input name='pwr' value='";
+  html += String(static_cast<int>(g_settings.lora_tx_power_dbm));
+  html += "'></label>";
+  sendChunkIfBig(html);
+
+  html += "<h3>Mesh</h3>";
+  html += "<label>Advert interval (minutes)<input name='adv_int_min' value='";
+  html += String(g_settings.advert_interval_minutes);
+  html += "'></label>";
+  html += "<label>Multipaths<select name='path_hash_mode'>";
+  for (uint8_t mode = 0; mode <= 2; mode++) {
+    html += "<option value='";
+    html += String(mode);
+    html += "'";
+    if (g_settings.path_hash_mode == mode) {
+      html += " selected";
+    }
+    html += ">";
+    html += String(mode + 1);
+    html += "</option>";
+  }
+  html += "</select></label>";
+  html += "<label>Multi-ACK<select name='multi_ack'>";
+  html += g_settings.multi_ack ? "<option value='1' selected>On</option><option value='0'>Off</option>"
+                               : "<option value='1'>On</option><option value='0' selected>Off</option>";
+  html += "</select></label>";
+  html += "<label>Repeater mode (higher airtime + battery use)<select name='repeater_mode'>";
+  html += g_settings.repeater_mode ? "<option value='1' selected>On</option><option value='0'>Off</option>"
+                                   : "<option value='1'>On</option><option value='0' selected>Off</option>";
+  html += "</select></label>";
+  html += "<label>Mesh region filter (blank = unfiltered)<input name='mesh_region' maxlength='31' value='";
+  html += htmlEscape(g_settings.mesh_region);
+  html += "'></label>";
+  sendChunkIfBig(html);
+
+  html += "<h3>Device</h3>";
+  html += "<label>Timezone<input name='timezone' maxlength='63' value='";
+  html += htmlEscape(g_settings.timezone);
+  html += "'></label>";
+  html += "<label>UTC offset (minutes)<input name='tz_offset' value='";
+  html += String(static_cast<int>(g_settings.timezone_offset_minutes));
+  html += "'></label>";
+  html += "<label>Screen timeout (seconds)<input name='screen_timeout_sec' value='";
+  html += String(g_settings.screen_timeout_seconds);
+  html += "'></label>";
+  html += "<label>Notifications<select name='notifications_enabled'>";
+  html += g_settings.notifications_enabled ? "<option value='1' selected>On</option><option value='0'>Off</option>"
+                                           : "<option value='1'>On</option><option value='0' selected>Off</option>";
+  html += "</select></label>";
+  html += "<label>UI mode<select name='ui_mode'>";
+  html += g_settings.ui_mode == 1 ? "<option value='0'>Dark</option><option value='1' selected>Light</option>"
+                                  : "<option value='0' selected>Dark</option><option value='1'>Light</option>";
+  html += "</select></label>";
+  html += "<label>Chat font size<select name='chat_font_size'>";
+  static const char* const kFontNames[] = {"Small", "Medium", "Large", "X-Large"};
+  for (uint8_t i = 0; i < 4; i++) {
+    html += "<option value='";
+    html += String(i);
+    html += "'";
+    if (g_settings.chat_font_size == i) {
+      html += " selected";
+    }
+    html += ">";
+    html += kFontNames[i];
+    html += "</option>";
+  }
+  html += "</select></label>";
+  html += "<button type='submit'>Save settings</button></form>";
+  sendChunk(html);
+
+  // Channels: one row per channel with its own remove form, plus an add form.
+  html += "<h3>Channels</h3>";
+  memset(g_channels_web_buf, 0, sizeof(g_channels_web_buf));
+  const int channel_count = g_mesh ? g_mesh->exportChannels(g_channels_web_buf, 40) : 0;
+  for (int i = 0; i < channel_count; i++) {
+    html += "<form method='POST' action='/lite/channels/remove'>";
+    html += "<input type='hidden' name='name' value='";
+    html += htmlEscape(g_channels_web_buf[i]);
+    html += "'><label>";
+    html += htmlEscape(g_channels_web_buf[i]);
+    html += "</label><button type='submit'>Remove</button></form>";
+    sendChunkIfBig(html);
+  }
+  html += "<form method='POST' action='/lite/channels/add'>";
+  html += "<label>Add channel name<input name='name' maxlength='31'></label>";
+  html += "<label>PSK base64 (blank = derive from name)<input name='psk'></label>";
+  html += "<button type='submit'>Add channel</button></form>";
+  sendChunk(html);
+
+  html += "<h3>Utilities</h3>";
+  html += "<form method='POST' action='/lite/advert/local'><button type='submit'>Advert (zero hop)</button></form>";
+  html += "<form method='POST' action='/lite/advert/flood'><button type='submit'>Advert (flood)</button></form>";
+  html += "<p><a href='/api/util/export'>Export config</a> &middot; ";
+  html += "<a href='/api/contacts/export.csv'>Export contacts CSV</a></p>";
+  html += "<form method='POST' action='/lite/import'>";
+  html += "<label>Paste config to import<textarea name='content' rows='6'></textarea></label>";
+  html += "<button type='submit'>Import config</button></form>";
+  html += "</body></html>";
+  sendChunk(html);
+
+  g_server.sendContent("");
+  logHeapDiag("lite page sent");
+}
+
 void handleRoot() {
+  if (webCfgUseLite()) {
+    sendLitePage();
+    return;
+  }
+
   static const char kRootPage[] PROGMEM = R"HTML(
 <!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>Plumeria Config</title>
@@ -1136,8 +1492,9 @@ button{margin-top:8px;background:#2c9bc8;border-color:#2c9bc8;font-weight:700}
 small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .tabs{display:flex;gap:8px;margin:0 0 10px;flex-wrap:wrap}.tabbtn{width:auto;min-width:120px;margin-top:0;background:#1a2b3a}.tabbtn.active{background:#2c9bc8}
 .tab{display:none}.tab.active{display:block}
-.contacts-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}
+.contacts-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:end}
 .contacts-toolbar small{align-self:center;justify-self:end}
+.contacts-toolbar button{width:auto;margin-top:0;padding:8px 12px;white-space:nowrap}
 #contacts{list-style:none;padding-left:0;margin:10px 0 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;align-items:start}
 #contacts li{display:flex;flex-direction:column;gap:8px;border:1px solid #2a435d;border-radius:8px;background:#0f1a28;padding:10px}
 #contacts li.active{border-color:#2c9bc8;box-shadow:0 0 0 1px rgba(44,155,200,.35) inset}
@@ -1264,6 +1621,7 @@ small{color:#9bb1c5}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 <section><h3>Contacts</h3>
 <div class='contacts-toolbar'>
 <label style='margin-top:0'>Filter by name<input id='contacts_filter' type='text' placeholder='Type part of a contact name'></label>
+<button type='button' onclick='exportContactsCsv()'>Export CSV</button>
 <small id='contacts_meta'>No contacts loaded.</small>
 </div>
 <ul id='contacts'></ul>
@@ -1427,7 +1785,7 @@ function ensureLeaflet(){return new Promise(resolve=>{if(window.L){resolve(true)
 
 async function drawMap(){const panel=document.getElementById('tab_heatmap');if(!panel||!panel.classList.contains('active'))return;const meta=document.getElementById('map_meta');const ok=await ensureLeaflet();if(!ok){if(meta)meta.textContent='Map tiles unavailable (offline).';return;}if(!map){map=L.map('map',{zoomControl:true,attributionControl:true});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);layer=L.layerGroup().addTo(map);}layer.clearLayers();const pts=[];contactsCache.forEach(c=>{if(c.ignored)return;const lat=Number(c.gps_lat),lon=Number(c.gps_lon);if(validCoord(lat,lon))pts.push({lat,lon,name:c.name||'(unnamed)',key:c.pubkey,self:false,lastmod:Number(c.lastmod||0)});});if(statusCache){const lat=Number(statusCache.node_lat),lon=Number(statusCache.node_lon);if(validCoord(lat,lon))pts.push({lat,lon,name:statusCache.node_name||'Me',key:'__self__',self:true,lastmod:0});}const nowSec=Math.floor(Date.now()/1000);pts.forEach(p=>{const age=(p.lastmod>0&&p.lastmod<4100000000)?Math.max(0,nowSec-p.lastmod):0;const intensity=p.self?1:Math.max(0.25,1-(age/(24*3600)));L.circleMarker([p.lat,p.lon],{radius:p.self?18:14,stroke:false,fillColor:p.self?'#59e4a7':'#ff9f43',fillOpacity:p.self?0.30:(0.10*intensity)}).addTo(layer);const m=L.circleMarker([p.lat,p.lon],{radius:p.self?7:6,color:p.self?'#59e4a7':'#ffc078',weight:2,fillOpacity:0.95}).addTo(layer);m.bindTooltip(p.self?'ME':p.name,{permanent:false});m.on('click',()=>{if(!p.self){selContact=p.key;renderContacts();}});});if(pts.length){map.setView([pts[0].lat,pts[0].lon],pts[0].self?13:8);}else{map.setView([0,0],2);}if(meta)meta.textContent=pts.length?('Points: '+pts.length):'No points yet.';setTimeout(()=>map.invalidateSize(false),0);}
 
-function renderContacts(){const ul=document.getElementById('contacts');const meta=document.getElementById('contacts_meta');const empty=document.getElementById('contacts_empty');if(!ul)return;ul.innerHTML='';const source=Array.isArray(contactsCache)?contactsCache:[];const filter=contactsFilter;const visible=filter.length?source.filter(c=>String(c.name||'').toLowerCase().includes(filter)):source;if(meta)meta.textContent=visible.length+' shown / '+source.length+' total';if(!visible.length){if(empty){empty.style.display='block';empty.textContent=source.length?'No contacts match the current filter.':'No contacts heard yet.';}drawMap();return;}if(empty)empty.style.display='none';visible.forEach(c=>{const li=document.createElement('li');if(selContact&&selContact===c.pubkey){li.classList.add('active');}li.onclick=(ev)=>{if(ev.target&&ev.target.tagName==='BUTTON')return;selContact=c.pubkey;renderContacts();drawMap();};const top=document.createElement('div');top.className='card-top';const name=document.createElement('div');name.className='contact-name';name.textContent=c.name||'(unnamed)';const lat=Number(c.gps_lat),lon=Number(c.gps_lon);const hasLoc=validCoord(lat,lon);const metaLine=document.createElement('div');metaLine.className='contact-meta';metaLine.textContent='Last heard: '+String(c.lastmod||0)+(hasLoc?(' | GPS: '+lat.toFixed(5)+', '+lon.toFixed(5)):' | GPS: unavailable');const keyRow=document.createElement('div');keyRow.className='key-row';const keyText=document.createElement('div');keyText.className='key-text';keyText.textContent=c.pubkey||'';const copy=document.createElement('button');copy.className='mini';copy.type='button';copy.textContent='Copy';copy.onclick=async()=>{const ok=await copyTextToClipboard(c.pubkey||'');copy.textContent=ok?'Copied':'Copy failed';setTimeout(()=>{copy.textContent='Copy';},900);};keyRow.appendChild(keyText);keyRow.appendChild(copy);top.appendChild(name);top.appendChild(metaLine);top.appendChild(keyRow);const actions=document.createElement('div');actions.className='actions';const f=document.createElement('button');f.className='mini';f.type='button';f.textContent=c.favorite?'Unfavorite':'Favorite';f.onclick=async()=>{await jpost('/api/contacts/favorite',{pubkey:c.pubkey,favorite:c.favorite?'0':'1'});await loadContacts();};const d=document.createElement('button');d.className='mini';d.type='button';d.textContent='Delete';d.onclick=async()=>{if(!confirm('Delete contact?'))return;await jpost('/api/contacts/remove',{pubkey:c.pubkey});await loadContacts();};actions.appendChild(f);actions.appendChild(d);li.appendChild(top);li.appendChild(actions);ul.appendChild(li);});if(!selContact&&visible.length){selContact=visible[0].pubkey;}drawMap();}
+function renderContacts(){const ul=document.getElementById('contacts');const meta=document.getElementById('contacts_meta');const empty=document.getElementById('contacts_empty');if(!ul)return;ul.innerHTML='';const source=Array.isArray(contactsCache)?contactsCache:[];const filter=contactsFilter;const visible=filter.length?source.filter(c=>String(c.name||'').toLowerCase().includes(filter)):source;if(meta){const lim=statusCache&&Number(statusCache.contact_limit)>0?(' / limit '+statusCache.contact_limit):'';meta.textContent=visible.length+' shown / '+source.length+' total'+lim;}if(!visible.length){if(empty){empty.style.display='block';empty.textContent=source.length?'No contacts match the current filter.':'No contacts heard yet.';}drawMap();return;}if(empty)empty.style.display='none';visible.forEach(c=>{const li=document.createElement('li');if(selContact&&selContact===c.pubkey){li.classList.add('active');}li.onclick=(ev)=>{if(ev.target&&ev.target.tagName==='BUTTON')return;selContact=c.pubkey;renderContacts();drawMap();};const top=document.createElement('div');top.className='card-top';const name=document.createElement('div');name.className='contact-name';name.textContent=c.name||'(unnamed)';const lat=Number(c.gps_lat),lon=Number(c.gps_lon);const hasLoc=validCoord(lat,lon);const metaLine=document.createElement('div');metaLine.className='contact-meta';metaLine.textContent='Last heard: '+String(c.lastmod||0)+(hasLoc?(' | GPS: '+lat.toFixed(5)+', '+lon.toFixed(5)):' | GPS: unavailable');const keyRow=document.createElement('div');keyRow.className='key-row';const keyText=document.createElement('div');keyText.className='key-text';keyText.textContent=c.pubkey||'';const copy=document.createElement('button');copy.className='mini';copy.type='button';copy.textContent='Copy';copy.onclick=async()=>{const ok=await copyTextToClipboard(c.pubkey||'');copy.textContent=ok?'Copied':'Copy failed';setTimeout(()=>{copy.textContent='Copy';},900);};keyRow.appendChild(keyText);keyRow.appendChild(copy);top.appendChild(name);top.appendChild(metaLine);top.appendChild(keyRow);const actions=document.createElement('div');actions.className='actions';const f=document.createElement('button');f.className='mini';f.type='button';f.textContent=c.favorite?'Unfavorite':'Favorite';f.onclick=async()=>{await jpost('/api/contacts/favorite',{pubkey:c.pubkey,favorite:c.favorite?'0':'1'});await loadContacts();};const d=document.createElement('button');d.className='mini';d.type='button';d.textContent='Delete';d.onclick=async()=>{if(!confirm('Delete contact?'))return;await jpost('/api/contacts/remove',{pubkey:c.pubkey});await loadContacts();};actions.appendChild(f);actions.appendChild(d);li.appendChild(top);li.appendChild(actions);ul.appendChild(li);});if(!selContact&&visible.length){selContact=visible[0].pubkey;}drawMap();}
 
 async function loadContacts(){const c=await jget('/api/contacts');contactsCache=Array.isArray(c.contacts)?c.contacts:[];contactsCache.sort((a,b)=>{if(!!a.favorite!==!!b.favorite)return a.favorite?-1:1;return Number(b.lastmod||0)-Number(a.lastmod||0);});renderContacts();}
 
@@ -1438,6 +1796,7 @@ async function saveAll(){const tz=document.getElementById('timezone').value;cons
 async function utilAdvertLocal(){const r=await jpost('/api/util/advert/local',{});alert((r&&r.message)||((r&&r.error)||'done'));}
 async function utilAdvertFlood(){const r=await jpost('/api/util/advert/flood',{});alert((r&&r.message)||((r&&r.error)||'done'));}
 function utilExportConfig(){window.location='/api/util/export';}
+function exportContactsCsv(){window.location='/api/contacts/export.csv';}
 async function utilImportConfig(){const status=document.getElementById('util_status');const input=document.getElementById('util_cfg_file');if(!input||!input.files||input.files.length===0){if(status)status.textContent='Choose a config file first.';return;}const file=input.files[0];const text=await file.text();const r=await jpost('/api/util/import',{content:text});if(status)status.textContent=(r&&r.message)?r.message:((r&&r.error)||'done');}
 
 async function boot(){try{await loadPresets();bindDirtyTracking();bindContactsFilter();await loadStatus(true);await loadChannels();await loadContacts();setInterval(()=>{loadStatus(false);loadContacts();},5000);}catch(e){document.getElementById('meta').textContent='UI init failed: '+e;}}
@@ -1736,6 +2095,14 @@ void handleStatus() {
   payload += String(static_cast<unsigned>(g_settings.chat_font_size));
   payload += ",\"chat_style_colors\":";
   payload += g_settings.chat_style_colors ? "true" : "false";
+  payload += ",\"contact_count\":";
+  payload += String(g_mesh ? g_mesh->contactCount() : 0);
+  payload += ",\"contact_limit\":";
+  payload += String(g_mesh ? g_mesh->contactLimit() : 0);
+  payload += ",\"contacts_evicted\":";
+  payload += String(g_mesh ? g_mesh->contactsEvictedCount() : 0);
+  payload += ",\"contacts_rejected\":";
+  payload += String(g_mesh ? g_mesh->contactsRejectedCount() : 0);
   payload += ",\"rx_raw\":";
   payload += String(radio_stats.rx_raw_count);
   payload += ",\"rx_pkt\":";
@@ -1796,7 +2163,12 @@ void handleChannels() {
   sendJsonOk(payload);
 }
 
+// Streamed rather than accumulated: this is the one JSON response whose size
+// scales with stored data (up to the contact limit), and a single multi-KB
+// String needs a contiguous allocation AP-mode heap cannot give.
 void handleContacts() {
+  g_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  g_server.send(200, "application/json", "");
   String payload = "{\"ok\":true,\"contacts\":[";
   if (g_mesh) {
     memset(g_contacts_web_buf, 0, sizeof(g_contacts_web_buf));
@@ -1828,6 +2200,8 @@ void handleContacts() {
       payload += String(static_cast<unsigned>(g_contacts_web_buf[i].type));
       payload += ",\"lastmod\":";
       payload += String(g_contacts_web_buf[i].lastmod);
+      payload += ",\"first_seen\":";
+      payload += String(g_contacts_web_buf[i].first_seen);
       payload += ",\"gps_lat_i\":";
       payload += String(g_contacts_web_buf[i].gps_lat_i);
       payload += ",\"gps_lon_i\":";
@@ -1837,10 +2211,104 @@ void handleContacts() {
       payload += ",\"gps_lon\":";
       payload += String(static_cast<double>(g_contacts_web_buf[i].gps_lon_i) / 10000000.0, 7);
       payload += "}";
+      sendChunkIfBig(payload);
     }
   }
   payload += "]}";
-  sendJsonOk(payload);
+  sendChunk(payload);
+  g_server.sendContent("");
+}
+
+// Appends one CSV field (escaped) plus its separator or line ending.
+void appendCsvField(String& row, const char* value, bool last) {
+  char escaped[80] = {};
+  if (plumeria::web::csvEscapeField(value, escaped, sizeof(escaped)) == 0 && value && value[0] != '\0') {
+    // Value did not fit the escape buffer: emit a quoted, truncated copy.
+    char clipped[40] = {};
+    copyString(clipped, sizeof(clipped), value);
+    plumeria::web::csvEscapeField(clipped, escaped, sizeof(escaped));
+  }
+  row += escaped;
+  row += last ? "\r\n" : ",";
+}
+
+void appendCsvNumber(String& row, uint32_t value, bool last) {
+  row += String(value);
+  row += last ? "\r\n" : ",";
+}
+
+// Epoch seconds -> "YYYY-MM-DD HH:MM:SS" (UTC), empty when the stamp is unset.
+void formatCsvTimestamp(uint32_t epoch, char* out, size_t out_size) {
+  if (!out || out_size == 0) {
+    return;
+  }
+  out[0] = '\0';
+  if (epoch == 0) {
+    return;
+  }
+  const time_t when = static_cast<time_t>(epoch);
+  struct tm parts{};
+  if (!gmtime_r(&when, &parts)) {
+    return;
+  }
+  strftime(out, out_size, "%Y-%m-%d %H:%M:%S", &parts);
+}
+
+void handleContactsExportCsv() {
+  if (!g_mesh) {
+    sendJsonError("Mesh adapter unavailable", 503);
+    return;
+  }
+
+  memset(g_contacts_web_buf, 0, sizeof(g_contacts_web_buf));
+  const int count = g_mesh->exportContacts(g_contacts_web_buf, 160);
+
+  for (int i = 1; i < count; i++) {
+    plumeria::mesh::MeshContactSummary key = g_contacts_web_buf[i];
+    int j = i - 1;
+    while (j >= 0 && contactSortBefore(key, g_contacts_web_buf[j])) {
+      g_contacts_web_buf[j + 1] = g_contacts_web_buf[j];
+      j--;
+    }
+    g_contacts_web_buf[j + 1] = key;
+  }
+
+  g_server.sendHeader("Content-Disposition", "attachment; filename=plumeria-contacts.csv");
+  g_server.sendHeader("Cache-Control", "no-store");
+  g_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  g_server.send(200, "text/csv; charset=utf-8", "");
+  g_server.sendContent(
+      "name,public_key,type,favorite,ignored,first_seen,first_seen_utc,last_seen,last_seen_utc,gps_lat,gps_lon\r\n");
+
+  char stamp[24] = {};
+  for (int i = 0; i < count; i++) {
+    const plumeria::mesh::MeshContactSummary& contact = g_contacts_web_buf[i];
+    if (contact.public_key_hex[0] == '\0') {
+      continue;
+    }
+
+    String row;
+    row.reserve(192);
+    appendCsvField(row, contact.name, false);
+    appendCsvField(row, contact.public_key_hex, false);
+    appendCsvField(row, contact.type == kContactTypeRepeater ? "repeater" : "contact", false);
+    appendCsvField(row, contact.favorite ? "1" : "0", false);
+    appendCsvField(row, contact.ignored ? "1" : "0", false);
+    appendCsvNumber(row, contact.first_seen, false);
+    formatCsvTimestamp(contact.first_seen, stamp, sizeof(stamp));
+    appendCsvField(row, stamp, false);
+    appendCsvNumber(row, contact.lastmod, false);
+    formatCsvTimestamp(contact.lastmod, stamp, sizeof(stamp));
+    appendCsvField(row, stamp, false);
+    row += String(static_cast<double>(contact.gps_lat_i) / 10000000.0, 7);
+    row += ",";
+    row += String(static_cast<double>(contact.gps_lon_i) / 10000000.0, 7);
+    row += "\r\n";
+
+    g_server.sendContent(row);
+  }
+
+  g_server.sendContent("");
 }
 
 void handleContactFavorite() {
@@ -2002,11 +2470,9 @@ void handleSaveAll() {
   chat_font_size_str.trim();
   chat_style_colors_str.trim();
 
-  if (ssid.length() == 0) {
-    sendJsonError("SSID is required");
-    return;
-  }
-
+  // An empty SSID is allowed and means "no WiFi configured" — the same thing
+  // skipping the WiFi step during onboarding does. Requiring one here would
+  // leave an AP-mode node with no reachable network unable to save any setting.
   if (timezone.length() == 0) {
     timezone = kDefaultTimezone;
   }
@@ -2310,6 +2776,7 @@ void registerRoutes() {
   g_server.on("/api/presets", HTTP_GET, handlePresets);
   g_server.on("/api/channels", HTTP_GET, handleChannels);
   g_server.on("/api/contacts", HTTP_GET, handleContacts);
+  g_server.on("/api/contacts/export.csv", HTTP_GET, handleContactsExportCsv);
 
   g_server.on("/api/save", HTTP_POST, handleSaveAll);
   g_server.on("/api/channels/add", HTTP_POST, handleChannelAdd);
@@ -2319,6 +2786,22 @@ void registerRoutes() {
   g_server.on("/api/util/advert/local", HTTP_POST, handleUtilAdvertLocal);
   g_server.on("/api/util/advert/flood", HTTP_POST, handleUtilAdvertFlood);
   g_server.on("/api/util/export", HTTP_GET, handleUtilExportConfig);
+
+  // Lite (no-JavaScript) form posts. Each one delegates to the same handler the
+  // JSON API uses; only the reply format differs.
+  auto lite_form = [](void (*handler)()) {
+    return [handler]() {
+      g_html_reply = true;
+      handler();
+      g_html_reply = false;
+    };
+  };
+  g_server.on("/save", HTTP_POST, lite_form(handleSaveAll));
+  g_server.on("/lite/channels/add", HTTP_POST, lite_form(handleChannelAdd));
+  g_server.on("/lite/channels/remove", HTTP_POST, lite_form(handleChannelRemove));
+  g_server.on("/lite/advert/local", HTTP_POST, lite_form(handleUtilAdvertLocal));
+  g_server.on("/lite/advert/flood", HTTP_POST, lite_form(handleUtilAdvertFlood));
+  g_server.on("/lite/import", HTTP_POST, lite_form(handleUtilImportConfig));
   g_server.on("/api/util/import", HTTP_POST, handleUtilImportConfig);
 
   g_server.onNotFound([]() {
@@ -2603,6 +3086,9 @@ void loop() {
   if (!g_running) {
     return;
   }
+  if (g_captive_active) {
+    g_dns.processNextRequest();
+  }
   if (g_server_enabled) {
     g_server.handleClient();
   }
@@ -2621,6 +3107,11 @@ void end() {
     g_server.stop();
     g_server_enabled = false;
   }
+  if (g_captive_active) {
+    g_dns.stop();
+    g_captive_active = false;
+  }
+  g_ap_mode = false;
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   g_mode[0] = '\0';
