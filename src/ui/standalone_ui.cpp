@@ -332,6 +332,7 @@ const char* kHelpBodyText =
   "l = Live feed\n"
   "c = Config (main), Contact list (in Contacts)\n"
   "o = Contacts\n"
+  "Space = Compose (main screen or DM)\n"
   "m = Compose to current room\n"
   "z = Advert zero-hop\n"
   "f = Advert flood\n"
@@ -346,6 +347,7 @@ const char* kCfgRowLabels[] = {
   "Node Name",
   "Radio Preset",
   "Web Config",
+  "WiFi",
   "GPS",
   "OTA Update",
   "Multipaths",
@@ -2144,9 +2146,10 @@ uint8_t StandaloneUi::getOrCreateContactColorSlot(const char* identity) {
     }
   }
 
-  const uint32_t mix =
-      stableTextHash(normalized) ^ static_cast<uint32_t>(millis()) ^ nowEpochSecondsOrZero();
-  uint8_t slot = static_cast<uint8_t>(mix % kContactColorPaletteCount);
+  // Derived from the identity only: mixing in millis()/the clock made a
+  // contact's color depend on when it was first seen, so it changed whenever the
+  // persisted table was lost, full, or not yet loaded.
+  uint8_t slot = static_cast<uint8_t>(stableTextHash(normalized) % kContactColorPaletteCount);
 
   if (contact_color_count_ < kContactColorPaletteCount) {
     bool used[kContactColorPaletteCount] = {false};
@@ -2175,6 +2178,62 @@ uint8_t StandaloneUi::getOrCreateContactColorSlot(const char* identity) {
 
   // Fallback when the contact-color table is full.
   return static_cast<uint8_t>(stableTextHash(normalized) % kContactColorPaletteCount);
+}
+
+// The DM views key colors by public key, while channel chat only knows the
+// display name it parsed out of the line. Without linking the two, the same
+// person gets two table entries and two different colors. Callers that know
+// both forms register the pair here.
+void StandaloneUi::linkContactColorAlias(const char* primary, const char* alias) {
+  if (kContactColorPaletteCount == 0 || !primary || !alias) {
+    return;
+  }
+
+  char primary_norm[65] = {};
+  char alias_norm[65] = {};
+  normalizeContactColorIdentity(primary, primary_norm, sizeof(primary_norm));
+  normalizeContactColorIdentity(alias, alias_norm, sizeof(alias_norm));
+  if (primary_norm[0] == '\0' || alias_norm[0] == '\0' || strcmp(primary_norm, alias_norm) == 0) {
+    return;
+  }
+
+  // Whichever side already has a slot wins, so linking never repaints a
+  // conversation the user has already seen. Only a genuinely new identity is
+  // given the other's color.
+  int primary_idx = -1;
+  int alias_idx = -1;
+  for (size_t i = 0; i < contact_color_count_; i++) {
+    if (primary_idx < 0 && strcmp(contact_color_entries_[i].identity, primary_norm) == 0) {
+      primary_idx = static_cast<int>(i);
+    }
+    if (alias_idx < 0 && strcmp(contact_color_entries_[i].identity, alias_norm) == 0) {
+      alias_idx = static_cast<int>(i);
+    }
+  }
+
+  if (primary_idx >= 0 && alias_idx >= 0) {
+    return;  // both already shown; leave both alone
+  }
+
+  const uint8_t slot = (alias_idx >= 0)
+                           ? contact_color_entries_[alias_idx].slot
+                           : getOrCreateContactColorSlot(primary_norm);
+  const char* missing = (alias_idx >= 0) ? primary_norm : alias_norm;
+
+  // getOrCreateContactColorSlot() may already have inserted the primary above.
+  for (size_t i = 0; i < contact_color_count_; i++) {
+    if (strcmp(contact_color_entries_[i].identity, missing) == 0) {
+      return;
+    }
+  }
+
+  if (contact_color_count_ < kMaxContactColorEntries) {
+    ContactColorEntry& entry = contact_color_entries_[contact_color_count_++];
+    strncpy(entry.identity, missing, sizeof(entry.identity) - 1);
+    entry.identity[sizeof(entry.identity) - 1] = '\0';
+    entry.slot = slot;
+    contact_colors_dirty_ = true;
+  }
 }
 
 void StandaloneUi::rebuildChatViewsForRenderSettingChange() {
@@ -4106,7 +4165,7 @@ bool StandaloneUi::ensureContactsDialogBuilt() {
     lv_obj_set_width(contacts_dm_hint_label_, LV_PCT(100));
     lv_label_set_long_mode(contacts_dm_hint_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(contacts_dm_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(contacts_dm_hint_label_, "Enter for new message, c to clear messages");
+    lv_label_set_text(contacts_dm_hint_label_, "Space for new message, c to clear messages");
     lv_obj_align(contacts_dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
     lv_obj_add_flag(contacts_dm_hint_label_, LV_OBJ_FLAG_HIDDEN);
 
@@ -4680,7 +4739,7 @@ void StandaloneUi::buildLayout() {
   lv_obj_set_width(dm_hint_label_, LV_PCT(100));
   lv_label_set_long_mode(dm_hint_label_, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(dm_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_text(dm_hint_label_, "Enter for new message, c to clear messages");
+  lv_label_set_text(dm_hint_label_, "Space for new message, c to clear messages");
   lv_obj_align(dm_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
 
   dm_panel_ = lv_obj_create(dm_dialog_);
@@ -6800,6 +6859,7 @@ void StandaloneUi::rebuildContactsDmPanel() {
     char display_line[112] = {};
     formatDmDisplayLine(line.text, line.timestamp_epoch, display_line, sizeof(display_line));
     const char* line_identity = line.contact_key[0] != '\0' ? line.contact_key : line.contact_name;
+    linkContactColorAlias(line_identity, line.contact_name);
     createChatRenderableRow(contacts_dm_panel_, row_w, display_line, line.kind, true, line_identity);
   }
 
@@ -10510,6 +10570,7 @@ void StandaloneUi::appendDmLine(const char* contact_name, const char* contact_ke
   ensure_capacity();
 
   const char* dm_identity = (contact_key && contact_key[0] != '\0') ? contact_key : contact_name;
+  linkContactColorAlias(dm_identity, contact_name);
   lv_obj_t* row = createChatRenderableRow(dm_panel_, row_w, text, kind, true, dm_identity);
   if (row) {
     dm_rows_[dm_row_count_++] = row;
@@ -10616,6 +10677,7 @@ void StandaloneUi::rebuildDmDialog() {
     }
 
     const char* line_identity = line.contact_key[0] != '\0' ? line.contact_key : line.contact_name;
+    linkContactColorAlias(line_identity, line.contact_name);
     lv_obj_t* row = createChatRenderableRow(dm_panel_, row_w, display_line, line.kind, true, line_identity);
     if (row) {
       dm_rows_[dm_row_count_++] = row;
@@ -12067,8 +12129,10 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
-  // Global shortcut: open compose from any non-compose screen.
-  if (!cfg_open_ && !contacts_open_ && !dm_open_ && kKeyboardNavEnabled && norm_key == 'm') {
+  // Space (primary) or m opens compose from any non-compose screen. Enter no
+  // longer does: it kept firing while reading chat/DMs.
+  if (!cfg_open_ && !contacts_open_ && !dm_open_ && !admin_pw_open_ && !admin_cmd_open_ &&
+      !admin_screen_open_ && kKeyboardNavEnabled && (norm_key == ' ' || norm_key == 'm')) {
     setFocusZone(FocusZone::Chat);
     openComposeDialog();
     return;
@@ -12129,7 +12193,8 @@ void StandaloneUi::handleKey(uint32_t key) {
       clearActiveDmConversation(false);
       return;
     }
-    if (focused == dm_new_btn_ && (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r')) {
+    if (focused == dm_new_btn_ &&
+        (norm_key == ' ' || norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r')) {
       compose_dm_mode_ = true;
       compose_return_to_dm_ = true;
       strncpy(compose_target_dm_pubkey_, dm_active_key_, sizeof(compose_target_dm_pubkey_) - 1);
@@ -12144,7 +12209,7 @@ void StandaloneUi::handleKey(uint32_t key) {
       closeDmDialog(false);
       return;
     }
-    if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+    if (norm_key == ' ') {
       compose_dm_mode_ = true;
       compose_return_to_dm_ = true;
       strncpy(compose_target_dm_pubkey_, dm_active_key_, sizeof(compose_target_dm_pubkey_) - 1);
@@ -12430,7 +12495,7 @@ void StandaloneUi::handleKey(uint32_t key) {
     }
 
     if (contacts_dm_open_) {
-      if (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r') {
+      if (norm_key == ' ') {
         startComposeForSelectedContact();
         return;
       }
@@ -12543,7 +12608,8 @@ void StandaloneUi::handleKey(uint32_t key) {
     return;
   }
 
-  if (focused == chat_new_btn_ && (norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r')) {
+  if (focused == chat_new_btn_ &&
+      (norm_key == ' ' || norm_key == LV_KEY_ENTER || norm_key == '\n' || norm_key == '\r')) {
     compose_dm_mode_ = false;
     compose_return_to_dm_ = false;
     setFocusZone(FocusZone::Chat);
@@ -12593,9 +12659,8 @@ void StandaloneUi::handleKey(uint32_t key) {
         } else {
           openChannelDropdown();
         }
-      } else if (focus_zone_ == FocusZone::Chat || chat_focused) {
-        openComposeDialog();
       }
+      // Chat zone deliberately does nothing on Enter: Space opens compose.
       return;
     case 'j':
       if (kKeyboardNavEnabled && (focus_zone_ == FocusZone::Chat || chat_focused)) {

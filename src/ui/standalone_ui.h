@@ -240,6 +240,9 @@ class StandaloneUi {
   const lv_font_t* chatConversationFont() const;
   lv_color_t contactChatColorForIdentity(const char* identity);
   uint8_t getOrCreateContactColorSlot(const char* identity);
+  // Points `alias` (e.g. a display name) at the same palette slot as `primary`
+  // (e.g. a public key), so one contact keeps one color across every view.
+  void linkContactColorAlias(const char* primary, const char* alias);
   bool loadChatContactColorsFromFs();
   bool saveChatContactColorsToFs();
   lv_obj_t* createChatRenderableRow(lv_obj_t* panel, lv_coord_t row_w, const char* text,

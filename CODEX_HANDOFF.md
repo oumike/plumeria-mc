@@ -281,3 +281,34 @@ isn't set up yet" default page and every `/firmware/*` request 404'd, which is t
 Diagnosing OTA 404s: `curl -i http://ota.plumeria.sumat.org/firmware/latest`. An openresty HTML 404
 means the proxy answered locally (host/config missing); a GitHub JSON `{"message":"Not Found"}` means
 the proxy works and the release or asset name is wrong.
+
+---
+
+# Space opens compose; per-contact chat colors (issues #5, #3 follow-up)
+
+**Space, not Enter** (`standalone_ui.cpp`, `handleKey`). The global compose shortcut now fires on
+`' '` as well as `m`, and additionally excludes the admin screens (`admin_pw_open_`,
+`admin_cmd_open_`, `admin_screen_open_`) — those blocks sit *after* the shortcut in `handleKey`, so
+space would otherwise have hijacked them. Enter no longer opens compose from the chat zone or the DM
+body. Enter *is* still accepted on the explicitly focused `chat_new_btn_` / `dm_new_btn_` (that is
+button activation, not a view-level shortcut) — both now take Space too. Hint labels and
+`kHelpBodyText` updated.
+
+**Bugfix found while there:** `kCfgRowLabels[]` still had 17 entries after the WiFi config row pushed
+`kCfgRowCount` to 18, so the row-creation loop read one past the end. Added "WiFi" at index 3. Keep
+that array in sync with the `kCfgRow*` constants.
+
+**Contact colors.** Two defects made colors look random rather than per-contact:
+
+1. `getOrCreateContactColorSlot()` derived the initial slot from
+   `stableTextHash(id) ^ millis() ^ nowEpochSecondsOrZero()` — the color depended on *when* a contact
+   was first rendered, so it changed whenever the persisted table was lost, full (the >96 fallback
+   uses a plain hash), or not yet loaded. Now derived from the identity hash alone.
+2. The DM views key colors by **public key**; the main chat panel passes no identity, so it falls back
+   to the **display name** parsed out of the line. Same person, two table entries, two colors.
+   `linkContactColorAlias(primary, alias)` now registers the key/name pair from the three DM render
+   paths. Rule: whichever identity already has a slot wins, so linking never repaints a conversation
+   already on screen; only a new identity adopts the other's color.
+
+Note both entries share the 96-slot table, so a DM contact costs two entries. Existing persisted
+slots are left as-is, so colors assigned before this change do not move.
